@@ -3909,38 +3909,49 @@ public class MainActivity extends Activity {
 
     /** DS2API 网关面板：应用内嵌 WebView 打开 http://127.0.0.1:5001/admin/ 管理页
      *  （无需额外安装 DS2API App；若服务未启动则显示提示）。 */
+    /** DS2API 网关（最简化实现）：状态 + 启动/停止 + 管理台入口三项，去除内嵌 WebView。 */
     private void showDs2ApiDialog() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(16);
         panel.setPadding(pad, dp(8), pad, dp(12));
-        panel.addView(createDarkTip("DS2API 网关：本地 OpenAI/Claude 兼容 API 中转服务（已内置）。\n"
-                + "应用启动时会在 Linux 环境中自动后台运行 DS2API 服务（127.0.0.1:5001），\n"
-                + "下方为管理页面（初始管理密钥 rsxm-ds2api-admin，首次保存配置后持久化到 /root/ds2api/config.json）。\n"
-                + "若检测到旧版 DS2API App 已占用 5001 端口，内置服务不重复启动，面板仍打开旧服务。"));
 
-        // 服务控制：启动 / 停止（经 guest .adb-cmd 桥执行，操作后自动刷新管理页）
-        // WebView 声明在下方，用 holder 数组跨作用域引用（final 局部变量限制）
-        final WebView[] ds2WebBox = new WebView[1];
-        LinearLayout ctrlRow = new LinearLayout(this);
-        ctrlRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button startBtn = createDarkButton("启动 DS2API");
-        Button stopBtn = createDarkButton("停止 DS2API");
-        LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        btnLp.rightMargin = dp(8);
-        ctrlRow.addView(startBtn, btnLp);
-        ctrlRow.addView(stopBtn, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        addV(panel, ctrlRow, 6);
+        panel.addView(createDarkTip("DS2API 网关（本地 OpenAI/Claude 兼容中转，已内置）\n"
+                + "环境启动时自动后台运行于 127.0.0.1:5001，管理密钥 rsxm-ds2api-admin。"));
 
+        // 状态行：实时探测 guest 内 ds2api 进程
+        final TextView status = createDarkResult();
+        status.setMaxLines(3);
+        addV(panel, status, 8);
+        final Runnable refresh = new Runnable() {
+            @Override public void run() {
+                new Thread(() -> {
+                    String out = executeInGuest(
+                            "pgrep -x ds2api >/dev/null 2>&1 && echo RUNNING || echo NOT_RUNNING", 6);
+                    boolean run = out.contains("RUNNING");
+                    runOnUiThread(() -> status.setText(run
+                            ? "● 运行中：127.0.0.1:5001  管理台 /admin/"
+                            : "○ 未运行（环境启动时自动拉起，或手动启动）"));
+                }, "ds2-status").start();
+            }
+        };
+        refresh.run();
 
-        // 启动：guest 内后台拉起内置服务（与 entry.sh 启动段同参数）
+        // 启动 / 停止
+        LinearLayout ctrl = new LinearLayout(this);
+        ctrl.setOrientation(LinearLayout.HORIZONTAL);
+        Button startBtn = createDarkButton("启动");
+        Button stopBtn = createDarkButton("停止");
+        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bl.rightMargin = dp(8);
+        ctrl.addView(startBtn, bl);
+        ctrl.addView(stopBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        addV(panel, ctrl, 10);
+
         startBtn.setOnClickListener(v -> {
             startBtn.setEnabled(false);
             new Thread(() -> {
-                String out = executeInGuest(
-                        // 先强清残留（含优雅关闭中未退出的进程），确保干净启动
+                executeInGuest(
                         "mkdir -p /root/ds2api && pkill -9 -x ds2api 2>/dev/null; sleep 0.5; "
                         + "if pgrep -x ds2api >/dev/null 2>&1; then echo ALREADY_RUNNING; else "
                         + "cd /root/ds2api && export HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
@@ -3949,70 +3960,28 @@ public class MainActivity extends Activity {
                         + "PORT=5001 DS2API_ADMIN_KEY=rsxm-ds2api-admin DS2API_STATIC_ADMIN_DIR=/usr/local/ds2api/static/admin DS2API_CONFIG_PATH=/root/ds2api/config.json && "
                         + "nohup /usr/local/ds2api/ds2api >/root/ds2api/ds2api.log 2>&1 & echo STARTED; fi", 8);
                 runOnUiThread(() -> {
-                    boolean ok = out.contains("STARTED") || out.contains("ALREADY_RUNNING");
-                    showToast(ok ? "DS2API 已启动" : "DS2API 启动失败：" + out);
                     startBtn.setEnabled(true);
-                    if (ok) ds2WebBox[0].reload();
+                    refresh.run();
                 });
             }, "ds2-start").start();
         });
 
-        // 停止：杀掉内置服务进程（环境重启后 entry.sh 会自动再拉起）
         stopBtn.setOnClickListener(v -> {
             stopBtn.setEnabled(false);
             new Thread(() -> {
-                // SIGTERM 优雅关闭；ds2api 主进程对 SIGTERM 做优雅退出（srv.Shutdown 最多 10s+等活跃连接），
-                // 因此 pkill 发信号后立即返回不代表已退出——先等 1s，仍存活则 SIGKILL 强杀兜底，
-                // 最后用 pgrep 确认真正退出才算 STOPPED（否则面板显示"已停止"但进程还在优雅关闭中）。
-                String out = executeInGuest(
+                executeInGuest(
                         "pkill -x ds2api 2>/dev/null; sleep 1; "
                         + "if pgrep -x ds2api >/dev/null 2>&1; then pkill -9 -x ds2api 2>/dev/null; sleep 0.5; fi; "
-                        + "if pgrep -x ds2api >/dev/null 2>&1; then echo STILL_RUNNING; else echo STOPPED; fi", 15);
+                        + "pgrep -x ds2api >/dev/null 2>&1 && echo STILL_RUNNING || echo STOPPED", 15);
                 runOnUiThread(() -> {
-                    boolean stopped = out.contains("STOPPED");
-                    showToast(stopped ? "DS2API 已停止"
-                        : (out.contains("STILL_RUNNING") ? "DS2API 停止失败：进程仍在运行"
-                        : "DS2API 停止失败：" + out));
                     stopBtn.setEnabled(true);
-                    if (stopped) ds2WebBox[0].reload();
+                    refresh.run();
                 });
             }, "ds2-stop").start();
         });
 
-        // 内嵌 WebView 加载 DS2API 管理页
-        WebView ds2Web = new WebView(this);
-        ds2WebBox[0] = ds2Web;   // 供上方按钮线程跨作用域引用（reload）
-        WebSettings ws = ds2Web.getSettings();
-        ws.setJavaScriptEnabled(true);
-        ws.setDomStorageEnabled(true);
-        ws.setAllowFileAccess(false);
-        ws.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        ds2Web.setBackgroundColor(0xFF000000);
-        ds2Web.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
-                // 服务可能还在启动中（entry.sh 后台拉起需数秒）或已停止——显示中文提示，
-                // 并延迟自动重载：内置服务就绪后页面自动恢复，避免首秒误报"服务未运行"。
-                view.loadDataWithBaseURL(null,
-                        "<html><body style='background:#111;color:#aaa;font-family:sans-serif;padding:20px'>"
-                                + "<h3 style='color:#f77'>DS2API 服务启动中</h3>"
-                                + "<p>内置 DS2API 服务正在后台启动（127.0.0.1:5001），请稍候，"
-                                + "页面将自动刷新…若持续显示此页，请点上方「停止」后再「启动」。</p></body></html>",
-                        "text/html", "utf-8", null);
-                // 2.5s 后自动重载（服务就绪后自动恢复管理页）
-                view.postDelayed(() -> {
-                    try { view.reload(); } catch (Exception ignored) {}
-                }, 2500);
-            }
-        });
-        ds2Web.loadUrl("http://127.0.0.1:5001/admin/");
-        LinearLayout.LayoutParams webLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(420));
-        webLp.topMargin = dp(8);
-        panel.addView(ds2Web, webLp);
-
-        // 打开系统浏览器按钮（备用）
-        Button openBtn = createDarkButton("在系统浏览器打开");
+        // 管理台：系统浏览器打开（替代内嵌 WebView，最简化）
+        Button openBtn = createDarkButton("打开管理台（浏览器）");
         openBtn.setOnClickListener(v -> {
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("http://127.0.0.1:5001/admin/")));
@@ -4020,7 +3989,7 @@ public class MainActivity extends Activity {
                 Log.w(TAG, "open ds2api browser failed", e);
             }
         });
-        addV(panel, openBtn, 12);
+        addV(panel, openBtn, 10);
 
         showPanel("DS2API 网关", panel, null);
     }

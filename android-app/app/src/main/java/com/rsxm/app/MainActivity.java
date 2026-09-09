@@ -63,6 +63,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.json.JSONObject;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.util.zip.GZIPInputStream;
 
 import androidx.core.view.GravityCompat;
@@ -285,6 +287,7 @@ public class MainActivity extends Activity {
 
         // 主屏快捷入口行：一键直达常用面板，减少对侧滑栏的依赖
         findViewById(R.id.qb_github).setOnClickListener(v -> showGitHubDialog());
+        findViewById(R.id.qb_view).setOnClickListener(v -> toggleNativeView());
         findViewById(R.id.qb_adb).setOnClickListener(v -> showAdbDialog());
         findViewById(R.id.qb_apikey).setOnClickListener(v -> showApiKeyConfigDialog());
         findViewById(R.id.qb_ds2api).setOnClickListener(v -> showDs2ApiDialog());
@@ -296,6 +299,20 @@ public class MainActivity extends Activity {
         findViewById(R.id.qb_dev).setOnClickListener(v -> showDevEnvDialog());
         findViewById(R.id.qb_keys).setOnClickListener(v -> toggleKeysToolbar());
         findViewById(R.id.qb_root).setOnClickListener(v -> showRootDialog());
+
+        // 原生会话视图：发送按钮 + 输入框回车发送
+        findViewById(R.id.native_send).setOnClickListener(v -> sendNativeInput());
+        EditText nativeInput = findViewById(R.id.native_input);
+        if (nativeInput != null) {
+            nativeInput.setOnEditorActionListener((v, actionId, event) -> {
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+                        || (event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER)) {
+                    sendNativeInput();
+                    return true;
+                }
+                return false;
+            });
+        }
 
         // 全屏功能面板：返回按钮关闭（系统返回键同样生效）
         findViewById(R.id.panel_back).setOnClickListener(v -> hidePanel());
@@ -4917,16 +4934,28 @@ public class MainActivity extends Activity {
         startEnvReader(sProotProcess);
     }
 
-    /** 启动环境输出 reader：把进程 stdout 转发到终端（proot/chroot 共用） */
+    /** 启动环境输出 reader：把进程 stdout 转发到终端（proot/chroot 共用）。
+     *  用 CharsetDecoder 增量解码：按块 new String(buf,0,n,UTF_8) 会把多字节 UTF-8
+     *  字符在块边界截断成 U+FFFD 乱码（中文/emoji 显示混乱的根本原因）。 */
     private void startEnvReader(Process p) {
         // reader 绑定启动时刻的进程（局部捕获），避免重启环境后读到新进程的流
         Thread reader = new Thread(() -> {
             try (InputStream in = p.getInputStream()) {
+                java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
                 byte[] buf = new byte[8192];
                 int n;
                 while ((n = in.read(buf)) > 0) {
-                    pushOutput(new String(buf, 0, n, StandardCharsets.UTF_8));
+                    ByteBuffer bb = ByteBuffer.wrap(buf, 0, n);
+                    CharBuffer cb = dec.decode(bb);
+                    pushOutput(cb.toString());
                 }
+                // 冲刷解码器残留（流结束时补出末尾字符）
+                try {
+                    CharBuffer tail = dec.decode(ByteBuffer.allocate(0));
+                    if (tail.length() > 0) pushOutput(tail.toString());
+                } catch (Exception ignored) {}
             } catch (IOException e) {
                 Log.w(TAG, "reader ended", e);
             }
@@ -4959,11 +4988,19 @@ public class MainActivity extends Activity {
     private void runCmd(String... cmd) throws IOException {
         Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
         try (InputStream in = p.getInputStream()) {
+            java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
             byte[] buf = new byte[4096];
             int n;
             while ((n = in.read(buf)) > 0) {
-                pushOutput(new String(buf, 0, n, StandardCharsets.UTF_8));
+                CharBuffer cb = dec.decode(ByteBuffer.wrap(buf, 0, n));
+                pushOutput(cb.toString());
             }
+            try {
+                CharBuffer tail = dec.decode(ByteBuffer.allocate(0));
+                if (tail.length() > 0) pushOutput(tail.toString());
+            } catch (Exception ignored) {}
         }
         int code;
         try {
@@ -4989,10 +5026,23 @@ public class MainActivity extends Activity {
     private static final int FLUSH_CHUNK = 512 * 1024;               // 冲刷分块，防 WebView 卡顿
     private static volatile boolean sWebActive = true;
 
+    /** 原生会话视图（对话模式）：打开时接管显示，WebView 隐藏；关闭时还原 */
+    private volatile boolean nativeViewOn = false;
+    /** 原生视图缓冲：reasonix 输出经它整理后渲染到 native_output */
+    private volatile NativeChatView nativeChat;
+    /** 当前渲染到 native_output 的文本行数（增量追加边界） */
+    private String nativeLastRender = "";
+
     private void pushOutput(String text) {
         Log.d(TAG, "OUT> " + (text.length() > 200 ? text.substring(0, 200) : text));
         final MainActivity target = sCurrent;
         if (target == null) return;
+        // 原生视图模式：直接喂给 NativeChatView 缓冲并刷新 TextView，
+        // 不经过 WebView（避免 xterm 渲染问题与后台 JS 堆积）。
+        if (target.nativeViewOn) {
+            target.feedNativeView(text);
+            return;
+        }
         if (!sWebActive) {
             synchronized (sPendingOutput) {
                 if (sPendingOutput.length() > PENDING_OUTPUT_CAP) sPendingOutput.setLength(0);
@@ -5003,6 +5053,84 @@ public class MainActivity extends Activity {
         target.ui.post(() -> {
             if (target.webView == null) return;
             target.webView.evaluateJavascript("window.onTermData(" + jsQuote(text) + ")", null);
+        });
+    }
+
+    /** 原生视图输入：解析 feed 后刷新 native_output（限流：内容变化才更新，避免高频刷屏） */
+    private void feedNativeView(String text) {
+        if (ui == null) return;
+        ui.post(() -> {
+            NativeChatView nv = nativeChat;
+            if (nv == null) return;
+            nv.feed(text);
+            String rendered = nv.render();
+            if (rendered.equals(nativeLastRender)) return;
+            nativeLastRender = rendered;
+            TextView tv = findViewById(R.id.native_output);
+            if (tv == null) return;
+            tv.setText(rendered);
+            // 自动滚到底部（reasonix 输出持续追加/重绘时跟随最新内容）
+            ScrollView sv = findViewById(R.id.native_scroll);
+            if (sv != null) {
+                sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+            }
+        });
+    }
+
+    /** 切换终端视图 / 原生会话视图 */
+    private void toggleNativeView() {
+        nativeViewOn = !nativeViewOn;
+        View nativeChatLayout = findViewById(R.id.native_chat);
+        View web = findViewById(R.id.webview);
+        TextView qb = findViewById(R.id.qb_view);
+        if (nativeViewOn) {
+            if (nativeChat == null) nativeChat = new NativeChatView();
+            // 打开时把已有终端的可见历史喂入原生视图（从 WebView 侧无法可靠取回，
+            // 仅显示新输出的内容；随后 reasonix 重绘 TUI 时全量刷新）
+            nativeChatLayout.setVisibility(View.VISIBLE);
+            web.setVisibility(View.GONE);
+            qb.setText("视图：对话");
+            qb.setTextColor(0xFF81C784);
+            // 触发 reasonix 重新绘制界面（发送 Ctrl+L 清屏后再让 TUI 重绘）
+            write("\u000c");
+            findViewById(R.id.native_input).requestFocus();
+        } else {
+            nativeChatLayout.setVisibility(View.GONE);
+            web.setVisibility(View.VISIBLE);
+            qb.setText("视图：终端");
+            qb.setTextColor(0xFFFFD54F);
+            // 还原终端：触发 reasonix 重绘当前画面（Ctrl+L），并恢复 WebView 焦点
+            write("\u000c");
+            try { webView.requestFocus(); } catch (Exception ignored) {}
+        }
+    }
+
+    /** 原生会话视图发送：把输入框内容写到子进程 stdin（与 xterm 共用 write() 通道） */
+    private void sendNativeInput() {
+        EditText et = findViewById(R.id.native_input);
+        if (et == null) return;
+        String txt = et.getText().toString();
+        if (txt.isEmpty()) return;
+        et.setText("");
+        // 追加回车触发执行；输入内容也回显到原生视图（reasonix 关闭本地回显时
+        // 用户看不到自己输入了什么，这里显式补一行）
+        feedNativeViewRaw(txt + "\n");
+        write(txt + "\n");
+    }
+
+    /** 原生视图直接追加用户输入回显（不经 NativeChatView 的 CSI 解析，避免转义） */
+    private void feedNativeViewRaw(String text) {
+        if (!nativeViewOn) return;
+        ui.post(() -> {
+            NativeChatView nv = nativeChat;
+            if (nv == null) return;
+            nv.feed(text);
+            String rendered = nv.render();
+            nativeLastRender = rendered;
+            TextView tv = findViewById(R.id.native_output);
+            if (tv != null) tv.setText(rendered);
+            ScrollView sv = findViewById(R.id.native_scroll);
+            if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
         });
     }
 

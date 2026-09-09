@@ -87,6 +87,18 @@
                         android:textStyle="bold" />
 
                     <TextView
+                        android:id="@+id/qb_view"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="视图：终端"
+                        android:textColor="#FFD54F"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
                         android:id="@+id/qb_adb"
                         android:layout_width="wrap_content"
                         android:layout_height="match_parent"
@@ -214,6 +226,67 @@
                 android:layout_width="match_parent"
                 android:layout_height="1dp"
                 android:background="#1E1E1E" />
+
+            <!-- 原生会话视图（对话模式）：原生控件渲染 reasonix 输出 + 原生输入框，
+                 与 xterm.js 终端（webview）可切换。默认隐藏。 -->
+            <LinearLayout
+                android:id="@+id/native_chat"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <ScrollView
+                    android:id="@+id/native_scroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:background="#000000"
+                    android:fillViewport="true"
+                    android:overScrollMode="never"
+                    android:scrollbars="vertical">
+
+                    <TextView
+                        android:id="@+id/native_output"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:padding="8dp"
+                        android:textColor="#E6EDF3"
+                        android:textIsSelectable="true"
+                        android:textSize="12sp"
+                        android:typeface="monospace" />
+                </ScrollView>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="#0A0A0A"
+                    android:orientation="horizontal"
+                    android:padding="6dp">
+
+                    <EditText
+                        android:id="@+id/native_input"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:background="@android:drawable/edit_text"
+                        android:hint="输入指令（Enter 发送）"
+                        android:imeOptions="actionSend"
+                        android:inputType="text"
+                        android:maxLines="3"
+                        android:textColor="#FFFFFF"
+                        android:textColorHint="#707070" />
+
+                    <Button
+                        android:id="@+id/native_send"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="发送"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </LinearLayout>
 
             <WebView
                 android:id="@+id/webview"

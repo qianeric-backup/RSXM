@@ -12,7 +12,8 @@
 - **屏幕自适应**：终端按手机视口自动计算行列并实时同步 PTY（旋转/软键盘自动重排）。
 - **触摸滚动**：reasonix TUI 内滑动 → 模拟 SGR 滚轮事件滚动历史输出；shell 主屏滑动 → 滚动终端 scrollback；侧滑菜单内置滑动调速（档位 1~10，默认 5），档位越低滑动越慢越精细，可随时调整。
 - **纯黑主题**：全局纯黑界面（标题栏 / 侧滑菜单 / 终端 / 对话框）。
-- **主屏快捷入口行**：常用功能（GitHub / ADB / API Key / DS2API / 更新 / 项目 / 会话 / SKILL / MCP / 开发环境 / 快捷键 / ROOT）以快捷栏形式直接显示在主屏顶部，一键直达对应面板，不再需要每次都打开侧滑栏；侧滑栏保留完整功能清单。
+- **主屏快捷入口行**：常用功能（GitHub / 视图切换 / ADB / API Key / DS2API / 更新 / 项目 / 会话 / SKILL / MCP / 开发环境 / 快捷键 / ROOT）以快捷栏形式直接显示在主屏顶部，一键直达对应面板，不再需要每次都打开侧滑栏；侧滑栏保留完整功能清单。
+- **双视图切换（终端 / 原生对话）**：快捷栏「视图」可在 xterm.js 终端与原生会话视图间切换——原生视图用 Android 控件渲染 reasonix 输出（内置轻量终端缓冲处理光标定位/清屏/alt-screen 等序列），配原生输入框（Enter/发送按钮），规避 WebView 在部分设备上的黑屏/排版错乱；修复了环境输出按 8KB 块解码导致中文乱码的根因（改为 CharsetDecoder 增量解码）。
 - **GitHub 登录与自动打包**：主屏快捷栏与侧滑栏「GitHub」面板支持输入/保存 GitHub Personal Access Token（仅存本机 `SharedPreferences`，不写入 Linux 环境），`GET /user` 验证登录态并显示账户；一键触发仓库 [reasonix-proot-app](https://github.com/qianeric-backup/reasonix-proot-app) 的 `build-release.yml` workflow（`workflow_dispatch`，云端 `assembleRelease`），轮询构建状态，完成后下载构建产物 APK 并经系统安装器安装（token 需 `repo` + `actions` 权限）。
 - **左侧侧滑配置菜单**（DrawerLayout）：
   - **ADB 无线调试**：guest 内自动安装 adb（国内镜像 + 国内 DNS），填写配对码/端口后一键发送配对连接命令到终端，或复制命令、直接跳转无线调试设置。

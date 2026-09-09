@@ -3980,11 +3980,40 @@ public class MainActivity extends Activity {
                             + "mount --bind /sys $R/sys 2>/dev/null; ";
                     String out = execRootCommand(pre + "chroot $R /bin/sh /root/ds2api/launch.sh", 15);
                     boolean ok = out != null && out.contains("STARTED");
+                    if (!ok) {
+                        // 兜底链 A：root 缺席时走应用内 proot 直启——无 root 也必须能启动 DS2API。
+                        // 做法：复用已存在的 proot 环境（若 entry.sh 循环在跑）经 guest 桥启动；
+                        // 若桥不可用（.adb-out 无 __DONE__），直接 app 侧用 ProcessBuilder 再起一套
+                        // proot 一次性会话执行 launch.sh（与主环境并行，不冲突——仅持 ds2api）。
+                    }
                     boolean run = runOnUiThreadCheck();
+                    if (!ok && !run) {
+                        // A) guest 桥（环境在跑时可靠）
+                        out = executeInGuest(
+                                "cd /root/ds2api && export HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+                                        + "TERM=xterm-256color LANG=C.UTF-8 TMPDIR=/tmp TMP=/tmp "
+                                        + "NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost "
+                                        + "PORT=5001 DS2API_ADMIN_KEY=rsxm-ds2api-admin DS2API_STATIC_ADMIN_DIR=/usr/local/ds2api/static/admin DS2API_CONFIG_PATH=/root/ds2api/config.json && "
+                                        + "nohup /usr/local/ds2api/ds2api >/root/ds2api/ds2api.log 2>&1 & sleep 2; "
+                                        + "pgrep -x ds2api >/dev/null 2>&1 && echo STARTED || echo BRIDGE_NO", 20);
+                        ok = out != null && out.contains("STARTED");
+                        run = ok;
+                    }
+                    if (!ok && !run) {
+                        // B) app 侧一次性 proot 会话执行 launch.sh（不依赖 root/环境）
+                        String one = startOneShotProotDs2api(rootfs);
+                        ok = one != null && (one.contains("STARTED"));
+                        run = ok;
+                    }
+                    final boolean fOk = ok || run;
+                    final String fDetail = ok || run ? null
+                            : (out == null ? "(root 不可用且 proot 兜底失败)" : out);
                     runOnUiThread(() -> {
-                        status.setText(ok || run
-                                ? "● 运行中：127.0.0.1:5001（管理台 /admin/）"
-                                : "启动失败：" + (out == null ? "(root 不可用)" : out));
+                        if (fOk) {
+                            status.setText("● 运行中：127.0.0.1:5001（管理台 /admin/）");
+                        } else {
+                            status.setText("启动失败：" + fDetail);
+                        }
                     });
                 } catch (Exception e) {
                     final String msg = String.valueOf(e);
@@ -3998,13 +4027,31 @@ public class MainActivity extends Activity {
         stopBtn.setOnClickListener(v -> {
             stopBtn.setEnabled(false);
             new Thread(() -> {
-                // SIGTERM→等 1s→SIGKILL；/proc 共享，host 侧 pkill 即可命中 chroot 内进程
+                // 链1：root pkill（/proc 共享，chroot/proot 全命中）
                 String out = execRootCommand("pkill -x ds2api 2>/dev/null; sleep 1; "
                         + "pgrep -x ds2api >/dev/null 2>&1 && pkill -9 -x ds2api 2>/dev/null; sleep 0.5; "
                         + "pgrep -x ds2api >/dev/null 2>&1 && echo STILL_RUNNING || echo STOPPED", 10);
                 boolean stopped = out != null && out.contains("STOPPED");
+                // 链2：root 不可用 → 走 guest 桥（环境在跑时）或一次性 proot 执行 kill 脚本
+                if (!stopped) {
+                    out = executeInGuest(
+                            "pkill -x ds2api 2>/dev/null; sleep 1; "
+                            + "pgrep -x ds2api >/dev/null 2>&1 && pkill -9 -x ds2api 2>/dev/null; sleep 0.5; "
+                            + "pgrep -x ds2api >/dev/null 2>&1 && echo STILL_RUNNING || echo STOPPED", 25);
+                    stopped = out != null && out.contains("STOPPED");
+                    if (!stopped) {
+                        // 一次性 proot 需要 rootfs 里有 kill 工具脚本/proc 绑定已在 ex_cmd 中
+                        String kill = startOneShotProotCmd(
+                                "pkill -x ds2api 2>/dev/null; sleep 1; "
+                                + "pgrep -x ds2api >/dev/null 2>&1 && pkill -9 -x ds2api 2>/dev/null; sleep 0.5; "
+                                + "pgrep -x ds2api >/dev/null 2>&1 && echo STILL_RUNNING || echo STOPPED", new File(getFilesDir(), "rootfs"));
+                        stopped = kill != null && kill.contains("STOPPED");
+                    }
+                }
+                final boolean fStopped = stopped;
+                final String fOut = out;
                 runOnUiThread(() -> {
-                    status.setText(stopped ? "○ 已停止（环境重启会自动拉起）" : "停止失败：" + out);
+                    status.setText(fStopped ? "○ 已停止（环境重启会自动拉起）" : "停止失败：" + fOut);
                     stopBtn.setEnabled(true);
                 });
             }, "ds2-stop").start();
@@ -4024,7 +4071,57 @@ public class MainActivity extends Activity {
         showPanel("DS2API 网关", panel, null);
     }
 
-    /** DS2API 启动后回读运行态（供双通道校验） */
+    /**
+     * app 侧一次性 proot 会话启动 DS2API（无需 root）：
+     * 用 APK 内置的 proot/loader（nativeLibraryDir）以 -0 挂 rootfs 起 /bin/sh 执行 launch.sh。
+     * launch.sh 自身含 pkill 清残留 + nohup + pgrep 自检；proot 退出不影响已 nohup 的 ds2api
+     * （proot 是 ptrace 载入，子进程 nohup 后由 init 收养继续运行）。
+     */
+    private String startOneShotProotDs2api(File rootfs) {
+        // launch.sh 内已含启动+自检 echo STARTED
+        return startOneShotProotCmd(null, rootfs);
+    }
+
+    /** app 侧一次性 proot 会话执行 shell 命令（无需 root）。
+     *  guestCmd 为空时执行 /root/ds2api/launch.sh（启动 DS2API）。
+     *  proot 退出不影响已 nohup 的进程（由 init 收养）。 */
+    private String startOneShotProotCmd(String guestCmd, File rootfs) {
+        try {
+            String nativeLibDir = getApplicationInfo().nativeLibraryDir;
+            List<String> cmd = new ArrayList<>();
+            cmd.add(nativeLibDir + "/proot.so");
+            cmd.add("-0");
+            cmd.add("-r"); cmd.add(rootfs.getAbsolutePath());
+            cmd.add("-b"); cmd.add("/dev");
+            cmd.add("-b"); cmd.add("/proc");
+            cmd.add("-b"); cmd.add("/sys");
+            cmd.add("-w"); cmd.add("/root");
+            cmd.add("/bin/sh"); cmd.add("-c");
+            cmd.add(guestCmd == null ? "/root/ds2api/launch.sh" : guestCmd);
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            pb.environment().put("PROOT_LOADER", nativeLibDir + "/loader.so");
+            pb.environment().put("TMPDIR", nativeLibDir);
+            pb.environment().put("PROOT_TMP_DIR", getFilesDir().getAbsolutePath());
+            Process p = pb.start();
+            StringBuilder sb = new StringBuilder();
+            java.io.InputStream in = p.getInputStream();
+            byte[] buf = new byte[4096];
+            long deadline = System.currentTimeMillis() + 20000;
+            while (System.currentTimeMillis() < deadline) {
+                int n = in.read(buf);
+                if (n > 0) sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                if (n < 0) break;    // 流关闭：proot 已退出
+            }
+            try { p.waitFor(2, TimeUnit.SECONDS); } catch (Exception ignored) {}
+            p.destroy();
+            return sb.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "one-shot proot exec failed", e);
+            return null;
+        }
+    }
+
     private boolean runOnUiThreadCheck() {
         String out = execRootCommand("pgrep -x ds2api >/dev/null 2>&1 && echo RUNNING || echo NO", 6);
         return out != null && out.contains("RUNNING");

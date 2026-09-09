@@ -190,7 +190,7 @@
                 android:background="#000000"
                 android:gravity="center_vertical"
                 android:paddingLeft="16dp"
-                android:text="配置"
+                android:text="RSXM"
                 android:textColor="#FFFFFF"
                 android:textSize="16sp"
                 android:textStyle="bold" />
@@ -204,23 +204,79 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
 
+                    <!-- ── 视图 ── -->
                     <TextView
-                        android:id="@+id/menu_adb"
                         android:layout_width="match_parent"
-                        android:layout_height="52dp"
+                        android:layout_height="wrap_content"
+                        android:paddingLeft="16dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="视图"
+                        android:textColor="#6E7681"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:id="@+id/menu_view"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
                         android:background="#141414"
                         android:gravity="center_vertical"
                         android:paddingLeft="16dp"
-                        android:text="ADB 调试"
+                        android:text="对话 / 终端"
+                        android:textColor="#FFD54F"
+                        android:textSize="15sp"
+                        android:drawablePadding="12dp" />
+
+                    <!-- ── 会话 ── -->
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:paddingLeft="16dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="会话"
+                        android:textColor="#6E7681"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:id="@+id/menu_sessions"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="#141414"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="历史会话"
                         android:textColor="#FFFFFF"
                         android:textSize="15sp" />
 
                     <TextView
-                        android:id="@+id/menu_apikey"
+                        android:id="@+id/menu_project"
                         android:layout_width="match_parent"
-                        android:layout_height="52dp"
+                        android:layout_height="48dp"
                         android:background="#141414"
                         android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="项目目录"
+                        android:textColor="#FFFFFF"
+                        android:textSize="15sp" />
+
+                    <!-- ── 服务 ── -->
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:paddingLeft="16dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="服务"
+                        android:textColor="#6E7681"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:id="@+id/menu_apikey"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="#141414"
                         android:gravity="center_vertical"
                         android:paddingLeft="16dp"
                         android:text="API Key"
@@ -228,21 +284,9 @@
                         android:textSize="15sp" />
 
                     <TextView
-                        android:id="@+id/menu_github"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="GitHub（登录/自动打包）"
-                        android:textColor="#58A6FF"
-                        android:textSize="15sp" />
-
-                    <TextView
                         android:id="@+id/menu_ds2api"
                         android:layout_width="match_parent"
-                        android:layout_height="52dp"
+                        android:layout_height="48dp"
                         android:background="#141414"
                         android:layout_marginTop="1dp"
                         android:gravity="center_vertical"
@@ -252,59 +296,55 @@
                         android:textSize="15sp" />
 
                     <TextView
+                        android:id="@+id/menu_github"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="#141414"
+                        android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="GitHub 账号"
+                        android:textColor="#58A6FF"
+                        android:textSize="15sp" />
+
+                    <!-- ── 系统 ── -->
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:paddingLeft="16dp"
+                        android:paddingTop="10dp"
+                        android:paddingBottom="4dp"
+                        android:text="系统"
+                        android:textColor="#6E7681"
+                        android:textSize="11sp" />
+
+                    <TextView
                         android:id="@+id/menu_update"
                         android:layout_width="match_parent"
-                        android:layout_height="52dp"
+                        android:layout_height="48dp"
                         android:background="#141414"
-                        android:layout_marginTop="1dp"
                         android:gravity="center_vertical"
                         android:paddingLeft="16dp"
-                        android:text="Reasonix 更新"
+                        android:text="更新 Reasonix"
                         android:textColor="#FFFFFF"
                         android:textSize="15sp" />
 
                     <TextView
-                        android:id="@+id/menu_project"
+                        android:id="@+id/menu_adb"
                         android:layout_width="match_parent"
-                        android:layout_height="52dp"
+                        android:layout_height="48dp"
                         android:background="#141414"
                         android:layout_marginTop="1dp"
                         android:gravity="center_vertical"
                         android:paddingLeft="16dp"
-                        android:text="项目"
+                        android:text="ADB 调试"
                         android:textColor="#FFFFFF"
                         android:textSize="15sp" />
 
-                    <TextView
-                        android:id="@+id/menu_sessions"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="会话"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <!-- 视图切换：终端 / 原生对话（顶边栏仅剩菜单后在此互切） -->
-                    <TextView
-                        android:id="@+id/menu_view"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="视图切换（终端 / 对话）"
-                        android:textColor="#FFD54F"
-                        android:textSize="15sp" />
-
-                    <!-- 高级设置：二级菜单入口（ROOT/开发环境/SKILL/MCP/后台/YOLO/滑动速度/快捷键 等） -->
                     <TextView
                         android:id="@+id/menu_advanced"
                         android:layout_width="match_parent"
-                        android:layout_height="52dp"
+                        android:layout_height="48dp"
                         android:background="#141414"
                         android:layout_marginTop="1dp"
                         android:gravity="center_vertical"
@@ -312,6 +352,16 @@
                         android:text="高级设置"
                         android:textColor="#FFD54F"
                         android:textSize="15sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:paddingTop="16dp"
+                        android:paddingBottom="16dp"
+                        android:text="RSXM V2.0"
+                        android:textColor="#3A3F47"
+                        android:textSize="11sp" />
                 </LinearLayout>
             </ScrollView>
         </LinearLayout>

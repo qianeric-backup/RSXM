@@ -4472,15 +4472,18 @@ public class MainActivity extends Activity {
         Log.d(TAG, "permission result code=" + code);
     }
 
-    /** 由 xterm.js 调用：把终端按键输入写入子进程 stdin（经 pty-bridge 转发到 PTY） */
+    /** 由 xterm.js 调用：把终端按键输入写入子进程 stdin（经 pty-bridge 转发到 PTY）。
+     *  线程安全：与原生发送线程共享 sProcIn，加锁避免字节交错。 */
     @JavascriptInterface
     public void write(String data) {
         if (sProcIn == null || data == null) return;
-        try {
-            sProcIn.write(data.getBytes(StandardCharsets.UTF_8));
-            sProcIn.flush();
-        } catch (IOException e) {
-            Log.w(TAG, "write failed", e);
+        synchronized (this) {
+            try {
+                sProcIn.write(data.getBytes(StandardCharsets.UTF_8));
+                sProcIn.flush();
+            } catch (IOException e) {
+                Log.w(TAG, "write failed", e);
+            }
         }
     }
 
@@ -5454,13 +5457,25 @@ public class MainActivity extends Activity {
         String txt = et.getText().toString();
         if (txt.isEmpty()) return;
         et.setText("");
-        write(txt + "\n");
+        // 修复「发送无效、只换行」：reasonix（bubbletea）raw TTY 下 Enter 键是 \r（CR），
+        // \n 会被当作输入区内换行（用户反馈的"回车到下一行"）。
+        // 流式逐字符写入（模拟真实键入，兼容 reasonix 逐键回显/多行输入），末尾 \r 提交。
+        final String text = txt;
+        new Thread(() -> {
+            try {
+                for (int i = 0; i < text.length(); i++) {
+                    write(String.valueOf(text.charAt(i)));
+                    Thread.sleep(8);   // 8ms/字符：流畅且不过快（过长文本略慢但可靠）
+                }
+                write("\r");           // Enter（提交）
+            } catch (Exception ignored) {}
+        }, "native-send").start();
         // user 消息即时回显（等待 reasonix 写入 jsonl 再出现，避免用户看不到输入）
         if (sessionMapper != null) {
             ui.post(() -> {
                 SessionFieldMapper.MappedMessage mm = new SessionFieldMapper.MappedMessage();
                 mm.role = "user";
-                mm.content = txt;
+                mm.content = text;
                 mm.tsText = new java.text.SimpleDateFormat("HH:mm:ss",
                         java.util.Locale.ROOT).format(new java.util.Date());
                 LinearLayout list = findViewById(R.id.native_output);

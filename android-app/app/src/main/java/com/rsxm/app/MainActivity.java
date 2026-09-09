@@ -123,7 +123,6 @@ public class MainActivity extends Activity {
     /** apk 日志进度模式：(x/N) Installing ... */
     private static final Pattern APK_PROGRESS = Pattern.compile("\\((\\d+)/(\\d+)\\)");
     private DrawerLayout drawerLayout;
-    private TextView tvStatus;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -150,7 +149,6 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         drawerLayout = findViewById(R.id.drawer_layout);
-        tvStatus = findViewById(R.id.tv_status);
         webView = findViewById(R.id.webview);
         // 二次开启黑屏修复：硬件渲染在部分设备出现 userfaultfd 卡死（logcat:
         // "userfaultfd: MOVE ioctl seems unsupported: Connection timed out"）导致
@@ -214,8 +212,9 @@ public class MainActivity extends Activity {
             }
         }, 4000);
 
-        // 标题栏菜单按钮：打开侧滑配置列表
-        findViewById(R.id.btn_menu).setOnClickListener(v -> drawerLayout.openDrawer(GravityCompat.START, false));
+        // 标题栏已移除：侧滑菜单入口改由快捷栏「菜单」提供（btn_menu 已从布局删除，防旧布局兼容保留空判断）
+        findViewById(R.id.qb_menu).setOnClickListener(v ->
+                drawerLayout.openDrawer(GravityCompat.START, false));
         // 侧滑菜单功能
         findViewById(R.id.menu_adb).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdbDialog(); });
         findViewById(R.id.menu_apikey).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showApiKeyConfigDialog(); });
@@ -5252,6 +5251,9 @@ public class MainActivity extends Activity {
         View nativeChatLayout = findViewById(R.id.native_chat);
         View web = findViewById(R.id.webview);
         TextView qb = findViewById(R.id.qb_view);
+        // GUI 视图输入修复：强制 adjustResize（覆盖 showPanel 遗留的 ADJUST_PAN），
+        // 确保软键盘弹出时输入框随窗口上移不被遮挡，消息列表同步压缩滚动。
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         nativeChatLayout.setVisibility(View.VISIBLE);
         web.setVisibility(View.GONE);
         qb.setText("视图：对话");
@@ -5275,9 +5277,33 @@ public class MainActivity extends Activity {
         }
         // 触发 reasonix 重绘（保持 TUI 正常，会话 jsonl 由 reasonix 实时追加）
         write("\u000c");
-        // 延迟聚焦输入框：让键盘弹出前消息列表先完成首屏渲染
-        findViewById(R.id.native_input).postDelayed(
-                () -> findViewById(R.id.native_input).requestFocus(), 250);
+        // 输入框焦点与键盘展开：requestFocus + 显示软键盘；聚焦/输入时自动滚动列表到底。
+        // （延迟到消息列表完成首屏渲染后再弹键盘）
+        final EditText input = findViewById(R.id.native_input);
+        if (input != null) {
+            input.setOnFocusChangeListener((v, hasFocus) -> {
+                if (hasFocus) {
+                    ScrollView sv = findViewById(R.id.native_scroll);
+                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                }
+            });
+            input.addTextChangedListener(new android.text.TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+                @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
+                    ScrollView sv = findViewById(R.id.native_scroll);
+                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                }
+                @Override public void afterTextChanged(android.text.Editable s) {}
+            });
+            input.postDelayed(() -> {
+                input.requestFocus();
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                }
+            }, 300);
+        }
     }
 
     private void exitNativeView() {
@@ -5290,6 +5316,8 @@ public class MainActivity extends Activity {
         web.setVisibility(View.VISIBLE);
         qb.setText("视图：终端");
         qb.setTextColor(0xFFFFD54F);
+        // 还原软输入模式（终端 WebView 需要 resize，与面板/对话视图一致）
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         // 收起软键盘（输入框可能正聚焦），避免切回终端后键盘残留
         android.view.inputmethod.InputMethodManager imm =
                 (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);

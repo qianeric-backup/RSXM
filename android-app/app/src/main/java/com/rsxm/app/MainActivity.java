@@ -4981,9 +4981,40 @@ public class MainActivity extends Activity {
         extractAsset("ds2api/ds2api-bundle.tgz", ds2Bundle);
         File ds2Root = new File(rootfs, "usr/local");
         ds2Root.mkdirs();
-        runCmd("/system/bin/tar", "-xzf", ds2Bundle.getAbsolutePath(), "-C", ds2Root.getAbsolutePath());
+        // toybox tar 可能报「can't remove / settime / had errors」exit=1 但内容已落地——
+        // 不让 runCmd 抛异常打断初始化；解析结果按 ds2api 二进制是否就位分流：
+        // 就位 → chmod 继续；缺失 → root tar 兜底（可跨 uid 删除残留 root 属主 inode）。
+        boolean tarMiss = false;
+        try {
+            Process tp = new ProcessBuilder("/system/bin/tar", "-xzf",
+                    ds2Bundle.getAbsolutePath(), "-C", ds2Root.getAbsolutePath())
+                    .redirectErrorStream(true).start();
+            byte[] tb = new byte[4096];
+            int tn = tp.getInputStream().read(tb);
+            int tcode = tp.waitFor();
+            if (tcode != 0) {
+                Log.w(TAG, "toybox tar exit=" + tcode + " out=" +
+                        (tn > 0 ? new String(tb, 0, tn, StandardCharsets.UTF_8) : "(no out)"));
+                tarMiss = true;
+            }
+        } catch (Exception te) {
+            Log.w(TAG, "toybox tar exec failed", te);
+            tarMiss = true;
+        }
+        File bin = new File(ds2Dir, "ds2api");
+        if (bin.exists() && bin.length() > 1024) {
+            bin.setExecutable(true, false);
+            bin.setWritable(true, false);
+            bin.setReadable(true, false);
+        } else if (tarMiss) {
+            String out = execRootCommand("mkdir -p " + ds2Root.getAbsolutePath() + "; tar -xzf "
+                    + ds2Bundle.getAbsolutePath() + " -C " + ds2Root.getAbsolutePath()
+                    + " && chmod -R a+rwX " + ds2Dir.getAbsolutePath() + "; "
+                    + "test -x " + bin.getAbsolutePath() + " && echo TAR_OK || echo TAR_MISS", 15);
+            Log.w(TAG, "root tar fallback: " + out);
+        }
         ds2Bundle.delete();
-        Log.d(TAG, "runtime assets refreshed");
+        Log.d(TAG, "runtime assets refreshed (tarMiss=" + tarMiss + ")");
     }
 
     /** ADB 无线调试持久化：把本机局域网 IP 写入 guest 持久文件，供 entry.sh 自动重连使用 */
@@ -5046,7 +5077,30 @@ public class MainActivity extends Activity {
         extractAsset("ds2api/ds2api-bundle.tgz", ds2Bundle);
         File ds2Root = new File(rootfs, "usr/local");
         ds2Root.mkdirs();
-        runCmd("/system/bin/tar", "-xzf", ds2Bundle.getAbsolutePath(), "-C", ds2Root.getAbsolutePath());
+        // setup 首次解压与 refresh 同策略：失败不致命，root 兜底
+        boolean firstTarMiss = false;
+        try {
+            Process tp2 = new ProcessBuilder("/system/bin/tar", "-xzf",
+                    ds2Bundle.getAbsolutePath(), "-C", ds2Root.getAbsolutePath())
+                    .redirectErrorStream(true).start();
+            byte[] tb2 = new byte[4096];
+            int tn2 = tp2.getInputStream().read(tb2);
+            int tc2 = tp2.waitFor();
+            if (tc2 != 0) {
+                Log.w(TAG, "setup tar exit=" + tc2 + " out=" +
+                        (tn2 > 0 ? new String(tb2, 0, tn2, StandardCharsets.UTF_8) : "(no out)"));
+                firstTarMiss = true;
+            }
+        } catch (Exception te2) {
+            Log.w(TAG, "setup tar exec failed", te2);
+            firstTarMiss = true;
+        }
+        File firstBin = new File(ds2Root, "ds2api/ds2api");
+        if (!(firstBin.exists() && firstBin.length() > 1024) && firstTarMiss) {
+            execRootCommand("mkdir -p " + ds2Root.getAbsolutePath() + "; tar -xzf "
+                    + ds2Bundle.getAbsolutePath() + " -C " + ds2Root.getAbsolutePath()
+                    + " && chmod -R a+rwX " + ds2Root.getAbsolutePath() + "/ds2api", 15);
+        }
         ds2Bundle.delete();
 
         // 5. DNS 配置

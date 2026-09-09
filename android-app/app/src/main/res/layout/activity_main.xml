@@ -15,136 +15,38 @@
             android:layout_height="match_parent"
             android:orientation="vertical">
 
-            <!-- 主屏快捷入口行：常用功能一键直达，不再需要打开侧滑栏（纯黑底） -->
-            <HorizontalScrollView
+            <!-- 顶边栏：仅保留「菜单」入口（其余功能在侧滑栏/高级设置） -->
+            <LinearLayout
                 android:id="@+id/quick_bar"
                 android:layout_width="match_parent"
                 android:layout_height="46dp"
                 android:background="#000000"
-                android:scrollbars="none"
-                android:overScrollMode="never">
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-                <LinearLayout
+                <TextView
+                    android:id="@+id/qb_menu"
                     android:layout_width="wrap_content"
                     android:layout_height="match_parent"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingRight="8dp">
+                    android:gravity="center"
+                    android:paddingLeft="16dp"
+                    android:paddingRight="16dp"
+                    android:text="&#9776; 菜单"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
-                    <TextView
-                        android:id="@+id/qb_menu"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="&#9776; 菜单"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1" />
+            </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/qb_github"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="GitHub"
-                        android:textColor="#58A6FF"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/qb_view"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="视图：终端"
-                        android:textColor="#FFD54F"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/qb_adb"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="ADB"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_apikey"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="API Key"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_ds2api"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="DS2API"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_update"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="更新"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_project"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="项目"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_sessions"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="会话"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_advanced"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="设置"
-                        android:textColor="#FFD54F"
-                        android:textSize="13sp" />
-                </LinearLayout>
-            </HorizontalScrollView>
+            <!-- 快捷栏分隔线 -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#1E1E1E" />
 
             <!-- 原生会话视图（对话模式）：reasonix 会话 jsonl 字段映射为消息列表气泡渲染，
                  与 xterm.js 终端（webview）可切换。默认隐藏。 -->
@@ -188,12 +90,12 @@
                         android:textColor="#58A6FF"
                         android:textSize="11sp" />
 
-                    <!-- 会话操作：仅原生视图显示；新会话/回终端 -->
+                    <!-- 会话操作：仅原生视图显示；新会话/回终端（黑底白字） -->
                     <TextView
                         android:id="@+id/native_new"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:background="@android:drawable/edit_text"
+                        android:background="#1A1A1A"
                         android:paddingLeft="10dp"
                         android:paddingRight="10dp"
                         android:paddingTop="4dp"
@@ -207,7 +109,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginLeft="6dp"
-                        android:background="@android:drawable/edit_text"
+                        android:background="#1A1A1A"
                         android:paddingLeft="10dp"
                         android:paddingRight="10dp"
                         android:paddingTop="4dp"
@@ -248,7 +150,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:background="@android:drawable/edit_text"
+                        android:background="#1A1A1A"
                         android:hint="输入指令（Enter 发送）"
                         android:imeOptions="actionSend"
                         android:inputType="text"
@@ -260,7 +162,9 @@
                         android:id="@+id/native_send"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:backgroundTint="#262626"
                         android:text="发送"
+                        android:textColor="#FFFFFF"
                         android:textSize="13sp" />
                 </LinearLayout>
             </LinearLayout>
@@ -381,6 +285,19 @@
                         android:paddingLeft="16dp"
                         android:text="会话"
                         android:textColor="#FFFFFF"
+                        android:textSize="15sp" />
+
+                    <!-- 视图切换：终端 / 原生对话（顶边栏仅剩菜单后在此互切） -->
+                    <TextView
+                        android:id="@+id/menu_view"
+                        android:layout_width="match_parent"
+                        android:layout_height="52dp"
+                        android:background="#141414"
+                        android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="视图切换（终端 / 对话）"
+                        android:textColor="#FFD54F"
                         android:textSize="15sp" />
 
                     <!-- 高级设置：二级菜单入口（ROOT/开发环境/SKILL/MCP/后台/YOLO/滑动速度/快捷键 等） -->

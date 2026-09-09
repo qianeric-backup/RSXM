@@ -215,7 +215,7 @@ public class MainActivity extends Activity {
         // 标题栏已移除：侧滑菜单入口改由快捷栏「菜单」提供（btn_menu 已从布局删除，防旧布局兼容保留空判断）
         findViewById(R.id.qb_menu).setOnClickListener(v ->
                 drawerLayout.openDrawer(GravityCompat.START, false));
-        // 侧滑菜单：一级高频入口；ROOT/开发环境/SKILL/MCP/后台/YOLO/滑动速度/快捷键 收进「高级设置」二级面板
+        // 侧滑菜单：一级高频入口；视图切换/高级设置 亦在一级
         findViewById(R.id.menu_adb).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdbDialog(); });
         findViewById(R.id.menu_apikey).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showApiKeyConfigDialog(); });
         findViewById(R.id.menu_github).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showGitHubDialog(); });
@@ -224,22 +224,18 @@ public class MainActivity extends Activity {
         findViewById(R.id.menu_project).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showProjectDialog(); });
         findViewById(R.id.menu_sessions).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSessionsDialog(); });
         findViewById(R.id.menu_advanced).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdvancedDialog(); });
+        findViewById(R.id.menu_view).setOnClickListener(v -> {
+            drawerLayout.closeDrawer(GravityCompat.START, false);
+            if (nativeViewOn) exitNativeView(); else enterNativeView();
+            updateMenuViewLabel();
+        });
         // 升级安装后 rootfs 可能没有 YOLO 标记：以偏好为准补写（默认开启）
         syncYoloMark(getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true));
 
-        // 主屏快捷入口行：常用入口 + 设置（高级）入口
-        findViewById(R.id.qb_github).setOnClickListener(v -> showGitHubDialog());
-        findViewById(R.id.qb_advanced).setOnClickListener(v -> showAdvancedDialog());
-        // 视图切换：点击按当前状态进入/退出（toggle 语义保留）
-        findViewById(R.id.qb_view).setOnClickListener(v -> {
-            if (nativeViewOn) exitNativeView(); else enterNativeView();
-        });
-        findViewById(R.id.qb_adb).setOnClickListener(v -> showAdbDialog());
-        findViewById(R.id.qb_apikey).setOnClickListener(v -> showApiKeyConfigDialog());
-        findViewById(R.id.qb_ds2api).setOnClickListener(v -> showDs2ApiDialog());
-        findViewById(R.id.qb_update).setOnClickListener(v -> showUpdateResonixDialog());
-        findViewById(R.id.qb_project).setOnClickListener(v -> showProjectDialog());
-        findViewById(R.id.qb_sessions).setOnClickListener(v -> showSessionsDialog());
+        // 顶边栏：仅「菜单」入口（其余功能在侧滑栏/高级设置）
+        findViewById(R.id.qb_menu).setOnClickListener(v ->
+                drawerLayout.openDrawer(GravityCompat.START, false));
+        updateMenuViewLabel();
 
         // 原生会话视图：发送按钮 + 输入框回车发送
         findViewById(R.id.native_send).setOnClickListener(v -> sendNativeInput());
@@ -2643,27 +2639,28 @@ public class MainActivity extends Activity {
 
         // ROOT
         addV(panel, createDarkSectionTitle("系统"), 10);
-        addV(panel, createDarkMenuRow("ROOT", "手机 root 权限（KernelSU/Magisk）授权与测试", () -> showRootDialog()), 4);
-        addV(panel, createDarkMenuRow("开发环境", "安装 Python/Node 等 apk 开发工具包", () -> showDevEnvDialog()), 4);
+        addV(panel, createDarkMenuRow("ROOT", "手机 root 权限（KernelSU/Magisk）授权与测试", null, () -> showRootDialog()), 4);
+        addV(panel, createDarkMenuRow("开发环境", "安装 Python/Node 等 apk 开发工具包", null, () -> showDevEnvDialog()), 4);
 
         // AI 能力
         addV(panel, createDarkSectionTitle("AI 能力"), 12);
-        addV(panel, createDarkMenuRow("SKILL", "安装/管理 reasonix 技能", () -> showSkillInstallDialog()), 4);
-        addV(panel, createDarkMenuRow("MCP 服务器", "管理当前项目 .mcp.json", () -> showMcpDialog()), 4);
+        addV(panel, createDarkMenuRow("SKILL", "安装/管理 reasonix 技能", null, () -> showSkillInstallDialog()), 4);
+        addV(panel, createDarkMenuRow("MCP 服务器", "管理当前项目 .mcp.json", null, () -> showMcpDialog()), 4);
 
         // 运行模式
         addV(panel, createDarkSectionTitle("运行模式"), 12);
-        final TextView bgLabel = createDarkMenuRow("后台运行", "app 后台保活，AI 会话不中断", () -> {
+        final LinearLayout bgRow = createDarkMenuRow("后台运行", "app 后台保活，AI 会话不中断", null, () -> {
             SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
             boolean on = !sp.getBoolean("background_mode", false);
             sp.edit().putBoolean("background_mode", on).apply();
             if (on) startBackgroundService(true); else stopBackgroundService();
             updateBgModeLabel();
         });
-        advancedBgLabel = bgLabel;
+        advancedBgLabel = (TextView) bgRow.getChildAt(0);
         updateBgModeLabel();
+        addV(panel, bgRow, 4);
 
-        final TextView yoloLabel = createDarkMenuRow("YOLO 免审批", "reasonix 完全跳过工具审批（等价 --permission-mode bypassPermissions）", () -> {
+        final LinearLayout yoloRow = createDarkMenuRow("YOLO 免审批", "reasonix 完全跳过工具审批（等价 --permission-mode bypassPermissions）", null, () -> {
             SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
             boolean on = !sp.getBoolean("yolo_mode", true);
             sp.edit().putBoolean("yolo_mode", on).apply();
@@ -2672,8 +2669,9 @@ public class MainActivity extends Activity {
             // 立即生效：重启 reasonix 环境（wrapper 读取新标记决定审批模式）
             restartEnvironment();
         });
-        advancedYoloLabel = yoloLabel;
+        advancedYoloLabel = (TextView) yoloRow.getChildAt(0);
         updateYoloModeLabel();
+        addV(panel, yoloRow, 4);
 
         // 交互偏好
         addV(panel, createDarkSectionTitle("交互偏好"), 12);
@@ -2714,7 +2712,7 @@ public class MainActivity extends Activity {
         });
         addV(panel, speedWrap, 4);
 
-        addV(panel, createDarkMenuRow("快捷键", "悬浮快捷键工具栏（可拖拽，九键）", () -> toggleKeysToolbar()), 4);
+        addV(panel, createDarkMenuRow("快捷键", "悬浮快捷键工具栏（可拖拽，九键）", null, () -> toggleKeysToolbar()), 4);
 
         showPanel("高级设置", panel, () -> {
             advancedBgLabel = null;
@@ -2723,8 +2721,10 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 高级设置菜单行：标题 + 说明，点击整行触发 action；返回顶行 TextView 供状态标签刷新 */
-    private TextView createDarkMenuRow(String title, String desc, Runnable action) {
+    /** 高级设置菜单行：返回整行 LinearLayout（标题 + 说明 + 点击监听）；
+     * renderLabel 参数预留（状态标签动态化），点击整行触发 action。 */
+    private LinearLayout createDarkMenuRow(String title, String desc,
+                                           java.util.function.Consumer<TextView> renderLabel, Runnable action) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setBackgroundColor(0xFF141414);
@@ -2749,7 +2749,8 @@ public class MainActivity extends Activity {
         row.setOnClickListener(v -> {
             if (action != null) action.run();
         });
-        return t;   // 返回标题 TextView（状态标签刷新用）；点击整行触发 action
+        if (renderLabel != null) renderLabel.accept(t);
+        return row;
     }
 
     /** 深色代码结果区 */
@@ -5318,16 +5319,14 @@ public class MainActivity extends Activity {
     private void enterNativeView() {
         nativeViewOn = true;
         getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "native").apply();
+        updateMenuViewLabel();
         View nativeChatLayout = findViewById(R.id.native_chat);
         View web = findViewById(R.id.webview);
-        TextView qb = findViewById(R.id.qb_view);
         // GUI 视图输入修复：强制 adjustResize（覆盖 showPanel 遗留的 ADJUST_PAN），
         // 确保软键盘弹出时输入框随窗口上移不被遮挡，消息列表同步压缩滚动。
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         nativeChatLayout.setVisibility(View.VISIBLE);
         web.setVisibility(View.GONE);
-        qb.setText("视图：对话");
-        qb.setTextColor(0xFF81C784);
         // 定位当前会话 jsonl：优先恢复标记，其次最新非事件 jsonl
         sessionMapper = resolveCurrentSessionMapper();
         nativeRenderedCount = 0;
@@ -5379,13 +5378,11 @@ public class MainActivity extends Activity {
     private void exitNativeView() {
         nativeViewOn = false;
         getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "terminal").apply();
+        updateMenuViewLabel();
         View nativeChatLayout = findViewById(R.id.native_chat);
         View web = findViewById(R.id.webview);
-        TextView qb = findViewById(R.id.qb_view);
         nativeChatLayout.setVisibility(View.GONE);
         web.setVisibility(View.VISIBLE);
-        qb.setText("视图：终端");
-        qb.setTextColor(0xFFFFD54F);
         // 还原软输入模式（终端 WebView 需要 resize，与面板/对话视图一致）
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         // 收起软键盘（输入框可能正聚焦），避免切回终端后键盘残留
@@ -5395,6 +5392,15 @@ public class MainActivity extends Activity {
                 findViewById(android.R.id.content).getWindowToken(), 0);
         write("\u000c");
         try { webView.requestFocus(); } catch (Exception ignored) {}
+    }
+
+    /** 侧滑栏「视图切换」项标签：随当前视图（终端/对话）刷新 */
+    private void updateMenuViewLabel() {
+        TextView v = findViewById(R.id.menu_view);
+        if (v != null) {
+            v.setText(nativeViewOn ? "视图切换（当前：对话）" : "视图切换（当前：终端）");
+            v.setTextColor(nativeViewOn ? 0xFF81C784 : 0xFFFFD54F);
+        }
     }
 
     /** 解析当前会话 jsonl：.rsxm-resume 标记 → 最新可读 jsonl（排除 events/恢复分支/回收站） */

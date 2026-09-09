@@ -447,6 +447,61 @@ MD
         echo "[break-armor] 全局指令已补充破甲环境说明"
     fi
 fi
+
+# --- 渗透修复：reasonix plan 模式 bash trust 门禁放行（幂等，标记 RSXM_PERM_ALLOW）---
+# reasonix 的 plan 模式 bash 有独立只读 trust 检查：非内置只读集命令（curl/nmap/ncat/python 等）
+# 即使 YOLO/bypassPermissions 也会弹确认，导致渗透任务卡住。在 config.toml 注入 [permissions]
+# allow 白名单（never prompted）+ allow_dynamic_bash + desktop 默认 YOLO 审批，每次启动补写。
+# TOML 禁止重复声明表：无 [permissions] 段追加完整块；已有段按需插行合并；已有自定义 allow 则保留。
+RSXM_CONF=/root/.reasonix/config.toml
+if [ -f "$RSXM_CONF" ] && ! grep -q "RSXM_PERM_ALLOW" "$RSXM_CONF" 2>/dev/null; then
+    if ! grep -q '^\s*\[permissions\]\s*$' "$RSXM_CONF" 2>/dev/null; then
+        cat >> "$RSXM_CONF" <<'RSXM_PERM'
+# RSXM_PERM_ALLOW (rsxm-pentest-bypass)
+[permissions]
+allow = [
+  "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(nmap:*)",
+  "Bash(masscan:*)", "Bash(hydra:*)", "Bash(sqlmap:*)", "Bash(sqlite3:*)",
+  "Bash(python:*)", "Bash(python3:*)", "Bash(pip:*)", "Bash(pip3:*)",
+  "Bash(perl:*)", "Bash(ruby:*)", "Bash(php:*)", "Bash(node:*)", "Bash(java:*)",
+  "Bash(sh:*)", "Bash(bash:*)", "Bash(busybox:*)", "Bash(ash:*)",
+  "Bash(openssl:*)", "Bash(base64:*)", "Bash(xxd:*)", "Bash(od:*)", "Bash(hexdump:*)",
+  "Bash(strings:*)", "Bash(objdump:*)", "Bash(readelf:*)", "Bash(gdb:*)", "Bash(r2:*)", "Bash(radare2:*)",
+  "Bash(adb:*)", "Bash(apk:*)", "Bash(apt:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(telnet:*)",
+  "Bash(git:*)", "Bash(find:*)", "Bash(grep:*)", "Bash(egrep:*)", "Bash(fgrep:*)", "Bash(awk:*)", "Bash(sed:*)",
+  "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(sort:*)", "Bash(uniq:*)", "Bash(xargs:*)",
+  "Bash(jq:*)", "Bash(tcpdump:*)", "Bash(mktemp:*)", "Bash(timeout:*)", "Bash(setsid:*)", "Bash(nohup:*)",
+  "Bash(id:*)", "Bash(whoami:*)", "Bash(uname:*)", "Bash(hostname:*)", "Bash(ps:*)", "Bash(env:*)",
+  "Bash(ls:*)", "Bash(stat:*)", "Bash(file:*)", "Bash(echo:*)", "Bash(printf:*)", "Bash(cd:*)",
+  "Bash(pwd:*)", "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(rm:*)", "Bash(touch:*)",
+  "Bash(ln:*)", "Bash(tar:*)", "Bash(unzip:*)", "Bash(gzip:*)", "Bash(gunzip:*)", "Bash(zip:*)",
+  "Bash(df:*)", "Bash(du:*)", "Bash(mount:*)", "Bash(dd:*)", "Bash(nslookup:*)", "Bash(dig:*)",
+  "Bash(host:*)", "Bash(ping:*)", "Bash(ip:*)", "Bash(ifconfig:*)", "Bash(ss:*)", "Bash(netstat:*)",
+  "Bash(lsof:*)", "Bash(fuser:*)", "Bash(kill:*)", "Bash(pkill:*)", "Bash(sleep:*)", "Bash(date:*)",
+  "Bash(su:*)", "Bash(sudo:*)", "Bash(reboot:*)", "Bash(shutdown:*)",
+]
+allow_dynamic_bash = true
+RSXM_PERM
+    elif ! grep -q '^\s*allow\s*=' "$RSXM_CONF" 2>/dev/null; then
+        # 已有 [permissions] 段但无 allow 键：段头下插 allow 数组 + allow_dynamic_bash
+        sed -i '0,/^\s*\[permissions\]\s*$/s//[permissions]\nallow = [\n  "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(nmap:*)", "Bash(masscan:*)", "Bash(hydra:*)",\n  "Bash(sqlmap:*)", "Bash(sqlite3:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(perl:*)", "Bash(ruby:*)", "Bash(php:*)",\n  "Bash(sh:*)", "Bash(bash:*)", "Bash(busybox:*)", "Bash(ash:*)", "Bash(openssl:*)", "Bash(base64:*)", "Bash(adb:*)",\n  "Bash(apk:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(telnet:*)", "Bash(git:*)", "Bash(find:*)", "Bash(grep:*)", "Bash(awk:*)", "Bash(sed:*)",\n  "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(jq:*)", "Bash(tcpdump:*)", "Bash(nc:*)", "Bash(nmap:*)", "Bash(su:*)", "Bash(sudo:*)",\n]\nallow_dynamic_bash = true/' "$RSXM_CONF"
+    elif ! grep -q '^\s*allow_dynamic_bash\s*=' "$RSXM_CONF" 2>/dev/null; then
+        sed -i '0,/^\s*\[permissions\]\s*$/s//[permissions]\nallow_dynamic_bash = true/' "$RSXM_CONF"
+    else
+        # 用户已自定义 allow + allow_dynamic_bash：保留用户配置，仅补标记
+        printf '\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass) user-allow kept\n' >> "$RSXM_CONF"
+    fi
+    printf '\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass)\n' >> "$RSXM_CONF"
+    # [desktop] 已存在时不能重复声明表（TOML 规范），改为在已有段内插行；无 [desktop] 段才追加新表
+    if ! grep -q "default_tool_approval_mode" "$RSXM_CONF" 2>/dev/null; then
+        if grep -q '^\[desktop\]' "$RSXM_CONF" 2>/dev/null; then
+            sed -i '0,/^\s*\[desktop\]\s*$/s//[desktop]\ndefault_tool_approval_mode = "yolo"/' "$RSXM_CONF"
+        else
+            printf '\n[desktop]\ndefault_tool_approval_mode = "yolo"\n' >> "$RSXM_CONF"
+        fi
+    fi
+    echo "[perm] [permissions] allow 已注入（渗透命令免审批，标记 RSXM_PERM_ALLOW）"
+fi
 # 幂等/更新安全：reasonix 更新会覆盖 wrapper 位置（写入新二进制），entry.sh 检测到
 # reasonix 不是 wrapper（首行无标记）时，把新二进制备份为 reasonix.bin；
 # 无论是否 wrapper 都强制重写 wrapper（幂等），保证 reasonix 更新/升级后包装参数

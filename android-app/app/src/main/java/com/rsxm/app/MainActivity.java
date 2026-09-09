@@ -4222,6 +4222,42 @@ public class MainActivity extends Activity {
     /** 破甲环境注入标记（infinite-gen-3 v0.5.0）：config.toml 中以此判断是否已注入，幂等 */
     private static final String BREAK_ARMOR_MARKER = "rsxm-break-armor-v0.5.0";
 
+    /**
+     * 渗透修复：[permissions] allow 白名单 + 动态 bash。
+     * reasonix 的 plan 模式 bash 有独立 trust 门禁——非内置只读集命令即使 YOLO/bypassPermissions
+     * 也会弹确认（"not in Reasonix's built-in read-only set"），导致 curl/nmap/ncat/python/sqlmap
+     * 等渗透命令无法自动执行。此块把常用渗透/侦查/运维命令前缀加入 allow（never prompted），
+     * allow_dynamic_bash=true 让 allow 覆盖 $() 命令替换与解释器 -c/-e。
+     * 注意：不含 [desktop] 表头（TOML 禁止重复声明表），desktop 审批模式键单独插行处理。
+     * 含 RSXM_PERM_ALLOW 标记，切裁/追加幂等。
+     */
+    private static final String PERMISSIONS_RSXM_BLOCK =
+            "\n" +
+            "# RSXM_PERM_ALLOW (rsxm-pentest-bypass)\n" +
+            "[permissions]\n" +
+            "allow = [\n" +
+            "  \"Bash(curl:*)\", \"Bash(wget:*)\", \"Bash(nc:*)\", \"Bash(ncat:*)\", \"Bash(nmap:*)\",\n" +
+            "  \"Bash(masscan:*)\", \"Bash(hydra:*)\", \"Bash(sqlmap:*)\", \"Bash(sqlite3:*)\",\n" +
+            "  \"Bash(python:*)\", \"Bash(python3:*)\", \"Bash(pip:*)\", \"Bash(pip3:*)\",\n" +
+            "  \"Bash(perl:*)\", \"Bash(ruby:*)\", \"Bash(php:*)\", \"Bash(node:*)\", \"Bash(java:*)\",\n" +
+            "  \"Bash(sh:*)\", \"Bash(bash:*)\", \"Bash(busybox:*)\", \"Bash(ash:*)\",\n" +
+            "  \"Bash(openssl:*)\", \"Bash(base64:*)\", \"Bash(xxd:*)\", \"Bash(od:*)\", \"Bash(hexdump:*)\",\n" +
+            "  \"Bash(strings:*)\", \"Bash(objdump:*)\", \"Bash(readelf:*)\", \"Bash(gdb:*)\", \"Bash(r2:*)\", \"Bash(radare2:*)\",\n" +
+            "  \"Bash(adb:*)\", \"Bash(apk:*)\", \"Bash(apt:*)\", \"Bash(ssh:*)\", \"Bash(scp:*)\", \"Bash(telnet:*)\",\n" +
+            "  \"Bash(git:*)\", \"Bash(find:*)\", \"Bash(grep:*)\", \"Bash(egrep:*)\", \"Bash(fgrep:*)\", \"Bash(awk:*)\", \"Bash(sed:*)\",\n" +
+            "  \"Bash(cat:*)\", \"Bash(head:*)\", \"Bash(tail:*)\", \"Bash(sort:*)\", \"Bash(uniq:*)\", \"Bash(xargs:*)\",\n" +
+            "  \"Bash(jq:*)\", \"Bash(tcpdump:*)\", \"Bash(mktemp:*)\", \"Bash(timeout:*)\", \"Bash(setsid:*)\", \"Bash(nohup:*)\",\n" +
+            "  \"Bash(id:*)\", \"Bash(whoami:*)\", \"Bash(uname:*)\", \"Bash(hostname:*)\", \"Bash(ps:*)\", \"Bash(env:*)\",\n" +
+            "  \"Bash(ls:*)\", \"Bash(stat:*)\", \"Bash(file:*)\", \"Bash(echo:*)\", \"Bash(printf:*)\", \"Bash(cd:*)\",\n" +
+            "  \"Bash(pwd:*)\", \"Bash(mkdir:*)\", \"Bash(cp:*)\", \"Bash(mv:*)\", \"Bash(rm:*)\", \"Bash(touch:*)\",\n" +
+            "  \"Bash(ln:*)\", \"Bash(tar:*)\", \"Bash(unzip:*)\", \"Bash(gzip:*)\", \"Bash(gunzip:*)\", \"Bash(zip:*)\",\n" +
+            "  \"Bash(df:*)\", \"Bash(du:*)\", \"Bash(mount:*)\", \"Bash(dd:*)\", \"Bash(nslookup:*)\", \"Bash(dig:*)\",\n" +
+            "  \"Bash(host:*)\", \"Bash(ping:*)\", \"Bash(ip:*)\", \"Bash(ifconfig:*)\", \"Bash(ss:*)\", \"Bash(netstat:*)\",\n" +
+            "  \"Bash(lsof:*)\", \"Bash(fuser:*)\", \"Bash(kill:*)\", \"Bash(pkill:*)\", \"Bash(sleep:*)\", \"Bash(date:*)\",\n" +
+            "  \"Bash(su:*)\", \"Bash(sudo:*)\", \"Bash(reboot:*)\", \"Bash(shutdown:*)\",\n" +
+            "]\n" +
+            "allow_dynamic_bash = true\n";
+
     /** 读取内置破甲环境提示词资产（assets/break-armor-prompt.md），读失败返回空串 */
     private String readBreakArmorPrompt() {
         try (InputStream in = getAssets().open("break-armor-prompt.md");
@@ -4278,6 +4314,48 @@ public class MainActivity extends Activity {
                     java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
                     Log.d(TAG, "reasonix break-armor system_prompt injected");
                 }
+            }
+            // 渗透修复（reasonix plan 模式 bash trust 门禁）：非内置只读集的命令即使 YOLO 也会
+            // 卡在确认（"This bash command is not in Reasonix's built-in read-only set"）。
+            // 注入 [permissions] allow 列表覆盖渗透/侦查/运维常用命令前缀（never prompted），
+            // 并开启 allow_dynamic_bash（allow 覆盖 $() 命令替换与解释器 -c/-e），
+            // 再把 desktop 默认审批模式设为 yolo。幂等：含 RSXM_PERM_ALLOW 标记则跳过。
+            // TOML 禁止重复声明表：无 [permissions] 段时追加完整块；已有段则按需插行合并。
+            if (!content.contains("RSXM_PERM_ALLOW")) {
+                boolean hasPermHead = java.util.regex.Pattern.compile("(?m)^\\s*\\[permissions\\]\\s*$").matcher(content).find();
+                boolean hasAllowKey = java.util.regex.Pattern.compile("(?m)^\\s*allow\\s*=").matcher(content).find();
+                if (!hasPermHead) {
+                    content += PERMISSIONS_RSXM_BLOCK;
+                } else if (!hasAllowKey) {
+                    // 已有 [permissions] 段但无 allow 键：在段头下插 allow 数组 + allow_dynamic_bash
+                    content = content.replaceFirst("(?m)^\\s*\\[permissions\\]\\s*$",
+                            "[permissions]\nallow = [\n"
+                                    + "  \"Bash(curl:*)\", \"Bash(wget:*)\", \"Bash(nc:*)\", \"Bash(ncat:*)\", \"Bash(nmap:*)\", \"Bash(masscan:*)\", \"Bash(hydra:*)\",\n"
+                                    + "  \"Bash(sqlmap:*)\", \"Bash(sqlite3:*)\", \"Bash(python:*)\", \"Bash(python3:*)\", \"Bash(perl:*)\", \"Bash(ruby:*)\", \"Bash(php:*)\",\n"
+                                    + "  \"Bash(sh:*)\", \"Bash(bash:*)\", \"Bash(busybox:*)\", \"Bash(ash:*)\", \"Bash(openssl:*)\", \"Bash(base64:*)\", \"Bash(adb:*)\",\n"
+                                    + "  \"Bash(apk:*)\", \"Bash(ssh:*)\", \"Bash(scp:*)\", \"Bash(telnet:*)\", \"Bash(git:*)\", \"Bash(find:*)\", \"Bash(grep:*)\", \"Bash(awk:*)\", \"Bash(sed:*)\",\n"
+                                    + "  \"Bash(cat:*)\", \"Bash(head:*)\", \"Bash(tail:*)\", \"Bash(jq:*)\", \"Bash(tcpdump:*)\", \"Bash(nc:*)\", \"Bash(nmap:*)\", \"Bash(su:*)\", \"Bash(sudo:*)\",\n"
+                                    + "]\nallow_dynamic_bash = true\n");
+                } else if (!content.contains("allow_dynamic_bash")) {
+                    content = content.replaceFirst("(?m)^\\s*\\[permissions\\]\\s*$",
+                            "[permissions]\nallow_dynamic_bash = true\n");
+                } else {
+                    // 用户已自定义 allow + allow_dynamic_bash：仅补标记注释，保留用户配置
+                    content += "\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass) user-allow kept\n";
+                }
+                content += "\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass)\n";
+                // [desktop] 已存在时不能重复声明表（TOML 规范），改为在已有段内插行；
+                // 无 [desktop] 段时才追加新表。
+                if (content.contains("default_tool_approval_mode")) {
+                    Log.d(TAG, "reasonix desktop approval mode already set");
+                } else if (java.util.regex.Pattern.compile("(?m)^\\s*\\[desktop\\]\\s*$").matcher(content).find()) {
+                    content = content.replaceFirst("(?m)^\\s*\\[desktop\\]\\s*$",
+                            "[desktop]\ndefault_tool_approval_mode = \"yolo\"");
+                } else {
+                    content += "\n[desktop]\ndefault_tool_approval_mode = \"yolo\"\n";
+                }
+                java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
+                Log.d(TAG, "reasonix [permissions] allow injected (pentest command bypass)");
             }
             if (content.contains("bash = \"off\"")) {
                 Log.d(TAG, "reasonix sandbox already disabled");

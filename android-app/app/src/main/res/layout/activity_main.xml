@@ -361,10 +361,9 @@
             android:layout_height="1dp"
             android:background="#1E1E1E" />
 
-        <!-- 面板内容区（各功能内容动态填充） -->
         <!-- 面板内容区（各功能内容动态填充）。
-             LockedScrollView：功能页整体不可滑动，仅列表/输入框内部二级滚动 -->
-        <com.rsxm.app.LockedScrollView
+             改为普通 ScrollView：高级设置等长面板需要整体可滑动 -->
+        <ScrollView
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
@@ -377,6 +376,6 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical" />
-        </com.rsxm.app.LockedScrollView>
+        </ScrollView>
     </LinearLayout>
 </FrameLayout>

@@ -5184,8 +5184,10 @@ public class MainActivity extends Activity {
     private volatile SessionFieldMapper sessionMapper;
     /** 已渲染的消息数量（增量追加气泡） */
     private int nativeRenderedCount = 0;
-    /** PTY 实时流缓冲（native 视图下追加为 assistant 气泡；保证回显不依赖 jsonl） */
-    private final StringBuilder nativePtyStream = new StringBuilder();
+    /** 高级设置面板内的动态标签控件引用（状态刷新用；面板关闭后为 null） */
+    private TextView advancedBgLabel;
+    private TextView advancedYoloLabel;
+    private TextView advancedSpeedLabel;
     /** 会话 jsonl 轮询定时器（SIG：1s）/ 已启动标记 */
     private final Handler nativePoller = new Handler(Looper.getMainLooper());
     private boolean nativePollStarted = false;
@@ -5197,104 +5199,16 @@ public class MainActivity extends Activity {
         }
     };
 
-    /** 高级设置面板内的动态标签控件引用（状态刷新用；面板关闭后为 null） */
-    private TextView advancedBgLabel;
-    private TextView advancedYoloLabel;
-    private TextView advancedSpeedLabel;
-
-    /** 剥离 ANSI 转义序列（保留换行），用于 native 视图的 PTY 流显示 */
-    private static String stripAnsi(String s) {
-        if (s == null || s.isEmpty()) return s;
-        StringBuilder sb = new StringBuilder(s.length());
-        int i = 0, n = s.length();
-        while (i < n) {
-            char c = s.charAt(i);
-            if (c == '\u001b') {
-                // ESC[ ... 字母 或 OSC...BEL / 其他 ESC 序列：跳过
-                int j = i + 1;
-                if (j < n && s.charAt(j) == '[') {
-                    j++;
-                    while (j < n && !(s.charAt(j) >= 0x40 && s.charAt(j) <= 0x7e)) j++;
-                    i = Math.min(j + 1, n);
-                } else if (j < n && s.charAt(j) == ']') {
-                    j++;
-                    while (j < n && s.charAt(j) != '\u0007') {
-                        if (s.charAt(j) == '\u001b' && j + 1 < n && s.charAt(j + 1) == '\\') { j += 2; break; }
-                        j++;
-                    }
-                    i = Math.min(j + 1, n);
-                } else {
-                    i = Math.min(j + 1, n);
-                }
-            } else {
-                sb.append(c);
-                i++;
-            }
-        }
-        return sb.toString();
-    }
-
-    /** PTY 流 → native 视图：剥离 ANSI 追加进缓冲，限频刷新为 assistant 状态气泡 */
-    private void feedNativePty(String text) {
-        String clean = stripAnsi(text);
-        if (clean.isEmpty()) return;
-        synchronized (nativePtyStream) {
-            nativePtyStream.append(clean);
-            if (nativePtyStream.length() > 20000) {
-                nativePtyStream.delete(0, nativePtyStream.length() - 20000);
-            }
-        }
-        ui.post(() -> {
-            final String snapshot;
-            synchronized (nativePtyStream) { snapshot = nativePtyStream.toString(); }
-            renderNativePty(snapshot);
-        });
-    }
-
-    /** 把 PTY 缓冲快照渲染为消息区（放在 jsonl 气泡之后，作为实时 assistant 输出区） */
-    private void renderNativePty(String snapshot) {
-        LinearLayout list = findViewById(R.id.native_output);
-        if (list == null) return;
-        // 移除旧的 PTY 容器（若有），重新追加当前快照
-        for (int i = list.getChildCount() - 1; i >= 0; i--) {
-            if (list.getChildAt(i) instanceof LinearLayout
-                    && "pty-stream".equals(list.getChildAt(i).getTag())) {
-                list.removeViewAt(i);
-            }
-        }
-        if (snapshot.trim().isEmpty()) return;
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setTag("pty-stream");
-        TextView meta = new TextView(this);
-        meta.setText("终端输出（实时）");
-        meta.setTextColor(0xFF8B949E);
-        meta.setTextSize(10);
-        wrap.addView(meta);
-        TextView body = new TextView(this);
-        body.setText(snapshot);
-        body.setTextColor(0xFFB8C0CC);
-        body.setTextSize(12);
-        body.setTypeface(android.graphics.Typeface.MONOSPACE);
-        body.setBackgroundColor(0xFF0D1117);
-        body.setPadding(dp(8), dp(6), dp(8), dp(6));
-        wrap.addView(body);
-        list.addView(wrap);
-        ScrollView sv = findViewById(R.id.native_scroll);
-        if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
-    }
-
     private void pushOutput(String text) {
         Log.d(TAG, "OUT> " + (text.length() > 200 ? text.substring(0, 200) : text));
         final MainActivity target = sCurrent;
         if (target == null) return;
-        // 原生视图模式：PTY 实时流剥离 ANSI 后显示为「终端输出」气泡（保证回显，不依赖 jsonl）；
-        // jsonl 字段映射仍并行轮询以提供结构化气泡。
+        // 原生视图模式：取消 PTY 屏幕显示（只显示输入输出内容）。
+        // 数据源仅用会话 jsonl（结构化为 user/assistant/tool 气泡），PTY 帧不再渲染进 GUI。
         if (target.nativeViewOn) {
             if (target.sessionMapper == null) {
                 target.sessionMapper = target.resolveCurrentSessionMapper();
             }
-            target.feedNativePty(text);
             return;
         }
         if (!sWebActive) {
@@ -5313,10 +5227,16 @@ public class MainActivity extends Activity {
     /** 原生视图：映射 CLI 字段到 GUI。reasonix 会话实时写入 jsonl，这里按字段增量渲染气泡 */
     private void pollNativeSession() {
         SessionFieldMapper m = sessionMapper;
-        if (m == null) return;
-        boolean changed = m.poll();
+        if (m == null) {
+            // 尚无会话文件（reasonix 可能刚启动/多项目）：每轮重试解析定位
+            sessionMapper = resolveCurrentSessionMapper();
+            m = sessionMapper;
+            if (m == null) return;
+        }
+        final SessionFieldMapper mapper = m;
+        boolean changed = mapper.poll();
         if (!changed) return;
-        ui.post(() -> appendNativeMessages(m));
+        ui.post(() -> appendNativeMessages(mapper));
     }
 
     /** 把 SessionFieldMapper 新解析出的消息追加渲染为气泡；序号/定位逻辑幂等 */

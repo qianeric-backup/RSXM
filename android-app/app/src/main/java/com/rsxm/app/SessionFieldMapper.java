@@ -6,6 +6,8 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -62,7 +64,8 @@ public class SessionFieldMapper {
     /** 已解析消息列表（只读使用） */
     public List<MappedMessage> all() { return messages; }
 
-    /** 增量解析：读取自 lastOffset 起的新 jsonl 行并追加到 messages；无文件/无新增返回 false */
+    /** 增量解析：按字节读取并用 CharsetDecoder 增量解码（避免多字节 UTF-8 在块边界截断，
+     *  也避免字符/字节偏移混用导致的错位重复读）。无文件/无新增返回 false。 */
     public synchronized boolean poll() {
         if (sessionFile == null || !sessionFile.exists()) return false;
         long size = sessionFile.length();
@@ -70,25 +73,32 @@ public class SessionFieldMapper {
         try (RandomAccessFile raf = new RandomAccessFile(sessionFile, "r")) {
             raf.seek(lastOffset);
             long avail = size - lastOffset;
-            byte[] buf = new byte[(int) Math.min(avail, 4 * 1024 * 1024)];
+            byte[] buf = new byte[(int) Math.min(avail, 2 * 1024 * 1024)];
             int n = raf.read(buf);
             if (n <= 0) return false;
-            String chunk = new String(buf, 0, n, StandardCharsets.UTF_8);
             lastOffset += n;
-            // 可能切到多字节字符中间：丢弃最后一个不完整 UTF-8 字节（≤3）回退
-            int cut = 0;
-            for (int i = chunk.length() - 1; i >= 0 && i > chunk.length() - 4; i--) {
-                char c = chunk.charAt(i);
-                if (c == '\n') break;
-                if (Character.isHighSurrogate(c) || Character.isLowSurrogate(c)
-                        || (c >= 0x80 && (c & 0xC0) == 0x80)) {
-                    cut = i;
-                } else {
-                    break;
+            java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+            String text;
+            try {
+                CharBuffer cb = dec.decode(java.nio.ByteBuffer.wrap(buf, 0, n));
+                text = cb.toString();
+            } catch (java.nio.charset.CharacterCodingException e) {
+                // 块尾可能是不完整多字节字符：仅解码完整前缀，剩余字节回退给下次轮询
+                int valid = 0;
+                while (valid < n) {
+                    byte b = buf[valid];
+                    int rem = (b & 0x80) == 0 ? 1
+                            : (b & 0xE0) == 0xC0 ? 2
+                            : (b & 0xF0) == 0xE0 ? 3
+                            : (b & 0xF8) == 0xF0 ? 4 : 1;
+                    if (valid + rem > n) break;
+                    valid += rem;
                 }
+                lastOffset -= (n - valid);
+                text = new String(buf, 0, valid, StandardCharsets.UTF_8);
             }
-            String text = cut > 0 ? chunk.substring(0, cut) : chunk;
-            lastOffset -= (chunk.length() - text.length());
             boolean changed = false;
             for (String line : text.split("\n")) {
                 String s = line.trim();
@@ -106,14 +116,20 @@ public class SessionFieldMapper {
         }
     }
 
-    /** 解析一行 jsonl 为字段化消息；结构不符返回 null */
+    /** 解析一行 jsonl 为字段化消息；结构不符返回 null。
+     *  兼容 reasonix 会话文件多种事件形态：
+     *   - 平铺 {role, content(, ts, model, usage)}
+     *   - message 包装 {type:"user_message"/..., message:{...}} 或 {message:{role,...}}
+     *   - events 分支 {event_index, type, message:{...}}
+     *   - /memory、steer 等事件（无 message 对象/无 role）→ null 忽略 */
     private MappedMessage parseLine(String line) {
         try {
             JSONObject o = new JSONObject(line);
-            // 字段容器：message 包装（"message": {role, content, ...}）或平铺
-            JSONObject root = o;
-            if (o.has("message") && o.opt("message") instanceof JSONObject) {
-                root = o.getJSONObject("message");
+            JSONObject root = findMessageObject(o);
+            if (root == null) {
+                // 无 message 容器：顶层可能有 role（平铺形态）
+                if (!hasAnyRole(o)) return null;
+                root = o;
             }
             String role = firstOf(root, "role", "kind", "");
             role = normalizeRole(role);
@@ -129,14 +145,39 @@ public class SessionFieldMapper {
             if ("tool".equals(role)) {
                 m.toolName = firstOf(root, "tool_name", firstOf(root, "name", ""));
             }
-            if (m.content.isEmpty() && m.toolName.isEmpty()
-                    && !m.isUser() && !m.isAssistant()) {
-                // 空 tool 事件（如 tool_result 无文本）仍保留，仅内容置空
-            }
             return m;
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** 递归找含 role 的 message 对象（优先 message/event 字段下的对象） */
+    private static JSONObject findMessageObject(JSONObject o) {
+        // 直接含 role 的对象
+        if (hasAnyRole(o)) return o;
+        // message 字段
+        Object msg = o.opt("message");
+        if (msg instanceof JSONObject) {
+            JSONObject m = (JSONObject) msg;
+            if (hasAnyRole(m)) return m;
+        }
+        // event / payload / data 字段
+        for (String k : new String[]{"event", "payload", "data", "body", "input"}) {
+            Object v = o.opt(k);
+            if (v instanceof JSONObject) {
+                JSONObject m = (JSONObject) v;
+                if (hasAnyRole(m)) return m;
+                Object msg2 = m.opt("message");
+                if (msg2 instanceof JSONObject && hasAnyRole((JSONObject) msg2)) return (JSONObject) msg2;
+                JSONObject deep = findMessageObject(m);
+                if (deep != null) return deep;
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasAnyRole(JSONObject o) {
+        return o != null && (o.has("role") || o.has("kind"));
     }
 
     private static String normalizeRole(String role) {

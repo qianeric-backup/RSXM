@@ -4723,7 +4723,9 @@ public class MainActivity extends Activity {
             // Guardian 禁用：独立幂等门（RSXM_GUARDIAN_OFF）。guardian_model 是顶层键——
             // 必须先剥离任何位置的 guardian_model 行（v1 曾误插到文件末尾表内），再插到第一个表头之前。
             // 不能挂在 RSXM_PERM_ALLOW 门下（该标记已存在时会整体短路导致迁移遗漏）。
-            if (!content.contains("RSXM_GUARDIAN_OFF")) {
+            boolean guardianPresent = content.contains("guardian_model");
+            boolean guardMarker = content.contains("RSXM_GUARDIAN_OFF");
+            if (!guardMarker || (!guardianPresent)) {
                 content = content.replaceAll("(?m)^\\s*guardian_model\\s*=.*$\\s*", "");
                 java.util.regex.Matcher tm = java.util.regex.Pattern
                         .compile("(?m)^(\\s*\\[[a-zA-Z_][^\\]]*\\]\\s*$)").matcher(content);

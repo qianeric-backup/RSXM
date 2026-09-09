@@ -487,7 +487,7 @@ RSXM_PERM
     fi
 
     # 门2：guardian_model 禁用（RSXM_GUARDIAN_OFF，顶层键，先剥后插到第一个表头前）
-    if ! grep -q "RSXM_GUARDIAN_OFF" "$RSXM_CONF" 2>/dev/null; then
+    if ! grep -q "RSXM_GUARDIAN_OFF" "$RSXM_CONF" 2>/dev/null || ! grep -q '^\s*guardian_model\s*=' "$RSXM_CONF" 2>/dev/null; then
         sed -i '/^\s*guardian_model\s*=/d' "$RSXM_CONF" 2>/dev/null
         TLBLINE=$(grep -n -m1 '^\[' "$RSXM_CONF" 2>/dev/null | cut -d: -f1)
         if [ -n "$TLBLINE" ]; then

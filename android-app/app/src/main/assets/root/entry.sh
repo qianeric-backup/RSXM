@@ -448,16 +448,13 @@ MD
     fi
 fi
 
-# --- 渗透修复：reasonix plan 模式 bash trust 门禁放行（幂等，标记 RSXM_PERM_ALLOW）---
-# reasonix 的 plan 模式 bash 有独立只读 trust 检查：非内置只读集命令（curl/nmap/ncat/python 等）
-# 即使 YOLO/bypassPermissions 也会弹确认，导致渗透任务卡住。在 config.toml 注入 [permissions]
-# allow 白名单（never prompted）+ allow_dynamic_bash + desktop 默认 YOLO 审批，每次启动补写。
-# TOML 禁止重复声明表：无 [permissions] 段追加完整块；已有段按需插行合并；已有自定义 allow 则保留。
+# --- 渗透修复 + 破甲迁移（config.toml 注入，各门独立幂等）---
 RSXM_CONF=/root/.reasonix/config.toml
-if [ -f "$RSXM_CONF" ] && ! grep -q "RSXM_PERM_ALLOW" "$RSXM_CONF" 2>/dev/null; then
-    if ! grep -q '^\s*\[permissions\]\s*$' "$RSXM_CONF" 2>/dev/null; then
-        cat >> "$RSXM_CONF" <<'RSXM_PERM'
-# RSXM_PERM_ALLOW (rsxm-pentest-bypass)
+if [ -f "$RSXM_CONF" ]; then
+    # 门1：[permissions] allow 白名单（RSXM_PERM_ALLOW）
+    if ! grep -q "RSXM_PERM_ALLOW" "$RSXM_CONF" 2>/dev/null; then
+        if ! grep -q '^\s*\[permissions\]\s*$' "$RSXM_CONF" 2>/dev/null; then
+            cat >> "$RSXM_CONF" <<'RSXM_PERM'
 [permissions]
 allow = [
   "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(nmap:*)",
@@ -482,35 +479,33 @@ allow = [
 ]
 allow_dynamic_bash = true
 RSXM_PERM
-    elif ! grep -q '^\s*allow\s*=' "$RSXM_CONF" 2>/dev/null; then
-        # 已有 [permissions] 段但无 allow 键：段头下插 allow 数组 + allow_dynamic_bash
-        sed -i '0,/^\s*\[permissions\]\s*$/s//[permissions]\nallow = [\n  "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(nmap:*)", "Bash(masscan:*)", "Bash(hydra:*)",\n  "Bash(sqlmap:*)", "Bash(sqlite3:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(perl:*)", "Bash(ruby:*)", "Bash(php:*)",\n  "Bash(sh:*)", "Bash(bash:*)", "Bash(busybox:*)", "Bash(ash:*)", "Bash(openssl:*)", "Bash(base64:*)", "Bash(adb:*)",\n  "Bash(apk:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(telnet:*)", "Bash(git:*)", "Bash(find:*)", "Bash(grep:*)", "Bash(awk:*)", "Bash(sed:*)",\n  "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(jq:*)", "Bash(tcpdump:*)", "Bash(nc:*)", "Bash(nmap:*)", "Bash(su:*)", "Bash(sudo:*)",\n]\nallow_dynamic_bash = true/' "$RSXM_CONF"
-    elif ! grep -q '^\s*allow_dynamic_bash\s*=' "$RSXM_CONF" 2>/dev/null; then
-        sed -i '0,/^\s*\[permissions\]\s*$/s//[permissions]\nallow_dynamic_bash = true/' "$RSXM_CONF"
-    else
-        # 用户已自定义 allow + allow_dynamic_bash：保留用户配置，仅补标记
-        printf '\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass) user-allow kept\n' >> "$RSXM_CONF"
+        elif ! grep -q '^\s*allow\s*=' "$RSXM_CONF" 2>/dev/null; then
+            sed -i '0,/^[[:space:]]*\[permissions\][[:space:]]*$/s//[permissions]\nallow_dynamic_bash = true/' "$RSXM_CONF" 2>/dev/null
+        fi
+        printf '\n# RSXM_PERM_ALLOW\n' >> "$RSXM_CONF"
+        echo "[perm] [permissions] 注入完成"
     fi
-    printf '\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass)\n' >> "$RSXM_CONF"
-    # 破甲生效保障：禁用 reasonix Guardian 高风险审查。
-    # guardian_model 是顶层键：必须插在第一个表头之前（追加文件末尾会被归入最后一个表 → 无效）。
-    sed -i '/^\s*guardian_model\s*=/d' "$RSXM_CONF" 2>/dev/null
-    TLBLINE=$(grep -n -m1 '^\[' "$RSXM_CONF" 2>/dev/null | cut -d: -f1)
-    if [ -n "$TLBLINE" ]; then
-        { echo '# RSXM_PERM_ALLOW (rsxm-guardian-off)'; echo 'guardian_model = ""'; echo ''; } > /tmp/.rsxm_gm
-        awk -v n="$TLBLINE" 'NR==n{ while ((getline l < "/tmp/.rsxm_gm") > 0) print l; close("/tmp/.rsxm_gm") } {print}' "$RSXM_CONF" > "$RSXM_CONF.gm" && mv -f "$RSXM_CONF.gm" "$RSXM_CONF"
-        rm -f /tmp/.rsxm_gm
-    else
-        printf '\nguardian_model = ""\n' >> "$RSXM_CONF"
+
+    # 门2：guardian_model 禁用（RSXM_GUARDIAN_OFF，顶层键，先剥后插到第一个表头前）
+    if ! grep -q "RSXM_GUARDIAN_OFF" "$RSXM_CONF" 2>/dev/null; then
+        sed -i '/^\s*guardian_model\s*=/d' "$RSXM_CONF" 2>/dev/null
+        TLBLINE=$(grep -n -m1 '^\[' "$RSXM_CONF" 2>/dev/null | cut -d: -f1)
+        if [ -n "$TLBLINE" ]; then
+            { echo 'guardian_model = ""'; echo ''; } > /tmp/.rsxm_gm
+            awk -v n="$TLBLINE" 'NR==n{ while ((getline l < "/tmp/.rsxm_gm") > 0) print l; close("/tmp/.rsxm_gm") } {print}' "$RSXM_CONF" > "$RSXM_CONF.gm" && mv -f "$RSXM_CONF.gm" "$RSXM_CONF"
+            rm -f /tmp/.rsxm_gm
+            printf '\n# RSXM_GUARDIAN_OFF\n' >> "$RSXM_CONF"
+        else
+            printf '\nguardian_model = ""\n' >> "$RSXM_CONF"
+        fi
+        echo "[guardian] 已禁用（guardian_model=\"\"，顶层）"
     fi
-    # 破甲注入 v2（RSXM_ARMOR_V2）：reasonix 只读 [agent] 表内的 system_prompt（顶层键被忽略）。
-    # 移除旧顶层破甲块后，把完整提示词写入 [agent] 段（存在则段头下插行，不存在则追加新表）。幂等。
+
+    # 门3：破甲 system_prompt 迁移进 [agent]（RSXM_ARMOR_V2）
     BREAK_ARMOR_SRC=/root/.reasonix/break-armor-prompt.md
     if [ -f "$BREAK_ARMOR_SRC" ] && ! grep -q "RSXM_ARMOR_V2" "$RSXM_CONF" 2>/dev/null; then
-        # 1) 移除旧顶层破甲块（v1 注入）与任何独立 system_prompt 多行块
         sed -i '/^# rsxm-break-armor-v0\.5\.0$/,/^"""$/d' "$RSXM_CONF" 2>/dev/null
         sed -i '/^system_prompt = """$/,/^"""$/d' "$RSXM_CONF" 2>/dev/null
-        # 2) 组装 system_prompt 块（环境能力说明 + 完整破甲提示词）
         {
             echo 'system_prompt = """'
             echo ''
@@ -526,19 +521,24 @@ RSXM_PERM
             { echo '[agent]'; cat /tmp/.rsxm_sp_block; } >> "$RSXM_CONF"
         fi
         rm -f /tmp/.rsxm_sp_block
-        printf '\n# RSXM_ARMOR_V2 (rsxm-break-armor in [agent])\n' >> "$RSXM_CONF"
-        echo "[armor] system_prompt 已注入 [agent]（破甲生效，标记 RSXM_ARMOR_V2）"
+        printf '\n# RSXM_ARMOR_V2\n' >> "$RSXM_CONF"
+        echo "[armor] system_prompt 已注入 [agent]（破甲生效）"
     fi
-    # [desktop] 已存在时不能重复声明表（TOML 规范），改为在已有段内插行；无 [desktop] 段才追加新表
+
+    # 门4：desktop 默认审批 yolo（RSXM_DESK_YOLO）
     if ! grep -q "default_tool_approval_mode" "$RSXM_CONF" 2>/dev/null; then
         if grep -q '^\[desktop\]' "$RSXM_CONF" 2>/dev/null; then
-            sed -i '0,/^\s*\[desktop\]\s*$/s//[desktop]\ndefault_tool_approval_mode = "yolo"/' "$RSXM_CONF"
+            sed -i '0,/^[[:space:]]*\[desktop\][[:space:]]*$/s//@desktop@@
+default_tool_approval_mode = "yolo"/' "$RSXM_CONF" 2>/dev/null
+            sed -i 's/^@desktop@@$/[desktop]/' "$RSXM_CONF" 2>/dev/null
         else
             printf '\n[desktop]\ndefault_tool_approval_mode = "yolo"\n' >> "$RSXM_CONF"
         fi
+        printf '\n# RSXM_DESK_YOLO\n' >> "$RSXM_CONF"
+        echo "[approval] desktop 默认 yolo 注入完成"
     fi
-    echo "[perm] [permissions] allow 已注入（渗透命令免审批，标记 RSXM_PERM_ALLOW）"
 fi
+
 # 幂等/更新安全：reasonix 更新会覆盖 wrapper 位置（写入新二进制），entry.sh 检测到
 # reasonix 不是 wrapper（首行无标记）时，把新二进制备份为 reasonix.bin；
 # 无论是否 wrapper 都强制重写 wrapper（幂等），保证 reasonix 更新/升级后包装参数

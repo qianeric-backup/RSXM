@@ -11,8 +11,8 @@ android {
         minSdk 26
         targetSdk 34
         // 版本随 GitHub Release 同步更新（当前 v2.0.2）
-        versionCode 37
-        versionName "2.0.7"
+        versionCode 38
+        versionName "2.0.8"
     }
 
     buildTypes {

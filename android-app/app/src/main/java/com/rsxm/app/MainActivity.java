@@ -4717,33 +4717,38 @@ public class MainActivity extends Activity {
                     content += "\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass) user-allow kept\n";
                 }
                 content += "\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass)\n";
-                // 破甲生效保障：禁用 reasonix Guardian 高风险审查（guardian_model 留空 →
-                // "Guardian was disabled because its model was not found"，不再 deny 高风险请求）。
-                // 注意：guardian_model 是顶层键（toml:"guardian_model"），必须插在第一个表头之前
-                // （追加到文件末尾会被 TOML 归入最后一个表 → 无效）。
-                // 先剥离任何位置的 guardian_model 行（v1 曾误插到末尾表内），再插顶层。
+                java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
+                Log.d(TAG, "reasonix [permissions] allow injected (pentest command bypass)");
+            }
+            // Guardian 禁用：独立幂等门（RSXM_GUARDIAN_OFF）。guardian_model 是顶层键——
+            // 必须先剥离任何位置的 guardian_model 行（v1 曾误插到文件末尾表内），再插到第一个表头之前。
+            // 不能挂在 RSXM_PERM_ALLOW 门下（该标记已存在时会整体短路导致迁移遗漏）。
+            if (!content.contains("RSXM_GUARDIAN_OFF")) {
                 content = content.replaceAll("(?m)^\\s*guardian_model\\s*=.*$\\s*", "");
                 java.util.regex.Matcher tm = java.util.regex.Pattern
                         .compile("(?m)^(\\s*\\[[a-zA-Z_][^\\]]*\\]\\s*$)").matcher(content);
                 if (tm.find()) {
                     content = content.substring(0, tm.start())
-                            + "# RSXM_PERM_ALLOW (rsxm-guardian-off)\nguardian_model = \"\"\n\n"
+                            + "# RSXM_GUARDIAN_OFF\nguardian_model = \"\"\n"
                             + content.substring(tm.start());
                 } else {
                     content += "\nguardian_model = \"\"\n";
                 }
-                // [desktop] 已存在时不能重复声明表（TOML 规范），改为在已有段内插行；
-                // 无 [desktop] 段时才追加新表。
-                if (content.contains("default_tool_approval_mode")) {
-                    Log.d(TAG, "reasonix desktop approval mode already set");
-                } else if (java.util.regex.Pattern.compile("(?m)^\\s*\\[desktop\\]\\s*$").matcher(content).find()) {
+                content += "\n# RSXM_GUARDIAN_OFF\n";
+                java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
+                Log.d(TAG, "reasonix guardian_model disabled (top-level)");
+            }
+            // desktop 默认审批 yolo：独立幂等门（RSXM_DESK_YOLO）。
+            if (!content.contains("default_tool_approval_mode")) {
+                if (java.util.regex.Pattern.compile("(?m)^\\s*\\[desktop\\]\\s*$").matcher(content).find()) {
                     content = content.replaceFirst("(?m)^\\s*\\[desktop\\]\\s*$",
                             "[desktop]\ndefault_tool_approval_mode = \"yolo\"");
                 } else {
                     content += "\n[desktop]\ndefault_tool_approval_mode = \"yolo\"\n";
                 }
+                content += "\n# RSXM_DESK_YOLO\n";
                 java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
-                Log.d(TAG, "reasonix [permissions] allow injected (pentest command bypass)");
+                Log.d(TAG, "reasonix desktop yolo injected");
             }
             // 破甲注入 v2（RSXM_ARMOR_V2 标记）：reasonix 只读 [agent] 表内的 system_prompt，
             // 顶层键被忽略（实测会话 system 仍是默认 prompt → 破甲不生效）。

@@ -287,7 +287,10 @@ public class MainActivity extends Activity {
 
         // 主屏快捷入口行：一键直达常用面板，减少对侧滑栏的依赖
         findViewById(R.id.qb_github).setOnClickListener(v -> showGitHubDialog());
-        findViewById(R.id.qb_view).setOnClickListener(v -> toggleNativeView());
+        // 视图切换：点击按当前状态进入/退出（toggle 语义保留）
+        findViewById(R.id.qb_view).setOnClickListener(v -> {
+            if (nativeViewOn) exitNativeView(); else enterNativeView();
+        });
         findViewById(R.id.qb_adb).setOnClickListener(v -> showAdbDialog());
         findViewById(R.id.qb_apikey).setOnClickListener(v -> showApiKeyConfigDialog());
         findViewById(R.id.qb_ds2api).setOnClickListener(v -> showDs2ApiDialog());
@@ -313,9 +316,38 @@ public class MainActivity extends Activity {
                 return false;
             });
         }
+        // 原生视图头部操作：新会话（清恢复标记并重启环境，快速换对话）
+        findViewById(R.id.native_new).setOnClickListener(v -> {
+            try {
+                File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+                new File(rootDir, ".rsxm-resume").delete();
+                // 重置映射器：新会话开始后 jsonl 变化，重新定位最新的（旧文件被 reasonix 保留）
+                sessionMapper = null;
+                nativeRenderedCount = 0;
+                LinearLayout list = findViewById(R.id.native_output);
+                if (list != null) list.removeAllViews();
+                TextView cnt = findViewById(R.id.native_msg_count);
+                if (cnt != null) cnt.setText("0 条");
+                pushOutput("\r\n[已清除会话恢复标记，重启后开始全新会话]\r\n");
+                // 结束后自动重新定位到新的最新会话
+                ui.postDelayed(() -> {
+                    sessionMapper = resolveCurrentSessionMapper();
+                    pollNativeSession();
+                }, 3500);
+                restartEnvironment();
+                write("\u000c");
+            } catch (Exception e) {
+                Log.e(TAG, "native new session failed", e);
+            }
+        });
+        // 回终端（原生视图 → xterm 终端）
+        findViewById(R.id.native_gototerm).setOnClickListener(v -> exitNativeView());
 
         // 全屏功能面板：返回按钮关闭（系统返回键同样生效）
         findViewById(R.id.panel_back).setOnClickListener(v -> hidePanel());
+
+        // 软键盘监听：原生视图输入时自动滚底
+        setupKeyboardListener();
 
         // 测试/调试入口：am start -e force_reinstall true 模拟无 root 设备的自动修复流程
         if (getIntent().getBooleanExtra("force_reinstall", false)) {
@@ -328,6 +360,16 @@ public class MainActivity extends Activity {
         // 使进程不被系统回收，proot/reasonix 环境得以在后台继续运行。
         if (getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("background_mode", false)) {
             startBackgroundService(false);
+        }
+
+        // 视图模式记忆恢复：上次停留在原生会话视图 → 环境启动后自动进入（延迟到
+        // WebView/环境准备阶段结束后，避免与启动流程抢焦点）。
+        if ("native".equals(getSharedPreferences("prefs", MODE_PRIVATE).getString("view_mode", "terminal"))) {
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                if (!nativeViewOn && environmentStarted) {
+                    enterNativeView();
+                }
+            }, 1200);
         }
     }
 
@@ -581,14 +623,49 @@ public class MainActivity extends Activity {
         if (cb != null) cb.run();
     }
 
-    /** 返回键：面板可见时先关面板，不退出应用 */
+    /** 返回键三级逻辑：全屏面板 → 原生会话视图 → 退出应用 */
     @Override
     public void onBackPressed() {
+        // 1) 功能面板打开：关面板
         if (findViewById(R.id.panel_overlay).getVisibility() == View.VISIBLE) {
             hidePanel();
             return;
         }
+        // 2) 原生会话视图：切回终端（不退出应用）
+        if (nativeViewOn) {
+            // 若软键盘弹出，第一次返回先收键盘（再按才切回终端），符合手机习惯
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            View cur = getCurrentFocus();
+            if (imm != null && cur != null && imm.isActive(cur)) {
+                imm.hideSoftInputFromWindow(cur.getWindowToken(), 0);
+                return;
+            }
+            exitNativeView();
+            return;
+        }
         super.onBackPressed();
+    }
+
+    /**
+     * 软键盘全局监听：键盘弹出/收起时同步交互逻辑——
+     *  - 原生会话视图：键盘弹出自动滚到底部（输入时能看见最新消息），收起无操作；
+     *  - 终端视图：键盘弹出会压缩终端高度（adjustResize），reasonix 按新行数重绘，无需干预。
+     */
+    private void setupKeyboardListener() {
+        View root = findViewById(android.R.id.content);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            android.graphics.Rect r = new android.graphics.Rect();
+            root.getWindowVisibleDisplayFrame(r);
+            int heightDiff = root.getRootView().getHeight() - (r.bottom - r.top);
+            if (heightDiff > dp(120)) {
+                // 键盘弹出
+                if (nativeViewOn) {
+                    ScrollView sv = findViewById(R.id.native_scroll);
+                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                }
+            }
+        });
     }
 
     private void updateBgModeLabel() {
@@ -5159,45 +5236,66 @@ public class MainActivity extends Activity {
         return wrap;
     }
 
-    /** 切换终端视图 / 原生会话视图 */
+    /** 切换终端视图 / 原生会话视图（记忆用户选择，重启后恢复） */
     private void toggleNativeView() {
-        nativeViewOn = !nativeViewOn;
+        if (nativeViewOn) {
+            enterNativeView();
+        } else {
+            exitNativeView();
+        }
+    }
+
+    private void enterNativeView() {
+        nativeViewOn = true;
+        getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "native").apply();
         View nativeChatLayout = findViewById(R.id.native_chat);
         View web = findViewById(R.id.webview);
         TextView qb = findViewById(R.id.qb_view);
-        if (nativeViewOn) {
-            nativeChatLayout.setVisibility(View.VISIBLE);
-            web.setVisibility(View.GONE);
-            qb.setText("视图：对话");
-            qb.setTextColor(0xFF81C784);
-            // 定位当前会话 jsonl：优先恢复标记，其次最新非事件 jsonl
-            sessionMapper = resolveCurrentSessionMapper();
-            nativeRenderedCount = 0;
-            LinearLayout list = findViewById(R.id.native_output);
-            if (list != null) list.removeAllViews();
-            TextView info = findViewById(R.id.native_session_info);
-            if (info != null) {
-                SessionFieldMapper m = sessionMapper;
-                info.setText("会话：" + (m != null && m.file() != null
-                        ? m.file().getName() : "—（reasonix 启动后自动创建）"));
-            }
-            // 先做一次全量解析，再启动 1s 轮询
-            pollNativeSession();
-            if (!nativePollStarted) {
-                nativePollStarted = true;
-                nativePoller.postDelayed(nativePollTask, 1000);
-            }
-            // 触发 reasonix 重绘（保持 TUI 正常，会话 jsonl 由 reasonix 实时追加）
-            write("\u000c");
-            findViewById(R.id.native_input).requestFocus();
-        } else {
-            nativeChatLayout.setVisibility(View.GONE);
-            web.setVisibility(View.VISIBLE);
-            qb.setText("视图：终端");
-            qb.setTextColor(0xFFFFD54F);
-            write("\u000c");
-            try { webView.requestFocus(); } catch (Exception ignored) {}
+        nativeChatLayout.setVisibility(View.VISIBLE);
+        web.setVisibility(View.GONE);
+        qb.setText("视图：对话");
+        qb.setTextColor(0xFF81C784);
+        // 定位当前会话 jsonl：优先恢复标记，其次最新非事件 jsonl
+        sessionMapper = resolveCurrentSessionMapper();
+        nativeRenderedCount = 0;
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list != null) list.removeAllViews();
+        TextView info = findViewById(R.id.native_session_info);
+        if (info != null) {
+            SessionFieldMapper m = sessionMapper;
+            info.setText("会话：" + (m != null && m.file() != null
+                    ? m.file().getName() : "—（reasonix 启动后自动创建）"));
         }
+        // 先做一次全量解析，再启动 1s 轮询
+        pollNativeSession();
+        if (!nativePollStarted) {
+            nativePollStarted = true;
+            nativePoller.postDelayed(nativePollTask, 1000);
+        }
+        // 触发 reasonix 重绘（保持 TUI 正常，会话 jsonl 由 reasonix 实时追加）
+        write("\u000c");
+        // 延迟聚焦输入框：让键盘弹出前消息列表先完成首屏渲染
+        findViewById(R.id.native_input).postDelayed(
+                () -> findViewById(R.id.native_input).requestFocus(), 250);
+    }
+
+    private void exitNativeView() {
+        nativeViewOn = false;
+        getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "terminal").apply();
+        View nativeChatLayout = findViewById(R.id.native_chat);
+        View web = findViewById(R.id.webview);
+        TextView qb = findViewById(R.id.qb_view);
+        nativeChatLayout.setVisibility(View.GONE);
+        web.setVisibility(View.VISIBLE);
+        qb.setText("视图：终端");
+        qb.setTextColor(0xFFFFD54F);
+        // 收起软键盘（输入框可能正聚焦），避免切回终端后键盘残留
+        android.view.inputmethod.InputMethodManager imm =
+                (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(
+                findViewById(android.R.id.content).getWindowToken(), 0);
+        write("\u000c");
+        try { webView.requestFocus(); } catch (Exception ignored) {}
     }
 
     /** 解析当前会话 jsonl：.rsxm-resume 标记 → 最新可读 jsonl（排除 events/恢复分支/回收站） */
@@ -5244,7 +5342,7 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    /** 原生会话视图发送：输入框内容写 stdin；user 消息立即映射为气泡 */
+    /** 原生会话视图发送：输入框内容写 stdin；user 消息立即映射为气泡（保持输入焦点，多轮连续输入） */
     private void sendNativeInput() {
         EditText et = findViewById(R.id.native_input);
         if (et == null) return;
@@ -5269,6 +5367,8 @@ public class MainActivity extends Activity {
                 if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
             });
         }
+        // 保持输入焦点：多轮对话无需每次点输入框
+        et.requestFocus();
     }
 
     /** 前台恢复：把后台期间缓存的终端输出分块冲刷到 WebView（避免大字符串单次注入卡顿） */

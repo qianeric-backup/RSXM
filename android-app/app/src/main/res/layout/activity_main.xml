@@ -237,14 +237,15 @@
                 android:orientation="vertical"
                 android:visibility="gone">
 
-                <!-- 会话信息条：当前会话/模型/状态字段 -->
+                <!-- 会话信息条：当前会话/模型/状态字段 + 会话操作快捷按钮 -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:background="#0D1117"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal"
                     android:paddingLeft="8dp"
-                    android:paddingRight="8dp"
+                    android:paddingRight="4dp"
                     android:paddingTop="4dp"
                     android:paddingBottom="4dp">
 
@@ -263,8 +264,37 @@
                         android:id="@+id/native_msg_count"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:paddingRight="8dp"
                         android:text="0 条"
                         android:textColor="#58A6FF"
+                        android:textSize="11sp" />
+
+                    <!-- 会话操作：仅原生视图显示；新会话/回终端 -->
+                    <TextView
+                        android:id="@+id/native_new"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@android:drawable/edit_text"
+                        android:paddingLeft="10dp"
+                        android:paddingRight="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingBottom="4dp"
+                        android:text="新会话"
+                        android:textColor="#7FDB8A"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:id="@+id/native_gototerm"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginLeft="6dp"
+                        android:background="@android:drawable/edit_text"
+                        android:paddingLeft="10dp"
+                        android:paddingRight="10dp"
+                        android:paddingTop="4dp"
+                        android:paddingBottom="4dp"
+                        android:text="回终端"
+                        android:textColor="#FFD54F"
                         android:textSize="11sp" />
                 </LinearLayout>
 

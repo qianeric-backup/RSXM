@@ -215,77 +215,21 @@ public class MainActivity extends Activity {
         // 标题栏已移除：侧滑菜单入口改由快捷栏「菜单」提供（btn_menu 已从布局删除，防旧布局兼容保留空判断）
         findViewById(R.id.qb_menu).setOnClickListener(v ->
                 drawerLayout.openDrawer(GravityCompat.START, false));
-        // 侧滑菜单功能
+        // 侧滑菜单：一级高频入口；ROOT/开发环境/SKILL/MCP/后台/YOLO/滑动速度/快捷键 收进「高级设置」二级面板
         findViewById(R.id.menu_adb).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdbDialog(); });
         findViewById(R.id.menu_apikey).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showApiKeyConfigDialog(); });
+        findViewById(R.id.menu_github).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showGitHubDialog(); });
         findViewById(R.id.menu_ds2api).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showDs2ApiDialog(); });
         findViewById(R.id.menu_update).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showUpdateResonixDialog(); });
-        findViewById(R.id.menu_bgmode).setOnClickListener(v -> {
-            SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
-            boolean on = !sp.getBoolean("background_mode", false);
-            sp.edit().putBoolean("background_mode", on).apply();
-            updateBgModeLabel();
-            drawerLayout.closeDrawer(GravityCompat.START, false);
-            // 注意：不向终端 pushOutput 提示文本——reasonix 在 alt screen 全屏自绘，
-            // 插入的文本会污染 TUI 画面（错误 screen 状态）；状态由菜单标签显示。
-            if (on) {
-                startBackgroundService(true);
-            } else {
-                stopBackgroundService();
-            }
-        });
-        updateBgModeLabel();
-        findViewById(R.id.menu_yolo).setOnClickListener(v -> {
-            SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
-            boolean on = !sp.getBoolean("yolo_mode", true);
-            sp.edit().putBoolean("yolo_mode", on).apply();
-            syncYoloMark(on);
-            updateYoloModeLabel();
-            drawerLayout.closeDrawer(GravityCompat.START, false);
-            // 立即生效：重启 reasonix 环境（reasonix 启动时 wrapper 读取新标记决定审批模式）。
-            // 不 pushOutput（reasonix alt screen 自绘会污染 TUI）；状态由菜单标签与重启日志显示。
-            restartEnvironment();
-        });
-        updateYoloModeLabel();
-        // 升级安装后 rootfs 可能没有 YOLO 标记：以偏好为准补写（默认开启）
-        syncYoloMark(getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true));
-        // 上下滑动调速：SeekBar 档位 1~10 ⇄ 每页滑动像素数 SCROLL_STEP
-        // 档位越小每页所需像素越多 → 滑动越慢（精细浏览）；档位越大越快。
-        // 换算：SCROLL_STEP = 1000 / 档位（见 scrollStepForSpeed：
-        //       档位 1 → 500px/页（最慢） 5 → 100px/页（默认） 10 → 10px/页（最快，接近原 8px/页）
-        {
-            final SeekBar sbSpeed = findViewById(R.id.sb_speed);
-            final TextView tvSpeedValue = findViewById(R.id.tv_speed_value);
-            int speed = getSharedPreferences("prefs", MODE_PRIVATE).getInt("scroll_speed", SPEED_DEFAULT);
-            if (speed < SPEED_MIN) speed = SPEED_MIN;
-            if (speed > SPEED_MAX) speed = SPEED_MAX;
-            sbSpeed.setMax(SPEED_MAX - SPEED_MIN);
-            sbSpeed.setProgress(speed - SPEED_MIN);
-            updateSpeedLabel(speed);
-            // 先注入当前档位（页面可能已加载；若未加载，onPageFinished 启动环境时也会注入）
-            applyScrollSpeed(speed);
-            sbSpeed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-                @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {}
-                @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-                @Override public void onStopTrackingTouch(SeekBar seekBar) {
-                    int speed = seekBar.getProgress() + SPEED_MIN;
-                    getSharedPreferences("prefs", MODE_PRIVATE).edit().putInt("scroll_speed", speed).apply();
-                    applyScrollSpeed(speed);
-                    updateSpeedLabel(speed);
-                }
-            });
-        }
-        findViewById(R.id.menu_root).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showRootDialog(); });
-        findViewById(R.id.menu_keys).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); toggleKeysToolbar(); });
-        findViewById(R.id.menu_skill).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSkillInstallDialog(); });
-        findViewById(R.id.menu_mcp).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showMcpDialog(); });
         findViewById(R.id.menu_project).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showProjectDialog(); });
         findViewById(R.id.menu_sessions).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSessionsDialog(); });
-        findViewById(R.id.menu_dev).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showDevEnvDialog(); });
-        findViewById(R.id.menu_github).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showGitHubDialog(); });
+        findViewById(R.id.menu_advanced).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdvancedDialog(); });
+        // 升级安装后 rootfs 可能没有 YOLO 标记：以偏好为准补写（默认开启）
+        syncYoloMark(getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true));
 
-        // 主屏快捷入口行：一键直达常用面板，减少对侧滑栏的依赖
+        // 主屏快捷入口行：常用入口 + 设置（高级）入口
         findViewById(R.id.qb_github).setOnClickListener(v -> showGitHubDialog());
+        findViewById(R.id.qb_advanced).setOnClickListener(v -> showAdvancedDialog());
         // 视图切换：点击按当前状态进入/退出（toggle 语义保留）
         findViewById(R.id.qb_view).setOnClickListener(v -> {
             if (nativeViewOn) exitNativeView(); else enterNativeView();
@@ -296,11 +240,6 @@ public class MainActivity extends Activity {
         findViewById(R.id.qb_update).setOnClickListener(v -> showUpdateResonixDialog());
         findViewById(R.id.qb_project).setOnClickListener(v -> showProjectDialog());
         findViewById(R.id.qb_sessions).setOnClickListener(v -> showSessionsDialog());
-        findViewById(R.id.qb_skill).setOnClickListener(v -> showSkillInstallDialog());
-        findViewById(R.id.qb_mcp).setOnClickListener(v -> showMcpDialog());
-        findViewById(R.id.qb_dev).setOnClickListener(v -> showDevEnvDialog());
-        findViewById(R.id.qb_keys).setOnClickListener(v -> toggleKeysToolbar());
-        findViewById(R.id.qb_root).setOnClickListener(v -> showRootDialog());
 
         // 原生会话视图：发送按钮 + 输入框回车发送
         findViewById(R.id.native_send).setOnClickListener(v -> sendNativeInput());
@@ -668,10 +607,14 @@ public class MainActivity extends Activity {
         });
     }
 
+    // 后台运行/YOLO/滑动速度 的开关与档位现在都放在「高级设置」二级面板内动态构建，
+    // 状态标签由 showAdvancedDialog 内部控件维护（储存 recent 引用以便刷新）。
+
+    /** 高级设置面板重建后回写开关/档位状态（无面板时无害） */
     private void updateBgModeLabel() {
-        boolean on = getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("background_mode", false);
-        TextView tv = findViewById(R.id.menu_bgmode);
+        TextView tv = advancedBgLabel;
         if (tv != null) {
+            boolean on = getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("background_mode", false);
             tv.setText(on ? "后台运行：开" : "后台运行：关");
             tv.setTextColor(on ? 0xFF4CAF50 : 0xFFFFFFFF);
         }
@@ -679,9 +622,9 @@ public class MainActivity extends Activity {
 
     /** YOLO 免审批模式标签：开启时 reasonix 完全跳过工具审批（--permission-mode bypassPermissions） */
     private void updateYoloModeLabel() {
-        boolean on = getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true);
-        TextView tv = findViewById(R.id.menu_yolo);
+        TextView tv = advancedYoloLabel;
         if (tv != null) {
+            boolean on = getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true);
             tv.setText(on ? "YOLO 免审批：开" : "YOLO 免审批：关");
             tv.setTextColor(on ? 0xFF4CAF50 : 0xFFFFFFFF);
         }
@@ -711,11 +654,11 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 更新菜单里的档位显示文本 */
+    /** 更新高级设置面板里的档位显示文本 */
     private void updateSpeedLabel(int speed) {
-        TextView tv = findViewById(R.id.tv_speed_value);
-        if (tv != null) {
-            tv.setText("当前：" + speed + " 档（滑动" + (speed >= 7 ? "较快" : speed <= 3 ? "较慢" : "适中") + "）");
+        if (advancedSpeedLabel != null) {
+            advancedSpeedLabel.setText("当前：" + speed + " 档（滑动"
+                    + (speed >= 7 ? "较快" : speed <= 3 ? "较慢" : "适中") + "）");
         }
     }
 
@@ -2685,6 +2628,128 @@ public class MainActivity extends Activity {
             Log.w(TAG, "promptInstallApk failed", e);
             pushOutput("\r\n[GitHub] 安装启动失败: " + e + "\r\n");
         }
+    }
+
+    /**
+     * 高级设置（二级菜单）：ROOT / 开发环境 / SKILL / MCP 服务器 / 后台运行 /
+     * YOLO 免审批 / 滑动速度 / 快捷键。点击进入对应功能面板（面板即二级页面，
+     * 返回箭头或系统返回键关闭整个面板回到主界面）。
+     */
+    private void showAdvancedDialog() {
+        final LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(16));
+        addV(panel, createDarkTip("以下为二级功能入口：点击进入对应设置页（返回箭头关闭本面板）。"), 0);
+
+        // ROOT
+        addV(panel, createDarkSectionTitle("系统"), 10);
+        addV(panel, createDarkMenuRow("ROOT", "手机 root 权限（KernelSU/Magisk）授权与测试", () -> showRootDialog()), 4);
+        addV(panel, createDarkMenuRow("开发环境", "安装 Python/Node 等 apk 开发工具包", () -> showDevEnvDialog()), 4);
+
+        // AI 能力
+        addV(panel, createDarkSectionTitle("AI 能力"), 12);
+        addV(panel, createDarkMenuRow("SKILL", "安装/管理 reasonix 技能", () -> showSkillInstallDialog()), 4);
+        addV(panel, createDarkMenuRow("MCP 服务器", "管理当前项目 .mcp.json", () -> showMcpDialog()), 4);
+
+        // 运行模式
+        addV(panel, createDarkSectionTitle("运行模式"), 12);
+        final TextView bgLabel = createDarkMenuRow("后台运行", "app 后台保活，AI 会话不中断", () -> {
+            SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
+            boolean on = !sp.getBoolean("background_mode", false);
+            sp.edit().putBoolean("background_mode", on).apply();
+            if (on) startBackgroundService(true); else stopBackgroundService();
+            updateBgModeLabel();
+        });
+        advancedBgLabel = bgLabel;
+        updateBgModeLabel();
+
+        final TextView yoloLabel = createDarkMenuRow("YOLO 免审批", "reasonix 完全跳过工具审批（等价 --permission-mode bypassPermissions）", () -> {
+            SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
+            boolean on = !sp.getBoolean("yolo_mode", true);
+            sp.edit().putBoolean("yolo_mode", on).apply();
+            syncYoloMark(on);
+            updateYoloModeLabel();
+            // 立即生效：重启 reasonix 环境（wrapper 读取新标记决定审批模式）
+            restartEnvironment();
+        });
+        advancedYoloLabel = yoloLabel;
+        updateYoloModeLabel();
+
+        // 交互偏好
+        addV(panel, createDarkSectionTitle("交互偏好"), 12);
+        // 滑动速度
+        LinearLayout speedWrap = new LinearLayout(this);
+        speedWrap.setOrientation(LinearLayout.VERTICAL);
+        speedWrap.setBackgroundColor(0xFF141414);
+        speedWrap.setPadding(dp(14), dp(8), dp(14), dp(8));
+        TextView speedTitle = new TextView(this);
+        speedTitle.setText("滑动速度");
+        speedTitle.setTextColor(0xFFFFFFFF);
+        speedTitle.setTextSize(14);
+        speedWrap.addView(speedTitle);
+        final TextView speedVal = new TextView(this);
+        speedVal.setTextColor(0xFF8A8A8A);
+        speedVal.setTextSize(12);
+        speedWrap.addView(speedVal);
+        final SeekBar sbSpeed = new SeekBar(this);
+        int speed = getSharedPreferences("prefs", MODE_PRIVATE).getInt("scroll_speed", SPEED_DEFAULT);
+        if (speed < SPEED_MIN) speed = SPEED_MIN;
+        if (speed > SPEED_MAX) speed = SPEED_MAX;
+        sbSpeed.setMax(SPEED_MAX - SPEED_MIN);
+        sbSpeed.setProgress(speed - SPEED_MIN);
+        speedWrap.addView(sbSpeed);
+        advancedSpeedLabel = speedVal;
+        updateSpeedLabel(speed);
+        // 先注入当前档位（页面可能已加载；若未加载，onPageFinished 启动环境时也会注入）
+        applyScrollSpeed(speed);
+        sbSpeed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {}
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                int s = seekBar.getProgress() + SPEED_MIN;
+                getSharedPreferences("prefs", MODE_PRIVATE).edit().putInt("scroll_speed", s).apply();
+                applyScrollSpeed(s);
+                updateSpeedLabel(s);
+            }
+        });
+        addV(panel, speedWrap, 4);
+
+        addV(panel, createDarkMenuRow("快捷键", "悬浮快捷键工具栏（可拖拽，九键）", () -> toggleKeysToolbar()), 4);
+
+        showPanel("高级设置", panel, () -> {
+            advancedBgLabel = null;
+            advancedYoloLabel = null;
+            advancedSpeedLabel = null;
+        });
+    }
+
+    /** 高级设置菜单行：标题 + 说明，点击整行触发 action；返回顶行 TextView 供状态标签刷新 */
+    private TextView createDarkMenuRow(String title, String desc, Runnable action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setBackgroundColor(0xFF141414);
+        row.setPadding(dp(12), dp(8), dp(12), dp(8));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rp.topMargin = dp(6);
+        row.setLayoutParams(rp);
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextColor(0xFFFFFFFF);
+        t.setTextSize(14);
+        t.setTypeface(null, android.graphics.Typeface.BOLD);
+        row.addView(t);
+        if (desc != null && !desc.isEmpty()) {
+            TextView d = new TextView(this);
+            d.setText(desc);
+            d.setTextColor(0xFF8A8A8A);
+            d.setTextSize(11);
+            row.addView(d);
+        }
+        row.setOnClickListener(v -> {
+            if (action != null) action.run();
+        });
+        return t;   // 返回标题 TextView（状态标签刷新用）；点击整行触发 action
     }
 
     /** 深色代码结果区 */
@@ -5119,6 +5184,11 @@ public class MainActivity extends Activity {
             nativePoller.postDelayed(this, 1000);
         }
     };
+
+    /** 高级设置面板内的动态标签控件引用（状态刷新用；面板关闭后为 null） */
+    private TextView advancedBgLabel;
+    private TextView advancedYoloLabel;
+    private TextView advancedSpeedLabel;
 
     private void pushOutput(String text) {
         Log.d(TAG, "OUT> " + (text.length() > 200 ? text.substring(0, 200) : text));

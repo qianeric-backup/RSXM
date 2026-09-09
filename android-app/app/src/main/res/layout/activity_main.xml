@@ -134,58 +134,14 @@
                         android:textSize="13sp" />
 
                     <TextView
-                        android:id="@+id/qb_skill"
+                        android:id="@+id/qb_advanced"
                         android:layout_width="wrap_content"
                         android:layout_height="match_parent"
                         android:gravity="center"
                         android:paddingLeft="14dp"
                         android:paddingRight="14dp"
-                        android:text="SKILL"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_mcp"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="MCP"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_dev"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="开发环境"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_keys"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="快捷键"
-                        android:textColor="#FFFFFF"
-                        android:textSize="13sp" />
-
-                    <TextView
-                        android:id="@+id/qb_root"
-                        android:layout_width="wrap_content"
-                        android:layout_height="match_parent"
-                        android:gravity="center"
-                        android:paddingLeft="14dp"
-                        android:paddingRight="14dp"
-                        android:text="ROOT"
-                        android:textColor="#FFFFFF"
+                        android:text="设置"
+                        android:textColor="#FFD54F"
                         android:textSize="13sp" />
                 </LinearLayout>
             </HorizontalScrollView>
@@ -404,18 +360,6 @@
                         android:textSize="15sp" />
 
                     <TextView
-                        android:id="@+id/menu_dev"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="开发环境"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <TextView
                         android:id="@+id/menu_project"
                         android:layout_width="match_parent"
                         android:layout_height="52dp"
@@ -439,115 +383,17 @@
                         android:textColor="#FFFFFF"
                         android:textSize="15sp" />
 
+                    <!-- 高级设置：二级菜单入口（ROOT/开发环境/SKILL/MCP/后台/YOLO/滑动速度/快捷键 等） -->
                     <TextView
-                        android:id="@+id/menu_skill"
+                        android:id="@+id/menu_advanced"
                         android:layout_width="match_parent"
                         android:layout_height="52dp"
                         android:background="#141414"
                         android:layout_marginTop="1dp"
                         android:gravity="center_vertical"
                         android:paddingLeft="16dp"
-                        android:text="SKILL"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <TextView
-                        android:id="@+id/menu_mcp"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="MCP 服务器"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <TextView
-                        android:id="@+id/menu_bgmode"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="后台运行：关"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <TextView
-                        android:id="@+id/menu_yolo"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="YOLO 免审批：开"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <!-- 上下滑动调速 -->
-                    <LinearLayout
-                        android:id="@+id/menu_speed"
-                        android:layout_width="match_parent"
-                        android:layout_height="72dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:orientation="vertical"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:paddingRight="12dp">
-
-                        <TextView
-                            android:id="@+id/tv_speed_label"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="滑动速度"
-                            android:textColor="#FFFFFF"
-                            android:textSize="14sp" />
-
-                        <TextView
-                            android:id="@+id/tv_speed_value"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="当前：5 档"
-                            android:textColor="#8A8A8A"
-                            android:textSize="12sp" />
-
-                        <SeekBar
-                            android:id="@+id/sb_speed"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:max="9"
-                            android:progress="4"
-                            android:paddingTop="2dp"
-                            android:paddingBottom="0dp" />
-                    </LinearLayout>
-
-                    <TextView
-                        android:id="@+id/menu_keys"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="快捷键（悬浮工具栏）"
-                        android:textColor="#FFFFFF"
-                        android:textSize="15sp" />
-
-                    <TextView
-                        android:id="@+id/menu_root"
-                        android:layout_width="match_parent"
-                        android:layout_height="52dp"
-                        android:background="#141414"
-                        android:layout_marginTop="1dp"
-                        android:gravity="center_vertical"
-                        android:paddingLeft="16dp"
-                        android:text="ROOT"
-                        android:textColor="#FFFFFF"
+                        android:text="高级设置"
+                        android:textColor="#FFD54F"
                         android:textSize="15sp" />
                 </LinearLayout>
             </ScrollView>

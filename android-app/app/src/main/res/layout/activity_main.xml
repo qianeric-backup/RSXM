@@ -58,6 +58,163 @@
                 android:layout_height="1dp"
                 android:background="#1E1E1E" />
 
+            <!-- 主屏快捷入口行：常用功能一键直达，不再需要打开侧滑栏 -->
+            <HorizontalScrollView
+                android:id="@+id/quick_bar"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:background="#0A0A0A"
+                android:scrollbars="none"
+                android:overScrollMode="never">
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingRight="8dp">
+
+                    <TextView
+                        android:id="@+id/qb_github"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="GitHub"
+                        android:textColor="#58A6FF"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/qb_adb"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="ADB"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_apikey"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="API Key"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_ds2api"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="DS2API"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_update"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="更新"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_project"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="项目"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_sessions"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="会话"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_skill"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="SKILL"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_mcp"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="MCP"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_dev"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="开发环境"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_keys"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="快捷键"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/qb_root"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:paddingLeft="14dp"
+                        android:paddingRight="14dp"
+                        android:text="ROOT"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <!-- 快捷栏分隔线 -->
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#1E1E1E" />
+
             <WebView
                 android:id="@+id/webview"
                 android:layout_width="match_parent"
@@ -114,6 +271,18 @@
                         android:paddingLeft="16dp"
                         android:text="API Key"
                         android:textColor="#FFFFFF"
+                        android:textSize="15sp" />
+
+                    <TextView
+                        android:id="@+id/menu_github"
+                        android:layout_width="match_parent"
+                        android:layout_height="52dp"
+                        android:background="#141414"
+                        android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="GitHub（登录/自动打包）"
+                        android:textColor="#58A6FF"
                         android:textSize="15sp" />
 
                     <TextView

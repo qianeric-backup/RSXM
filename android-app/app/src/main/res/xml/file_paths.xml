@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- FileProvider 路径映射：允许分享 cacheDir/apk/ 下的 reinstall.apk 给系统安装器 -->
+<!-- FileProvider 路径映射：允许分享 cacheDir/apk/ 下的 reinstall.apk，以及
+     cacheDir/gh-apk/ 下由 GitHub 自动打包下载的 APK，给系统安装器 -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="apk" path="apk/" />
+    <cache-path name="gh_apk" path="gh-apk/" />
 </paths>

@@ -62,6 +62,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.json.JSONObject;
 import java.util.zip.GZIPInputStream;
 
 import androidx.core.view.GravityCompat;
@@ -280,6 +281,21 @@ public class MainActivity extends Activity {
         findViewById(R.id.menu_project).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showProjectDialog(); });
         findViewById(R.id.menu_sessions).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSessionsDialog(); });
         findViewById(R.id.menu_dev).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showDevEnvDialog(); });
+        findViewById(R.id.menu_github).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showGitHubDialog(); });
+
+        // 主屏快捷入口行：一键直达常用面板，减少对侧滑栏的依赖
+        findViewById(R.id.qb_github).setOnClickListener(v -> showGitHubDialog());
+        findViewById(R.id.qb_adb).setOnClickListener(v -> showAdbDialog());
+        findViewById(R.id.qb_apikey).setOnClickListener(v -> showApiKeyConfigDialog());
+        findViewById(R.id.qb_ds2api).setOnClickListener(v -> showDs2ApiDialog());
+        findViewById(R.id.qb_update).setOnClickListener(v -> showUpdateResonixDialog());
+        findViewById(R.id.qb_project).setOnClickListener(v -> showProjectDialog());
+        findViewById(R.id.qb_sessions).setOnClickListener(v -> showSessionsDialog());
+        findViewById(R.id.qb_skill).setOnClickListener(v -> showSkillInstallDialog());
+        findViewById(R.id.qb_mcp).setOnClickListener(v -> showMcpDialog());
+        findViewById(R.id.qb_dev).setOnClickListener(v -> showDevEnvDialog());
+        findViewById(R.id.qb_keys).setOnClickListener(v -> toggleKeysToolbar());
+        findViewById(R.id.qb_root).setOnClickListener(v -> showRootDialog());
 
         // 全屏功能面板：返回按钮关闭（系统返回键同样生效）
         findViewById(R.id.panel_back).setOnClickListener(v -> hidePanel());
@@ -2381,6 +2397,200 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         if (topDp > 0) lp.topMargin = dp(topDp);
         panel.addView(v, lp);
+    }
+
+    // ==================== GitHub（登录 / 自动打包） ====================
+
+    /**
+     * GitHub 面板：access token 添加/保存、登录验证、触发 GitHub Actions 自动打包、
+     * 轮询构建状态、下载构建产物 APK 并提示安装。
+     * token 仅存本机 SharedPreferences（gh_prefs），不写入 guest。
+     */
+    private void showGitHubDialog() {
+        final GitHubManager gh = new GitHubManager(this);
+        final LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(16), dp(16), dp(16));
+
+        addV(panel, createDarkSectionTitle("GitHub 登录（access token）"), 0);
+        addV(panel, createDarkTip("输入 GitHub Personal Access Token（需 repo 与 actions 权限），"
+                + "用于登录验证、触发自动打包与下载 APK。Token 仅保存在本机，不写入 Linux 环境。"), 4);
+
+        final EditText tokenInput = createDarkEditText("ghp_xxx / github_pat_xxx", InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        addV(panel, tokenInput, 8);
+
+        final TextView status = createDarkResult();
+        addV(panel, status, 8);
+
+        // 顶部按钮行：登录 / 清除
+        LinearLayout rowTop = new LinearLayout(this);
+        rowTop.setOrientation(LinearLayout.HORIZONTAL);
+        Button btnLogin = createDarkButton("登录 / 验证");
+        Button btnClear = createDarkButton("清除 Token");
+        rowTop.addView(btnLogin, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        rowTop.addView(btnClear, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        addV(panel, rowTop, 10);
+
+        // 自动打包区
+        addV(panel, createDarkSectionTitle("GitHub Actions 自动打包"), 16);
+        addV(panel, createDarkTip("触发仓库 " + GitHubManager.REPO + " 的 "
+                + GitHubManager.WORKFLOW + " workflow（workflow_dispatch），"
+                + "云端构建 release APK，完成后可下载并安装。"), 4);
+
+        final TextView buildStatus = createDarkResult();
+        addV(panel, buildStatus, 8);
+
+        final Button btnBuild = createDarkButton("触发打包");
+        final Button btnDownload = createDarkButton("下载最新 APK");
+        final Button btnCancelPoll = createDarkButton("停止等待");
+        LinearLayout rowAct = new LinearLayout(this);
+        rowAct.setOrientation(LinearLayout.HORIZONTAL);
+        rowAct.addView(btnBuild, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        rowAct.addView(btnDownload, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        addV(panel, rowAct, 8);
+        addV(panel, btnCancelPoll, 4);
+
+        // 取消标志与轮询任务
+        final java.util.concurrent.atomic.AtomicBoolean[] cancel = {new java.util.concurrent.atomic.AtomicBoolean(false)};
+        final String[] runIdHolder = {""};
+
+        final Runnable refreshStatus = new Runnable() {
+            @Override
+            public void run() {
+                if (!gh.hasToken()) {
+                    status.setText("未登录：请在下方输入 GitHub access token。");
+                } else {
+                    status.setText("已保存 token，正在验证登录态...");
+                    new Thread(() -> {
+                        GitHubManager.LoginResult r = gh.fetchUser();
+                        runOnUiThread(() -> status.setText(r.ok
+                                ? "已登录：@" + r.login + (r.name.isEmpty() ? "" : "（" + r.name + "）")
+                                : "Token 无效：" + r.error));
+                    }, "gh-user").start();
+                }
+            }
+        };
+
+        btnLogin.setOnClickListener(v -> {
+            String tok = tokenInput.getText().toString().trim();
+            if (tok.isEmpty()) {
+                status.setText("请输入 token。");
+                return;
+            }
+            status.setText("验证中...");
+            new Thread(() -> {
+                GitHubManager.LoginResult r = gh.login(tok);
+                runOnUiThread(() -> status.setText(r.ok
+                        ? "登录成功：@" + r.login + (r.name.isEmpty() ? "" : "（" + r.name + "）")
+                        : "登录失败：" + r.error));
+            }, "gh-login").start();
+        });
+
+        btnClear.setOnClickListener(v -> {
+            gh.clearToken();
+            tokenInput.setText("");
+            status.setText("已清除 token。");
+        });
+
+        btnBuild.setOnClickListener(v -> {
+            if (!gh.hasToken()) {
+                buildStatus.setText("请先输入并验证 token。");
+                return;
+            }
+            cancel[0].set(false);
+            buildStatus.setText("正在触发打包...");
+            new Thread(() -> {
+                try {
+                    gh.triggerBuild();
+                    runOnUiThread(() -> buildStatus.append("已触发，等待云端构建（最长 10 分钟）...\n"));
+                    // 轮询最新一次运行
+                    JSONObject run = gh.waitRunFinish(null, 600, msg ->
+                            runOnUiThread(() -> buildStatus.setText(msg + "\n")));
+                    if (run == null) {
+                        runOnUiThread(() -> buildStatus.append("等待超时，可稍后手动点「下载最新 APK」。\n"));
+                        return;
+                    }
+                    String id = run.optString("id", "");
+                    runIdHolder[0] = id;
+                    String conclusion = run.optString("conclusion", "");
+                    runOnUiThread(() -> buildStatus.append("构建完成：" + conclusion
+                            + "（run " + id + "）。点击「下载最新 APK」获取产物。\n"));
+                } catch (Exception e) {
+                    runOnUiThread(() -> buildStatus.append("触发/轮询失败：" + e.getMessage() + "\n"));
+                }
+            }, "gh-build").start();
+        });
+
+        btnDownload.setOnClickListener(v -> {
+            if (!gh.hasToken()) {
+                buildStatus.setText("请先输入并验证 token。");
+                return;
+            }
+            buildStatus.setText("正在下载最新产物...");
+            new Thread(() -> {
+                try {
+                    // 优先用刚构建的 run；否则查最新 run
+                    String rid = runIdHolder[0];
+                    if (rid.isEmpty()) {
+                        JSONObject latest = gh.latestRun(null);
+                        if (latest == null) throw new Exception("没有找到构建记录");
+                        rid = latest.optString("id", "");
+                    }
+                    JSONObject art = gh.latestArtifact(rid);
+                    if (art == null) throw new Exception("该次构建没有产物（可能失败）");
+                    String aid = art.optString("id", "");
+                    File dest = new File(getCacheDir(), "gh-apk");
+                    File apk = gh.downloadApk(aid, dest);
+                    runOnUiThread(() -> {
+                        buildStatus.append("下载完成：" + apk.getAbsolutePath() + "\n");
+                        promptInstallApk(apk);
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(() -> buildStatus.append("下载失败：" + e.getMessage() + "\n"));
+                }
+            }, "gh-download").start();
+        });
+
+        btnCancelPoll.setOnClickListener(v -> {
+            cancel[0].set(true);
+            buildStatus.append("已请求停止等待。\n");
+        });
+
+        showPanel("GitHub 自动打包", panel, null);
+        // 预填已保存 token（仅展示前 8 位，保护隐私）
+        String saved = gh.getToken();
+        if (!saved.isEmpty()) {
+            tokenInput.setText(saved.length() > 8 ? saved.substring(0, 8) + "••••••••" : saved);
+            tokenInput.setTag(saved);
+        }
+        tokenInput.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
+                // 用户编辑时清除遮蔽占位
+                if (tokenInput.getTag() != null && !s.toString().startsWith(tokenInput.getTag().toString().substring(0, Math.min(8, tokenInput.getTag().toString().length())))) {
+                    tokenInput.setTag(null);
+                }
+            }
+            @Override public void afterTextChanged(android.text.Editable s) {}
+        });
+        refreshStatus.run();
+    }
+
+    /** 通过系统安装器安装 APK（已下载到 cacheDir/gh-apk/） */
+    private void promptInstallApk(File apk) {
+        try {
+            android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                    this, getPackageName() + ".fileprovider", apk);
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(intent);
+            pushOutput("\r\n[GitHub] 已请求安装 " + apk.getName() + "\r\n");
+        } catch (Exception e) {
+            Log.w(TAG, "promptInstallApk failed", e);
+            pushOutput("\r\n[GitHub] 安装启动失败: " + e + "\r\n");
+        }
     }
 
     /** 深色代码结果区 */

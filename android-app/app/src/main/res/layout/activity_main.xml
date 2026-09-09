@@ -227,7 +227,7 @@
                 android:layout_height="1dp"
                 android:background="#1E1E1E" />
 
-            <!-- 原生会话视图（对话模式）：原生控件渲染 reasonix 输出 + 原生输入框，
+            <!-- 原生会话视图（对话模式）：reasonix 会话 jsonl 字段映射为消息列表气泡渲染，
                  与 xterm.js 终端（webview）可切换。默认隐藏。 -->
             <LinearLayout
                 android:id="@+id/native_chat"
@@ -237,6 +237,38 @@
                 android:orientation="vertical"
                 android:visibility="gone">
 
+                <!-- 会话信息条：当前会话/模型/状态字段 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="#0D1117"
+                    android:orientation="horizontal"
+                    android:paddingLeft="8dp"
+                    android:paddingRight="8dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp">
+
+                    <TextView
+                        android:id="@+id/native_session_info"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:text="会话：—"
+                        android:textColor="#8B949E"
+                        android:textSize="11sp" />
+
+                    <TextView
+                        android:id="@+id/native_msg_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0 条"
+                        android:textColor="#58A6FF"
+                        android:textSize="11sp" />
+                </LinearLayout>
+
+                <!-- 消息列表：字段映射气泡（user 右对齐 / assistant 左对齐 / tool 灰色） -->
                 <ScrollView
                     android:id="@+id/native_scroll"
                     android:layout_width="match_parent"
@@ -247,16 +279,12 @@
                     android:overScrollMode="never"
                     android:scrollbars="vertical">
 
-                    <TextView
+                    <LinearLayout
                         android:id="@+id/native_output"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:padding="8dp"
-                        android:textColor="#E6EDF3"
-                        android:textIsSelectable="true"
-                        android:textSize="12sp"
-                        android:typeface="monospace" />
+                        android:orientation="vertical"
+                        android:padding="8dp" />
                 </ScrollView>
 
                 <LinearLayout

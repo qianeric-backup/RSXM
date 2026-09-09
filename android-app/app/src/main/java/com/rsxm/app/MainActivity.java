@@ -5028,19 +5028,33 @@ public class MainActivity extends Activity {
 
     /** 原生会话视图（对话模式）：打开时接管显示，WebView 隐藏；关闭时还原 */
     private volatile boolean nativeViewOn = false;
-    /** 原生视图缓冲：reasonix 输出经它整理后渲染到 native_output */
-    private volatile NativeChatView nativeChat;
-    /** 当前渲染到 native_output 的文本行数（增量追加边界） */
-    private String nativeLastRender = "";
+    /** 会话字段映射器：reasonix 会话 jsonl → 消息字段列表 */
+    private volatile SessionFieldMapper sessionMapper;
+    /** 已渲染的消息数量（增量追加气泡） */
+    private int nativeRenderedCount = 0;
+    /** 会话 jsonl 轮询定时器（SIG：1s）/ 已启动标记 */
+    private final Handler nativePoller = new Handler(Looper.getMainLooper());
+    private boolean nativePollStarted = false;
+    private final Runnable nativePollTask = new Runnable() {
+        @Override
+        public void run() {
+            pollNativeSession();
+            nativePoller.postDelayed(this, 1000);
+        }
+    };
 
     private void pushOutput(String text) {
         Log.d(TAG, "OUT> " + (text.length() > 200 ? text.substring(0, 200) : text));
         final MainActivity target = sCurrent;
         if (target == null) return;
-        // 原生视图模式：直接喂给 NativeChatView 缓冲并刷新 TextView，
-        // 不经过 WebView（避免 xterm 渲染问题与后台 JS 堆积）。
+        // 原生视图模式：reasonix 会话写入 jsonl，字段映射为 GUI 气泡；PTY 流不重复渲染。
         if (target.nativeViewOn) {
-            target.feedNativeView(text);
+            // 原生会话视图：reasonix 输出会实时写入会话 jsonl，由 pollNativeSession 定时
+            // 映射为消息气泡；PTY 原始流无需重复渲染（避免 UI/网格双轨混乱）。
+            // 若 mapper 尚未定位会话文件，则尝试重新解析一次。
+            if (target.sessionMapper == null) {
+                target.sessionMapper = target.resolveCurrentSessionMapper();
+            }
             return;
         }
         if (!sWebActive) {
@@ -5056,25 +5070,93 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 原生视图输入：解析 feed 后刷新 native_output（限流：内容变化才更新，避免高频刷屏） */
-    private void feedNativeView(String text) {
-        if (ui == null) return;
-        ui.post(() -> {
-            NativeChatView nv = nativeChat;
-            if (nv == null) return;
-            nv.feed(text);
-            String rendered = nv.render();
-            if (rendered.equals(nativeLastRender)) return;
-            nativeLastRender = rendered;
-            TextView tv = findViewById(R.id.native_output);
-            if (tv == null) return;
-            tv.setText(rendered);
-            // 自动滚到底部（reasonix 输出持续追加/重绘时跟随最新内容）
-            ScrollView sv = findViewById(R.id.native_scroll);
-            if (sv != null) {
-                sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
-            }
-        });
+    /** 原生视图：映射 CLI 字段到 GUI。reasonix 会话实时写入 jsonl，这里按字段增量渲染气泡 */
+    private void pollNativeSession() {
+        SessionFieldMapper m = sessionMapper;
+        if (m == null) return;
+        boolean changed = m.poll();
+        if (!changed) return;
+        ui.post(() -> appendNativeMessages(m));
+    }
+
+    /** 把 SessionFieldMapper 新解析出的消息追加渲染为气泡；序号/定位逻辑幂等 */
+    private synchronized void appendNativeMessages(SessionFieldMapper m) {
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        java.util.List<SessionFieldMapper.MappedMessage> msgs = m.all();
+        if (msgs.size() <= nativeRenderedCount) return;
+        for (int i = nativeRenderedCount; i < msgs.size(); i++) {
+            list.addView(renderMessageBubble(msgs.get(i)));
+        }
+        nativeRenderedCount = msgs.size();
+        TextView cnt = findViewById(R.id.native_msg_count);
+        if (cnt != null) cnt.setText(nativeRenderedCount + " 条");
+        // 自动滚到底部
+        ScrollView sv = findViewById(R.id.native_scroll);
+        if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+    }
+
+    /** 把一条字段化消息渲染为气泡（role→方向/配色、model→标签、usage→统计、tool→灰色） */
+    private View renderMessageBubble(SessionFieldMapper.MappedMessage msg) {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.topMargin = dp(6);
+        wrap.setLayoutParams(wlp);
+
+        // 顶行：角色标签 + 时间 + 模型/工具名
+        LinearLayout meta = new LinearLayout(this);
+        meta.setOrientation(LinearLayout.HORIZONTAL);
+        meta.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView roleTag = new TextView(this);
+        String roleText = msg.isUser() ? "用户" : msg.isAssistant()
+                ? ("AI" + (msg.model.isEmpty() ? "" : " · " + msg.model)) : "工具";
+        int roleColor = msg.isUser() ? 0xFF58A6FF
+                : msg.isAssistant() ? 0xFF7FDB8A : 0xFF8B949E;
+        roleTag.setText(roleText);
+        roleTag.setTextColor(roleColor);
+        roleTag.setTextSize(11);
+        roleTag.setTypeface(null, android.graphics.Typeface.BOLD);
+        meta.addView(roleTag);
+        if (!msg.tsText.isEmpty()) {
+            TextView ts = new TextView(this);
+            ts.setText("  " + msg.tsText);
+            ts.setTextColor(0xFF6E7681);
+            ts.setTextSize(10);
+            meta.addView(ts);
+        }
+        if (!msg.usageText.isEmpty()) {
+            TextView us = new TextView(this);
+            us.setText("  " + msg.usageText);
+            us.setTextColor(0xFF6E7681);
+            us.setTextSize(10);
+            meta.addView(us);
+        }
+        wrap.addView(meta);
+
+        // 正文（tool 消息灰色等宽；user/assistant 常规白/浅灰）
+        TextView body = new TextView(this);
+        body.setText(msg.content.isEmpty() ? "（空）" : msg.content);
+        body.setTextColor(msg.isTool() ? 0xFF8B949E : 0xFFE6EDF3);
+        body.setTextSize(13);
+        body.setLineSpacing(0, 1.25f);
+        body.setTextIsSelectable(true);
+        if (msg.isTool()) {
+            body.setTypeface(android.graphics.Typeface.MONOSPACE);
+            body.setBackgroundColor(0xFF11161C);
+            body.setPadding(dp(8), dp(6), dp(8), dp(6));
+        }
+        wrap.addView(body);
+
+        // 对齐：user 靠右（蓝色气泡），assistant/tool 靠左
+        if (msg.isUser()) {
+            wrap.setGravity(android.view.Gravity.END);
+            body.setBackgroundColor(0xFF1F3A5F);
+            int pad = dp(10);
+            body.setPadding(pad, pad, pad, pad);
+        }
+        return wrap;
     }
 
     /** 切换终端视图 / 原生会话视图 */
@@ -5084,14 +5166,28 @@ public class MainActivity extends Activity {
         View web = findViewById(R.id.webview);
         TextView qb = findViewById(R.id.qb_view);
         if (nativeViewOn) {
-            if (nativeChat == null) nativeChat = new NativeChatView();
-            // 打开时把已有终端的可见历史喂入原生视图（从 WebView 侧无法可靠取回，
-            // 仅显示新输出的内容；随后 reasonix 重绘 TUI 时全量刷新）
             nativeChatLayout.setVisibility(View.VISIBLE);
             web.setVisibility(View.GONE);
             qb.setText("视图：对话");
             qb.setTextColor(0xFF81C784);
-            // 触发 reasonix 重新绘制界面（发送 Ctrl+L 清屏后再让 TUI 重绘）
+            // 定位当前会话 jsonl：优先恢复标记，其次最新非事件 jsonl
+            sessionMapper = resolveCurrentSessionMapper();
+            nativeRenderedCount = 0;
+            LinearLayout list = findViewById(R.id.native_output);
+            if (list != null) list.removeAllViews();
+            TextView info = findViewById(R.id.native_session_info);
+            if (info != null) {
+                SessionFieldMapper m = sessionMapper;
+                info.setText("会话：" + (m != null && m.file() != null
+                        ? m.file().getName() : "—（reasonix 启动后自动创建）"));
+            }
+            // 先做一次全量解析，再启动 1s 轮询
+            pollNativeSession();
+            if (!nativePollStarted) {
+                nativePollStarted = true;
+                nativePoller.postDelayed(nativePollTask, 1000);
+            }
+            // 触发 reasonix 重绘（保持 TUI 正常，会话 jsonl 由 reasonix 实时追加）
             write("\u000c");
             findViewById(R.id.native_input).requestFocus();
         } else {
@@ -5099,39 +5195,80 @@ public class MainActivity extends Activity {
             web.setVisibility(View.VISIBLE);
             qb.setText("视图：终端");
             qb.setTextColor(0xFFFFD54F);
-            // 还原终端：触发 reasonix 重绘当前画面（Ctrl+L），并恢复 WebView 焦点
             write("\u000c");
             try { webView.requestFocus(); } catch (Exception ignored) {}
         }
     }
 
-    /** 原生会话视图发送：把输入框内容写到子进程 stdin（与 xterm 共用 write() 通道） */
+    /** 解析当前会话 jsonl：.rsxm-resume 标记 → 最新可读 jsonl（排除 events/恢复分支/回收站） */
+    private SessionFieldMapper resolveCurrentSessionMapper() {
+        try {
+            File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+            // 1) 恢复标记（guest 路径 /root/... 转宿主路径）
+            File resume = new File(rootDir, ".rsxm-resume");
+            if (resume.exists()) {
+                String gp = new String(java.nio.file.Files.readAllBytes(resume.toPath()),
+                        StandardCharsets.UTF_8).trim();
+                if (gp.startsWith("/root/")) {
+                    File f = new File(rootDir, gp.substring("/root/".length()));
+                    if (f.exists() && f.isFile()) return new SessionFieldMapper(f);
+                }
+            }
+            // 2) 最新非事件 jsonl（遍历所有项目 sessions）
+            File projectsDir = new File(new File(rootDir, ".reasonix"), "projects");
+            File best = null;
+            long bestTm = Long.MIN_VALUE;
+            File[] pds = projectsDir.isDirectory() ? projectsDir.listFiles(File::isDirectory) : null;
+            if (pds != null) {
+                for (File pd : pds) {
+                    File sessions = new File(pd, "sessions");
+                    File[] files = sessions.listFiles((d, n) ->
+                            n.endsWith(".jsonl") && !n.startsWith(".")
+                                    && !n.endsWith(".events.jsonl") && !n.endsWith(".conflicts.jsonl")
+                                    && !n.endsWith(".recovery.json") && !n.endsWith(".recovery")
+                                    && !n.contains(".lease."));
+                    if (files == null) continue;
+                    for (File f : files) {
+                        if (f.lastModified() > bestTm) {
+                            bestTm = f.lastModified();
+                            best = f;
+                        }
+                    }
+                }
+            }
+            if (best != null) return new SessionFieldMapper(best);
+        } catch (Exception e) {
+            Log.w(TAG, "resolve session mapper failed", e);
+        }
+        // 3) 兜底：null（等 reasonix 创建会话后下次轮询再定位——用固定周期重试）
+        return null;
+    }
+
+    /** 原生会话视图发送：输入框内容写 stdin；user 消息立即映射为气泡 */
     private void sendNativeInput() {
         EditText et = findViewById(R.id.native_input);
         if (et == null) return;
         String txt = et.getText().toString();
         if (txt.isEmpty()) return;
         et.setText("");
-        // 追加回车触发执行；输入内容也回显到原生视图（reasonix 关闭本地回显时
-        // 用户看不到自己输入了什么，这里显式补一行）
-        feedNativeViewRaw(txt + "\n");
         write(txt + "\n");
-    }
-
-    /** 原生视图直接追加用户输入回显（不经 NativeChatView 的 CSI 解析，避免转义） */
-    private void feedNativeViewRaw(String text) {
-        if (!nativeViewOn) return;
-        ui.post(() -> {
-            NativeChatView nv = nativeChat;
-            if (nv == null) return;
-            nv.feed(text);
-            String rendered = nv.render();
-            nativeLastRender = rendered;
-            TextView tv = findViewById(R.id.native_output);
-            if (tv != null) tv.setText(rendered);
-            ScrollView sv = findViewById(R.id.native_scroll);
-            if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
-        });
+        // user 消息即时回显（等待 reasonix 写入 jsonl 再出现，避免用户看不到输入）
+        if (sessionMapper != null) {
+            ui.post(() -> {
+                SessionFieldMapper.MappedMessage mm = new SessionFieldMapper.MappedMessage();
+                mm.role = "user";
+                mm.content = txt;
+                mm.tsText = new java.text.SimpleDateFormat("HH:mm:ss",
+                        java.util.Locale.ROOT).format(new java.util.Date());
+                LinearLayout list = findViewById(R.id.native_output);
+                if (list != null) list.addView(renderMessageBubble(mm));
+                nativeRenderedCount++;   // 递增计数：jsonl 中该 user 消息到达时不再重复渲染
+                TextView cnt = findViewById(R.id.native_msg_count);
+                if (cnt != null) cnt.setText(nativeRenderedCount + " 条");
+                ScrollView sv = findViewById(R.id.native_scroll);
+                if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+            });
+        }
     }
 
     /** 前台恢复：把后台期间缓存的终端输出分块冲刷到 WebView（避免大字符串单次注入卡顿） */

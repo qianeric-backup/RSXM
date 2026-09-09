@@ -59,7 +59,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reasonix-proot-v${{ steps.ver.outputs.ver }}.apk
+          name: rsxm-v${{ steps.ver.outputs.ver }}.apk
           path: android-app/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
@@ -77,6 +77,6 @@ jobs:
           else
             gh release create "$TAG" "$APK" \
               --title "v$VER" \
-              --notes "Reasonix Proot v$VER" \
+              --notes "RSXM v$VER" \
               --generate-notes || true
           fi

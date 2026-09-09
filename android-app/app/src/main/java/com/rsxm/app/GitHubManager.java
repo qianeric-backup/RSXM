@@ -21,14 +21,14 @@ import java.util.zip.ZipInputStream;
 /**
  * GitHub 集成：access token 管理、登录验证、触发 Actions 自动打包、下载构建 APK。
  *
- * 仓库固定为 rsxm 项目（reasonix-proot-app），workflow 为 .github/workflows/build-release.yml。
+ * 仓库固定为 rsxm 项目（RSXM），workflow 为 .github/workflows/build-release.yml。
  * 所有网络操作同步执行，调用方需自行放到后台线程。
  */
 public class GitHubManager {
     private static final String TAG = "GitHubManager";
 
     /** 目标仓库：owner/repo */
-    public static final String REPO = "qianeric-backup/reasonix-proot-app";
+    public static final String REPO = "qianeric-backup/RSXM";
     /** Actions workflow 文件名（不含扩展名，dispatch 用文件名即可） */
     public static final String WORKFLOW = "build-release.yml";
     /** 操作类型：普通权限 token 即可触发 workflow_dispatch；actions 读权限用于查 run/artifact */

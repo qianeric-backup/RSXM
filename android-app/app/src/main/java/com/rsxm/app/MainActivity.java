@@ -362,9 +362,10 @@ public class MainActivity extends Activity {
             startBackgroundService(false);
         }
 
-        // 视图模式记忆恢复：上次停留在原生会话视图 → 环境启动后自动进入（延迟到
-        // WebView/环境准备阶段结束后，避免与启动流程抢焦点）。
-        if ("native".equals(getSharedPreferences("prefs", MODE_PRIVATE).getString("view_mode", "terminal"))) {
+        // 视图恢复：无历史偏好 → 默认进入原生 GUI 会话视图（V2.0 起 GUI 为默认界面）；
+        // 有偏好 → 按上次选择恢复。延迟到环境就绪后进入，避免与启动流程抢焦点。
+        if (!getSharedPreferences("prefs", MODE_PRIVATE).contains("view_mode")
+                || "native".equals(getSharedPreferences("prefs", MODE_PRIVATE).getString("view_mode", "native"))) {
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 if (!nativeViewOn && environmentStarted) {
                     enterNativeView();

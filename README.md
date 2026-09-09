@@ -14,7 +14,7 @@
 - **纯黑主题（顶边栏仅菜单）**：全局纯黑界面——顶部仅保留「☰ 菜单」入口（其余功能收进侧滑栏/高级设置）；GUI 输入框、新会话、回终端等控件均为黑底白字。
 - **顶边栏（仅菜单）**：顶部快捷栏仅保留「☰ 菜单」一个入口，所有功能经侧滑栏进入（ADB / API Key / GitHub / DS2API / 更新 / 项目 / 会话 / 视图切换 / 高级设置）。
 - **侧边栏精简 + 高级设置二级菜单**：侧滑栏仅保留高频项（ADB / API Key / GitHub / DS2API / 更新 / 项目 / 会话 / 高级设置）；ROOT、开发环境、SKILL、MCP、后台运行、YOLO 免审批、滑动速度、快捷键等收进「高级设置」二级面板（点按对应行进入功能页，返回箭头关闭）。
-- **双视图切换（终端 / 原生对话）**：快捷栏「视图」可在 xterm.js 终端与原生会话视图间切换——原生视图把 reasonix 会话 jsonl（每行 JSON：`role`/`content`/`text`/`parts`/`model`/`usage`/`ts` 等字段）**映射为原生消息气泡**：user 消息靠右蓝色气泡、assistant 靠左（带模型标签与 token 统计）、tool 灰色等宽体（含工具名），顶部信息条显示当前会话文件；配原生输入框（Enter/发送按钮，发送即映射为 user 气泡）。相比整屏文本渲染，字段映射按角色/时间/模型结构化展示，规避 WebView 黑屏与排版错乱；同时修复了环境输出按 8KB 块解码导致中文乱码的根因（CharsetDecoder 增量解码）。
+- **双视图切换（终端 / GUI 对话）**：侧滑栏「视图切换」在 xterm.js 终端与原生会话视图间切换——原生视图以 **PTY 实时流**（剥离 ANSI 的终端输出气泡，保证回显不依赖会话文件）为主通道，同时把 reasonix 会话 jsonl（`role`/`content`/`model`/`usage` 等字段）映射为结构化气泡补充；- **破甲环境（Guardian 已禁用）**：内置 reasonix Guardian 高风险审查会 deny 破甲任务，v2.0.5 起在 `~/.reasonix/config.toml` 写入 `guardian_model = ""`（Guardian 因模型缺失自动禁用）：user 消息靠右蓝色气泡、assistant 靠左（带模型标签与 token 统计）、tool 灰色等宽体（含工具名），顶部信息条显示当前会话文件；配原生输入框（Enter/发送按钮，发送即映射为 user 气泡）。相比整屏文本渲染，字段映射按角色/时间/模型结构化展示，规避 WebView 黑屏与排版错乱；同时修复了环境输出按 8KB 块解码导致中文乱码的根因（CharsetDecoder 增量解码）。
 - **手机操作逻辑优化**：视图模式记忆（重启恢复上次终端/对话视图）；返回键三级逻辑（先关面板 → 原生视图先收键盘再回终端 → 才退出）；原生视图头部「新会话 / 回终端」快捷按钮；输入发送后保持焦点（多轮连续输入）；软键盘弹出时原生消息列表自动滚到底部。
 - **GitHub 登录与自动打包**：主屏快捷栏与侧滑栏「GitHub」面板支持输入/保存 GitHub Personal Access Token（仅存本机 `SharedPreferences`，不写入 Linux 环境），`GET /user` 验证登录态并显示账户；一键触发仓库 [RSXM](https://github.com/qianeric-backup/RSXM) 的 `build-release.yml` workflow（`workflow_dispatch`，云端 `assembleRelease`），轮询构建状态，完成后下载构建产物 APK 并经系统安装器安装（token 需 `repo` + `actions` 权限）。
 - **左侧侧滑配置菜单**（DrawerLayout）：

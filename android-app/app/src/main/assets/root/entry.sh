@@ -492,6 +492,10 @@ RSXM_PERM
         printf '\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass) user-allow kept\n' >> "$RSXM_CONF"
     fi
     printf '\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass)\n' >> "$RSXM_CONF"
+    # 破甲生效保障：禁用 reasonix Guardian 高风险审查（guardian_model 留空 → Guardian 因模型缺失禁用）
+    if ! grep -q '^\s*guardian_model\s*=' "$RSXM_CONF" 2>/dev/null; then
+        printf '\nguardian_model = ""\n' >> "$RSXM_CONF"
+    fi
     # [desktop] 已存在时不能重复声明表（TOML 规范），改为在已有段内插行；无 [desktop] 段才追加新表
     if ! grep -q "default_tool_approval_mode" "$RSXM_CONF" 2>/dev/null; then
         if grep -q '^\[desktop\]' "$RSXM_CONF" 2>/dev/null; then

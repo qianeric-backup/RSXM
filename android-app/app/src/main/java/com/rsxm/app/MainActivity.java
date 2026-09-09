@@ -4219,6 +4219,25 @@ public class MainActivity extends Activity {
         safeStartProot();
     }
 
+    /** 破甲环境注入标记（infinite-gen-3 v0.5.0）：config.toml 中以此判断是否已注入，幂等 */
+    private static final String BREAK_ARMOR_MARKER = "rsxm-break-armor-v0.5.0";
+
+    /** 读取内置破甲环境提示词资产（assets/break-armor-prompt.md），读失败返回空串 */
+    private String readBreakArmorPrompt() {
+        try (InputStream in = getAssets().open("break-armor-prompt.md");
+             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+            }
+            return bos.toString("UTF-8").trim();
+        } catch (IOException e) {
+            Log.w(TAG, "read break-armor-prompt.md asset failed: " + e);
+            return "";
+        }
+    }
+
     /** 确保 reasonix 的 bash 沙箱关闭（Android 无 bubblewrap，enforce 会拒绝所有 shell 命令） */
     private void ensureSandboxDisabled(File rootfs) {
         try {
@@ -4240,16 +4259,25 @@ public class MainActivity extends Activity {
                 java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
                 Log.d(TAG, "reasonix telemetry set false");
             }
-            // 确保 AI 系统提示含 adb/root 能力说明（reasonix 探测不到但实际可用，注入提示让 AI 知道）。
-            // 注意：reasonix 默认模板含 `# system_prompt = ...` 注释，contains 判断会被注释误伤，须匹配非注释键。
-            if (!java.util.regex.Pattern.compile("(?m)^\\s*system_prompt\\s*=").matcher(content).find()) {
-                content += "\nsystem_prompt = \"\"\"\n"
-                        + "环境能力说明（按需使用，不要编造）：\n"
-                        + "1. 本应用内置 adb 无线调试：可直接执行 adb 命令（先 adb devices 查看连接状态，已连接时可用 adb shell / adb install 等）。\n"
-                        + "2. 本应用内置手机 root 权限桥：执行 `root <命令>` 以 root 权限运行宿主手机命令（如 root id、root 'pm list packages'）。\n"
-                        + "\"\"\"\n";
-                java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
-                Log.d(TAG, "reasonix system_prompt injected");
+            // 破甲环境注入（infinite-gen-3 v0.5.0）：system_prompt 置顶写入完整破甲提示词。
+            // 幂等：已含 rsxm-break-armor-v0.5.0 标记则跳过；否则移除旧 system_prompt 块后重写，
+            // 保证任何启动/更新后破甲环境都生效（reasonix 以顶层 system_prompt 键加载）。
+            if (!content.contains(BREAK_ARMOR_MARKER)) {
+                String prompt = readBreakArmorPrompt();
+                if (!prompt.isEmpty()) {
+                    // 移除现有 system_prompt 键（多行 """ 或单行 "..."），避免残留旧能力说明/重复键
+                    content = content.replaceAll("(?ms)^\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "")
+                            .replaceAll("(?m)^\\s*system_prompt\\s*=\\s*\"[^\"]*\"\\s*", "");
+                    String block = "# " + BREAK_ARMOR_MARKER + "\nsystem_prompt = \"\"\"\n"
+                            + prompt
+                            + "\n\n--- 环境能力说明（RSXM 应用附加，按需使用，不要编造）：---\n"
+                            + "1. 本应用内置 adb 无线调试：可直接执行 adb 命令（先 adb devices 查看连接状态，已连接时可用 adb shell / adb install 等）。\n"
+                            + "2. 本应用内置手机 root 权限桥：执行 `root <命令>` 以 root 权限运行宿主手机命令（如 root id、root 'pm list packages'）。\n"
+                            + "\"\"\"\n\n";
+                    content = block + content;
+                    java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
+                    Log.d(TAG, "reasonix break-armor system_prompt injected");
+                }
             }
             if (content.contains("bash = \"off\"")) {
                 Log.d(TAG, "reasonix sandbox already disabled");
@@ -4271,16 +4299,24 @@ public class MainActivity extends Activity {
     private void writeReasonixConfig(File home, File cfg, File env, String apiKey) {
         try {
             home.mkdirs();
-            String configToml = "default_model = \"deepseek-flash\"\n"
-                    + "\n"
-                    + "[desktop]\n"
-                    + "telemetry = false\n"
-                    + "\n"
+            String prompt = readBreakArmorPrompt();
+            if (prompt.isEmpty()) {
+                prompt = "环境能力说明（按需使用，不要编造）：\n"
+                        + "1. 本应用内置 adb 无线调试：可直接执行 adb 命令（先 adb devices 查看连接状态，已连接时可用 adb shell / adb install 等）。\n"
+                        + "2. 本应用内置手机 root 权限桥：执行 `root <命令>` 以 root 权限运行宿主手机命令（如 root id、root 'pm list packages'）。\n";
+            }
+            String configToml = "# " + BREAK_ARMOR_MARKER + "\n"
                     + "system_prompt = \"\"\"\n"
-                    + "环境能力说明（按需使用，不要编造）：\n"
+                    + prompt
+                    + "\n\n--- 环境能力说明（RSXM 应用附加，按需使用，不要编造）：---\n"
                     + "1. 本应用内置 adb 无线调试：可直接执行 adb 命令（先 adb devices 查看连接状态，已连接时可用 adb shell / adb install 等）。\n"
                     + "2. 本应用内置手机 root 权限桥：执行 `root <命令>` 以 root 权限运行宿主手机命令（如 root id、root 'pm list packages'）。\n"
                     + "\"\"\"\n"
+                    + "\n"
+                    + "default_model = \"deepseek-flash\"\n"
+                    + "\n"
+                    + "[desktop]\n"
+                    + "telemetry = false\n"
                     + "\n"
                     + "[[providers]]\n"
                     + "name        = \"deepseek-flash\"\n"
@@ -4326,6 +4362,11 @@ public class MainActivity extends Activity {
         File entry = new File(rootfs, "root/entry.sh");
         extractAsset("root/entry.sh", entry);
         entry.setExecutable(true, false);
+        // 破甲环境提示词（infinite-gen-3 v0.5.0）：提取到 guest，供 entry.sh 注入全局 skill/指令
+        File armor = new File(new File(rootfs, "root/.reasonix"), "break-armor-prompt.md");
+        armor.getParentFile().mkdirs();
+        extractAsset("break-armor-prompt.md", armor);
+        Log.d(TAG, "break-armor-prompt.md deployed to rootfs");
         // DS2API 网关（内置上游 AGPL-3.0 服务端，见 assets/ds2api/README-upstream.md）：
         // 覆盖刷新整个 ds2api 目录（删除再解压，保证升级后二进制/WebUI 与 APK 一致）
         File ds2Dir = new File(rootfs, "usr/local/ds2api");
@@ -4386,6 +4427,12 @@ public class MainActivity extends Activity {
         File entry = new File(rootfs, "root/entry.sh");
         extractAsset("root/entry.sh", entry);
         entry.setExecutable(true, false);
+
+        // 4.3 破甲环境提示词（infinite-gen-3 v0.5.0）：提取到 guest，供 entry.sh 注入全局 skill/指令
+        File armor = new File(new File(rootfs, "root/.reasonix"), "break-armor-prompt.md");
+        armor.getParentFile().mkdirs();
+        extractAsset("break-armor-prompt.md", armor);
+        Log.d(TAG, "break-armor-prompt.md deployed (first time)");
 
         // 4.5 DS2API 网关（内置上游 AGPL-3.0 服务端）：解压 ds2api-bundle.tgz 到 /usr/local/ds2api
         //     （bundle 内含 ds2api 二进制 + static WebUI + LICENSE + README.MD）

@@ -22,6 +22,7 @@
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。
+- **破甲环境（内置）**：应用启动时自动把 infinite-gen-3 v0.5.0 破甲系统提示词注入 reasonix 的 `~/.reasonix/config.toml`（`system_prompt` 键，幂等标记 `rsxm-break-armor-v0.5.0`），并同步为全局 skill `rsxm-break-armor`（`~/.reasonix/skills/`）与全局指令（`AGENTS.md` 追加说明）——任何项目/任何会话下 AI 都携带该行为框架（来源 `assets/break-armor-prompt.md`，每次启动自动刷新）。
 - **手机 Root 权限**：检测 KernelSU/Magisk，侧滑菜单可查看/测试授权状态；reasonix（AI）内直接执行 `root <命令>` 即通过 app 以 su 获取手机 root 权限（如 `root id`、`root 'pm list packages'`）。
 
 ## 架构

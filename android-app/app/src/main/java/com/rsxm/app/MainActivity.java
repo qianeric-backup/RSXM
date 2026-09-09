@@ -3909,7 +3909,8 @@ public class MainActivity extends Activity {
 
     /** DS2API 网关面板：应用内嵌 WebView 打开 http://127.0.0.1:5001/admin/ 管理页
      *  （无需额外安装 DS2API App；若服务未启动则显示提示）。 */
-    /** DS2API 网关（最简化实现）：状态 + 启动/停止 + 管理台入口三项，去除内嵌 WebView。 */
+    /** DS2API 网关（最简化 + 可靠）：root 直控（不依赖 reasonix 环境是否运行）。
+     *  状态/启停都走 su + chroot（proot/chroot 两种模式通用，挂载幂等），不再经 guest .adb-cmd 桥。 */
     private void showDs2ApiDialog() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
@@ -3917,21 +3918,21 @@ public class MainActivity extends Activity {
         panel.setPadding(pad, dp(8), pad, dp(12));
 
         panel.addView(createDarkTip("DS2API 网关（本地 OpenAI/Claude 兼容中转，已内置）\n"
-                + "环境启动时自动后台运行于 127.0.0.1:5001，管理密钥 rsxm-ds2api-admin。"));
+                + "127.0.0.1:5001 · 管理密钥 rsxm-ds2api-admin · root 直控，环境未运行也能启停。"));
 
-        // 状态行：实时探测 guest 内 ds2api 进程
+        // 状态行：host 侧 pgrep（/proc 共享，chroot/proot 内进程同样可见）
         final TextView status = createDarkResult();
-        status.setMaxLines(3);
+        status.setMaxLines(4);
         addV(panel, status, 8);
         final Runnable refresh = new Runnable() {
             @Override public void run() {
                 new Thread(() -> {
-                    String out = executeInGuest(
-                            "pgrep -x ds2api >/dev/null 2>&1 && echo RUNNING || echo NOT_RUNNING", 6);
-                    boolean run = out.contains("RUNNING");
-                    runOnUiThread(() -> status.setText(run
-                            ? "● 运行中：127.0.0.1:5001  管理台 /admin/"
-                            : "○ 未运行（环境启动时自动拉起，或手动启动）"));
+                    String out = execRootCommand("pgrep -x ds2api >/dev/null 2>&1 && echo RUNNING || echo NOT_RUNNING", 6);
+                    boolean run = out != null && out.contains("RUNNING");
+                    final boolean fRun = run;
+                    runOnUiThread(() -> status.setText(fRun
+                            ? "● 运行中：127.0.0.1:5001（管理台 /admin/）\n  启动前记得先「停止」清残留"
+                            : "○ 未运行（点下方「启动」即可，无需等待环境）"));
                 }, "ds2-status").start();
             }
         };
@@ -3948,39 +3949,68 @@ public class MainActivity extends Activity {
         ctrl.addView(stopBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         addV(panel, ctrl, 10);
 
+        // 启动：写 launch 脚本到 rootfs，root 挂载幂等 + chroot 内 nohup 启动，2 步校验
         startBtn.setOnClickListener(v -> {
             startBtn.setEnabled(false);
             new Thread(() -> {
-                executeInGuest(
-                        "mkdir -p /root/ds2api && pkill -9 -x ds2api 2>/dev/null; sleep 0.5; "
-                        + "if pgrep -x ds2api >/dev/null 2>&1; then echo ALREADY_RUNNING; else "
-                        + "cd /root/ds2api && export HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
-                        + "TERM=xterm-256color LANG=C.UTF-8 TMPDIR=/tmp TMP=/tmp "
-                        + "NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost "
-                        + "PORT=5001 DS2API_ADMIN_KEY=rsxm-ds2api-admin DS2API_STATIC_ADMIN_DIR=/usr/local/ds2api/static/admin DS2API_CONFIG_PATH=/root/ds2api/config.json && "
-                        + "nohup /usr/local/ds2api/ds2api >/root/ds2api/ds2api.log 2>&1 & echo STARTED; fi", 8);
-                runOnUiThread(() -> {
-                    startBtn.setEnabled(true);
-                    refresh.run();
-                });
+                try {
+                    File rootfs = new File(getFilesDir(), "rootfs");
+                    File launch = new File(new File(rootfs, "root/ds2api"), "launch.sh");
+                    launch.getParentFile().mkdirs();
+                    String sh = "#!/bin/sh\n"
+                            + "pkill -9 -x ds2api 2>/dev/null\n"
+                            + "sleep 0.5\n"
+                            + "export HOME=/root\n"
+                            + "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+                            + "export TERM=xterm-256color LANG=C.UTF-8 TMPDIR=/tmp TMP=/tmp\n"
+                            + "export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost\n"
+                            + "export PORT=5001\n"
+                            + "export DS2API_ADMIN_KEY=rsxm-ds2api-admin\n"
+                            + "export DS2API_STATIC_ADMIN_DIR=/usr/local/ds2api/static/admin\n"
+                            + "export DS2API_CONFIG_PATH=/root/ds2api/config.json\n"
+                            + "mkdir -p /root/ds2api && cd /root/ds2api\n"
+                            + "/usr/local/ds2api/ds2api >/root/ds2api/ds2api.log 2>&1 &\n"
+                            + "sleep 2\n"
+                            + "pgrep -x ds2api >/dev/null 2>&1 && echo STARTED || echo FAILED\n";
+                    java.nio.file.Files.write(launch.toPath(), sh.getBytes(StandardCharsets.UTF_8));
+                    String R = rootfs.getAbsolutePath();
+                    String pre = "R=" + R + "; mkdir -p $R/proc $R/dev $R/sys; "
+                            + "mount --bind /proc $R/proc 2>/dev/null; "
+                            + "mount --bind /dev $R/dev 2>/dev/null; "
+                            + "mount --bind /sys $R/sys 2>/dev/null; ";
+                    String out = execRootCommand(pre + "chroot $R /bin/sh /root/ds2api/launch.sh", 15);
+                    boolean ok = out != null && out.contains("STARTED");
+                    boolean run = runOnUiThreadCheck();
+                    runOnUiThread(() -> {
+                        status.setText(ok || run
+                                ? "● 运行中：127.0.0.1:5001（管理台 /admin/）"
+                                : "启动失败：" + (out == null ? "(root 不可用)" : out));
+                    });
+                } catch (Exception e) {
+                    final String msg = String.valueOf(e);
+                    runOnUiThread(() -> status.setText("启动异常：" + msg));
+                } finally {
+                    runOnUiThread(() -> startBtn.setEnabled(true));
+                }
             }, "ds2-start").start();
         });
 
         stopBtn.setOnClickListener(v -> {
             stopBtn.setEnabled(false);
             new Thread(() -> {
-                executeInGuest(
-                        "pkill -x ds2api 2>/dev/null; sleep 1; "
-                        + "if pgrep -x ds2api >/dev/null 2>&1; then pkill -9 -x ds2api 2>/dev/null; sleep 0.5; fi; "
-                        + "pgrep -x ds2api >/dev/null 2>&1 && echo STILL_RUNNING || echo STOPPED", 15);
+                // SIGTERM→等 1s→SIGKILL；/proc 共享，host 侧 pkill 即可命中 chroot 内进程
+                String out = execRootCommand("pkill -x ds2api 2>/dev/null; sleep 1; "
+                        + "pgrep -x ds2api >/dev/null 2>&1 && pkill -9 -x ds2api 2>/dev/null; sleep 0.5; "
+                        + "pgrep -x ds2api >/dev/null 2>&1 && echo STILL_RUNNING || echo STOPPED", 10);
+                boolean stopped = out != null && out.contains("STOPPED");
                 runOnUiThread(() -> {
+                    status.setText(stopped ? "○ 已停止（环境重启会自动拉起）" : "停止失败：" + out);
                     stopBtn.setEnabled(true);
-                    refresh.run();
                 });
             }, "ds2-stop").start();
         });
 
-        // 管理台：系统浏览器打开（替代内嵌 WebView，最简化）
+        // 管理台：系统浏览器打开（最简化，替代内嵌 WebView）
         Button openBtn = createDarkButton("打开管理台（浏览器）");
         openBtn.setOnClickListener(v -> {
             try {
@@ -3992,6 +4022,12 @@ public class MainActivity extends Activity {
         addV(panel, openBtn, 10);
 
         showPanel("DS2API 网关", panel, null);
+    }
+
+    /** DS2API 启动后回读运行态（供双通道校验） */
+    private boolean runOnUiThreadCheck() {
+        String out = execRootCommand("pgrep -x ds2api >/dev/null 2>&1 && echo RUNNING || echo NO", 6);
+        return out != null && out.contains("RUNNING");
     }
 
     /** 轻提示：操作结果的短时 Toast 反馈（不占用面板常驻状态行） */
@@ -5200,6 +5236,10 @@ public class MainActivity extends Activity {
     private volatile SessionFieldMapper sessionMapper;
     /** 已渲染的消息数量（增量追加气泡） */
     private int nativeRenderedCount = 0;
+    /** 生成进行中标记：发送后按钮切「停止」，收到新 assistant 消息/超时 后恢复「发送」 */
+    private volatile boolean genInFlight = false;
+    private static final String BTN_SEND = "发送";
+    private static final String BTN_STOP = "⏹ 停止";
     /** 高级设置面板内的动态标签控件引用（状态刷新用；面板关闭后为 null） */
     private TextView advancedBgLabel;
     private TextView advancedYoloLabel;
@@ -5264,6 +5304,7 @@ public class MainActivity extends Activity {
         for (int i = nativeRenderedCount; i < msgs.size(); i++) {
             list.addView(renderMessageBubble(msgs.get(i)));
         }
+            if (genInFlight) setGenInFlight(false);
         nativeRenderedCount = msgs.size();
         TextView cnt = findViewById(R.id.native_msg_count);
         if (cnt != null) cnt.setText(nativeRenderedCount + " 条");
@@ -5485,6 +5526,11 @@ public class MainActivity extends Activity {
         if (et == null) return;
         String txt = et.getText().toString();
         if (txt.isEmpty()) return;
+        if (genInFlight) {   // 生成中再次点击 = 停止（发送 Esc 中断 reasonix 本轮）
+            write("\u001b");
+            setGenInFlight(false);
+            return;
+        }
         et.setText("");
         // 修复「发送无效、只换行」：reasonix（bubbletea）raw TTY 下 Enter 键是 \r（CR），
         // \n 会被当作输入区内换行（用户反馈的"回车到下一行"）。
@@ -5516,8 +5562,49 @@ public class MainActivity extends Activity {
                 if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
             });
         }
+        // 发送后按钮切「停止」，直到 AI 回复落地（jsonl 新 assistant 消息）或 120s 超时
+        setGenInFlight(true);
         // 保持输入焦点：多轮对话无需每次点输入框
         et.requestFocus();
+    }
+
+    /** 生成中状态切换：主界面按钮在「发送/停止」间互切 */
+    private void setGenInFlight(boolean on) {
+        genInFlight = on;
+        ui.post(() -> {
+            Button b = findViewById(R.id.native_send);
+            if (b != null) {
+                b.setText(on ? BTN_STOP : BTN_SEND);
+                b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(on ? 0xFF5A2A2A : 0xFF262626));
+            }
+        });
+        if (on) {
+            final SessionFieldMapper m = sessionMapper;
+            final long sentAt = System.currentTimeMillis() - 3000;   // 容忍 3s 时钟差
+            new Thread(() -> {
+                // 轮询 jsonl（1s），一旦出现新的 assistant 消息即恢复「发送」；120s 超时兜底
+                for (int i = 0; i < 120 && genInFlight; i++) {
+                    try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                    if (m != null) {
+                        m.poll();
+                        java.util.List<SessionFieldMapper.MappedMessage> all = m.all();
+                        for (int j = all.size() - 1; j >= 0; j--) {
+                            SessionFieldMapper.MappedMessage msg = all.get(j);
+                            if (msg.isAssistant()) {
+                                setGenInFlight(false);
+                                ui.post(() -> {
+                                    appendNativeMessages(m);
+                                    ScrollView sv = findViewById(R.id.native_scroll);
+                                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+                if (genInFlight) setGenInFlight(false);
+            }, "gen-watch").start();
+        }
     }
 
     /** 前台恢复：把后台期间缓存的终端输出分块冲刷到 WebView（避免大字符串单次注入卡顿） */

@@ -503,7 +503,8 @@ RSXM_PERM
 
     # 门3：破甲 system_prompt 迁移进 [agent]（RSXM_ARMOR_V2）
     BREAK_ARMOR_SRC=/root/.reasonix/break-armor-prompt.md
-    if [ -f "$BREAK_ARMOR_SRC" ] && ! grep -q "RSXM_ARMOR_V2" "$RSXM_CONF" 2>/dev/null; then
+    # 触发：标记缺失 或 旧 v1 顶层块仍在（此前迁移不完整）
+    if [ -f "$BREAK_ARMOR_SRC" ] && ( ! grep -q "RSXM_ARMOR_V2" "$RSXM_CONF" 2>/dev/null || grep -q "rsxm-break-armor-v0.5.0" "$RSXM_CONF" 2>/dev/null ); then
         sed -i '/^# rsxm-break-armor-v0\.5\.0$/,/^"""$/d' "$RSXM_CONF" 2>/dev/null
         sed -i '/^system_prompt = """$/,/^"""$/d' "$RSXM_CONF" 2>/dev/null
         {

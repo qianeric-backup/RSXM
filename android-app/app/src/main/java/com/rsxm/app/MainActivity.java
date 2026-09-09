@@ -4754,7 +4754,8 @@ public class MainActivity extends Activity {
             // 顶层键被忽略（实测会话 system 仍是默认 prompt → 破甲不生效）。
             // 逻辑：移除旧顶层破甲块（含 rsxm-break-armor-v0.5.0 标记）与任何独立 system_prompt 块，
             // 然后把完整破甲提示词写入 [agent] 段（存在则段头下插行；不存在则追加新表）。幂等。
-            if (!content.contains("RSXM_ARMOR_V2")) {
+            // 触发条件：标记缺失 **或** 旧 v1 顶层块仍在（标记已写入但迁移未完成的旧状态）
+            if (!content.contains("RSXM_ARMOR_V2") || content.contains("# rsxm-break-armor-v0.5.0")) {
                 String prompt = readBreakArmorPrompt();
                 if (!prompt.isEmpty()) {
                     // 1) 移除旧顶层破甲块（v1 注入：marker 行 + system_prompt 块）

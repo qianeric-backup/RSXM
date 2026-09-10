@@ -131,7 +131,7 @@
                     android:scrollbars="vertical"
                     android:textColor="#C9D1D9"
                     android:textSize="11sp"
-                    android:visibility="gone" />
+                    android:visibility="visible" />
 
                 <!-- 消息列表：字段映射气泡（user 右对齐 / assistant 左对齐 / tool 灰色） -->
                 <ScrollView

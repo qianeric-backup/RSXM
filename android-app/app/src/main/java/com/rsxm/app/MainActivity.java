@@ -4580,7 +4580,7 @@ public class MainActivity extends Activity {
     }
 
     /** 破甲环境注入标记（infinite-gen-3 v0.5.0）：config.toml 中以此判断是否已注入，幂等 */
-    private static final String BREAK_ARMOR_MARKER = "rsxm-break-armor-v0.5.0";
+    private static final String BREAK_ARMOR_MARKER = "rsxm-break-armor-v0.3.0-gen4";
 
     /**
      * 渗透修复：[permissions] allow 白名单 + 动态 bash。
@@ -4656,7 +4656,7 @@ public class MainActivity extends Activity {
                 Log.d(TAG, "reasonix telemetry set false");
             }
             // 破甲环境注入（infinite-gen-3 v0.5.0）：system_prompt 置顶写入完整破甲提示词。
-            // 幂等：已含 rsxm-break-armor-v0.5.0 标记则跳过；否则移除旧 system_prompt 块后重写，
+            // 幂等：已含 rsxm-break-armor-v0.3.0-gen4 标记则跳过（旧 v0.5.0/gen3 同样触发迁移）；否则移除旧 system_prompt 块后重写，
             // 保证任何启动/更新后破甲环境都生效（reasonix 以顶层 system_prompt 键加载）。
             if (!content.contains(BREAK_ARMOR_MARKER)) {
                 String prompt = readBreakArmorPrompt();
@@ -4744,12 +4744,12 @@ public class MainActivity extends Activity {
             // 逻辑：移除旧顶层破甲块（含 rsxm-break-armor-v0.5.0 标记）与任何独立 system_prompt 块，
             // 然后把完整破甲提示词写入 [agent] 段（存在则段头下插行；不存在则追加新表）。幂等。
             // 触发条件：标记缺失 **或** 旧 v1 顶层块仍在（标记已写入但迁移未完成的旧状态）
-            if (!content.contains("RSXM_ARMOR_V2") || content.contains("# rsxm-break-armor-v0.5.0")) {
+            if (!content.contains("RSXM_ARMOR_V2") || content.contains("# rsxm-break-armor-v0.5.0") || content.contains("# rsxm-break-armor-v0.3.0-gen4")) {
                 String prompt = readBreakArmorPrompt();
                 if (!prompt.isEmpty()) {
                     // 1) 移除旧顶层破甲块（v1 注入：marker 行 + system_prompt 块）
                     content = content.replaceAll(
-                            "(?ms)^\\s*# rsxm-break-armor-v0\\.5\\.0\\s*\\n\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "");
+                            "(?ms)^\\s*# rsxm-break-armor-v(?:0\\.5\\.0|0\\.3\\.0-gen4)\\s*\\n\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "");
                     // 2) 移除任何独立 system_prompt 多行/单行块（避免重复键）
                     content = content.replaceAll("(?ms)^\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "")
                             .replaceAll("(?m)^\\s*system_prompt\\s*=\\s*\"[^\"]*\"\\s*", "");

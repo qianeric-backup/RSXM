@@ -5164,10 +5164,13 @@ public class MainActivity extends Activity {
 
     // ---- PTY 实时流（剥离 TUI 组件，只显示真实文本） ----
 
+    /** 跨帧屏幕 diff：识别 bubbletea 整屏重绘，框架行/重复帧内容不重复入流 */
+    private final TerminalStreamParser.ScreenDiff liveScreenDiff = new TerminalStreamParser.ScreenDiff();
+
     /** PTY 流入口：buffer + 300ms 节流刷新到 GUI「实时流」区 */
     private void feedNativePtyLive(String text) {
         if (text == null || text.isEmpty()) return;
-        String clean = TerminalStreamParser.stripTuiDecorations(text);
+        String clean = liveScreenDiff.feed(TerminalStreamParser.stripTuiDecorations(text));
         if (clean.trim().isEmpty()) return;
         synchronized (nativeLiveStream) {
             nativeLiveStream.append(clean);
@@ -5202,6 +5205,7 @@ public class MainActivity extends Activity {
     private void resetNativeLiveStream() {
         synchronized (nativeLiveStream) { nativeLiveStream.setLength(0); }
         nativeLastLiveLen = 0;
+        liveScreenDiff.reset();
         TextView live = findViewById(R.id.native_live);
         if (live != null) live.setText("");
     }

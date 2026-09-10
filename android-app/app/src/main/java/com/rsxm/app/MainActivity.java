@@ -5111,6 +5111,11 @@ public class MainActivity extends Activity {
     private volatile SessionFieldMapper sessionMapper;
     /** 已渲染的消息数量（增量追加气泡） */
     private int nativeRenderedCount = 0;
+    // ---- PTY 实时流（剥离 TUI 组件，只显示真实文本输出）----
+    private final StringBuilder nativeLiveStream = new StringBuilder();
+    private volatile boolean nativeLiveDirty = false;
+    private int nativeLastLiveLen = 0;
+    private long lastLiveFlush = 0;
     /** 生成进行中标记：发送后按钮切「停止」，收到新 assistant 消息/超时 后恢复「发送」 */
     private volatile boolean genInFlight = false;
     private static final String BTN_SEND = "发送";
@@ -5134,12 +5139,13 @@ public class MainActivity extends Activity {
         Log.d(TAG, "OUT> " + (text.length() > 200 ? text.substring(0, 200) : text));
         final MainActivity target = sCurrent;
         if (target == null) return;
-        // 原生视图模式：取消 PTY 屏幕显示（只显示输入输出内容）。
-        // 数据源仅用会话 jsonl（结构化为 user/assistant/tool 气泡），PTY 帧不再渲染进 GUI。
+        // 原生视图：JSONL 气泡（结构化 user/assistant）+ PTY 实时流（剥离 TUI 组件，
+        // 只显示真实文本：AI 回复/工具输出/状态行；不显示光标定位/边框/清屏）。
         if (target.nativeViewOn) {
             if (target.sessionMapper == null) {
                 target.sessionMapper = target.resolveCurrentSessionMapper();
             }
+            target.feedNativePtyLive(text);
             return;
         }
         if (!sWebActive) {
@@ -5153,6 +5159,51 @@ public class MainActivity extends Activity {
             if (target.webView == null) return;
             target.webView.evaluateJavascript("window.onTermData(" + jsQuote(text) + ")", null);
         });
+    }
+
+
+    // ---- PTY 实时流（剥离 TUI 组件，只显示真实文本） ----
+
+    /** PTY 流入口：buffer + 300ms 节流刷新到 GUI「实时流」区 */
+    private void feedNativePtyLive(String text) {
+        if (text == null || text.isEmpty()) return;
+        String clean = TerminalStreamParser.stripTuiDecorations(text);
+        if (clean.trim().isEmpty()) return;
+        synchronized (nativeLiveStream) {
+            nativeLiveStream.append(clean);
+            if (nativeLiveStream.length() > 4 * 1024 * 1024) nativeLiveStream.setLength(0);
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastLiveFlush < 300) return;
+        lastLiveFlush = now;
+        ui.post(this::renderNativePtyLive);
+    }
+
+    /** 渲染实时流（原生视图 live TextView 增量追加） */
+    private void renderNativePtyLive() {
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        final String snapshot;
+        synchronized (nativeLiveStream) { snapshot = nativeLiveStream.toString(); }
+        if (snapshot.length() <= nativeLastLiveLen) return;
+        String delta = snapshot.substring(nativeLastLiveLen);
+        nativeLastLiveLen = snapshot.length();
+        TextView live = findViewById(R.id.native_live);
+        if (live == null) return;
+        CharSequence existing = live.getText().toString();
+        String next = existing + delta;
+        if (next.length() > 128 * 1024) next = next.substring(next.length() - 128 * 1024);
+        live.setText(next);
+        ScrollView sv = findViewById(R.id.native_scroll);
+        if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+    }
+
+    /** 切视图时重置流（跨会话隔离） */
+    private void resetNativeLiveStream() {
+        synchronized (nativeLiveStream) { nativeLiveStream.setLength(0); }
+        nativeLastLiveLen = 0;
+        TextView live = findViewById(R.id.native_live);
+        if (live != null) live.setText("");
     }
 
     /** 原生视图：映射 CLI 字段到 GUI。reasonix 会话实时写入 jsonl，这里按字段增量渲染气泡 */
@@ -5268,6 +5319,9 @@ public class MainActivity extends Activity {
         nativeViewOn = true;
         getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "native").apply();
         updateMenuViewLabel();
+        resetNativeLiveStream();
+        TextView liveIn = findViewById(R.id.native_live);
+        if (liveIn != null) liveIn.setVisibility(View.VISIBLE);
         View nativeChatLayout = findViewById(R.id.native_chat);
         View web = findViewById(R.id.webview);
         // GUI 视图输入修复：强制 adjustResize（覆盖 showPanel 遗留的 ADJUST_PAN），
@@ -5327,6 +5381,9 @@ public class MainActivity extends Activity {
         nativeViewOn = false;
         getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "terminal").apply();
         updateMenuViewLabel();
+        resetNativeLiveStream();
+        TextView liveOut = findViewById(R.id.native_live);
+        if (liveOut != null) liveOut.setVisibility(View.GONE);
         View nativeChatLayout = findViewById(R.id.native_chat);
         View web = findViewById(R.id.webview);
         nativeChatLayout.setVisibility(View.GONE);

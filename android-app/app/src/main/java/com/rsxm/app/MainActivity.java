@@ -5162,15 +5162,121 @@ public class MainActivity extends Activity {
     }
 
 
-    // ---- PTY 实时流（剥离 TUI 组件，只显示真实文本） ----
+    // ---- 事件流（events.jsonl 结构化增量），app-bin 实时流兜底 ----
 
-    /** 跨帧屏幕 diff：识别 bubbletea 整屏重绘，框架行/重复帧内容不重复入流 */
-    private final TerminalStreamParser.ScreenDiff liveScreenDiff = new TerminalStreamParser.ScreenDiff();
+    /** 结构化事件流解析器：读会话 events.jsonl（desktop 同源），零 TUI 框架行 */
+    private EventsJSONLParser liveEvents;
+    /** 事件流解析线程（守护）：主线程退出时自动结束 */
+    private volatile Thread eventsThread;
 
-    /** PTY 流入口：buffer + 300ms 节流刷新到 GUI「实时流」区 */
+    /** 启动原生视图时调用：找当前最新 events.jsonl 并开始轮询 */
+    private void startEventsStream() {
+        stopEventsStream();
+        liveEvents = resolveLatestEventsFile();
+        if (liveEvents == null) return;
+        Thread t = new Thread(() -> {
+            EventsJSONLParser p = liveEvents;
+            while (p != null && !Thread.currentThread().isInterrupted() && nativeViewOn) {
+                try {
+                    if (p.poll()) {
+                        List<EventsJSONLParser.Event> evs = p.drain();
+                        for (EventsJSONLParser.Event ev : evs) {
+                            if (ev.isText()) appendLiveBubble(ev.content, false);
+                            else if (ev.isReasoning()) appendLiveBubble(ev.content, true);
+                            else if (ev.isTool()) appendToolBubble(ev.toolName, ev.content, ev.revision >= 0);
+                        }
+                    }
+                } catch (Exception ignored) {}
+                try { Thread.sleep(200); } catch (InterruptedException e) { break; }
+            }
+        }, "events-stream");
+        t.setDaemon(true);
+        eventsThread = t;
+        t.start();
+    }
+
+    private void stopEventsStream() {
+        Thread t = eventsThread;
+        eventsThread = null;
+        if (t != null) t.interrupt();
+        liveEvents = null;
+    }
+
+    /** 找当前项目下最新 &lt;id&gt;.events.jsonl（与 sessionMapper 同盘） */
+    private EventsJSONLParser resolveLatestEventsFile() {
+        try {
+            File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+            File projectsDir = new File(new File(rootDir, ".reasonix"), "projects");
+            File best = null;
+            long bestTm = Long.MIN_VALUE;
+            File[] pds = projectsDir.isDirectory() ? projectsDir.listFiles(File::isDirectory) : null;
+            if (pds != null) {
+                for (File pd : pds) {
+                    File sessions = new File(pd, "sessions");
+                    File[] files = sessions.listFiles((d, n) -> n.endsWith(".events.jsonl") && !n.startsWith("."));
+                    if (files == null) continue;
+                    for (File f : files) {
+                        if (f.lastModified() > bestTm) {
+                            bestTm = f.lastModified();
+                            best = f;
+                        }
+                    }
+                }
+            }
+            return best == null ? null : new EventsJSONLParser(best);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 往 native_live 追加一段文本（thinking 灰色 / 正文默认色；线程安全） */
+    private void appendLiveBubble(String delta, boolean reasoning) {
+        if (delta == null || delta.isEmpty()) return;
+        ui.post(() -> {
+            TextView live = findViewById(R.id.native_live);
+            if (live == null) return;
+            int color = reasoning ? 0xFF9E9E9E : 0xFFE0E0E0;
+            int start = live.length();
+            live.append(delta);
+            live.setText(live.getText(), TextView.BufferType.SPANNABLE);
+            android.text.Spannable sp = (android.text.Spannable) live.getText();
+            sp.setSpan(new android.text.style.ForegroundColorSpan(color), start, sp.length(),
+                    android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            ScrollView sv = findViewById(R.id.native_scroll);
+            if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+        });
+    }
+
+    private void appendToolBubble(String toolName, String content, boolean running) {
+        ui.post(() -> {
+            TextView live = findViewById(R.id.native_live);
+            if (live == null) return;
+            String head = "▸ " + (toolName == null ? "tool" : toolName) + (running ? " …" : "");
+            int start = live.length();
+            live.append("\n" + head + "\n");
+            android.text.Spannable sp = (android.text.Spannable) live.getText();
+            sp.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), start, sp.length(),
+                    android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            if (content != null && !content.isEmpty()) {
+                int s2 = live.length();
+                live.append(content + "\n");
+                sp = (android.text.Spannable) live.getText();
+                sp.setSpan(new android.text.style.ForegroundColorSpan(0xFFB0BEC5), s2, sp.length(),
+                        android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            ScrollView sv = findViewById(R.id.native_scroll);
+            if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+        });
+    }
+
+    // ---- PTY 流（旧路径，降级兜底）：仅当 events.jsonl 不可用时才走 ----
+
+    /** PTY 流入口：buffer + 300ms 节流刷新到 GUI「实时流」区（仅 events.jsonl 不可用时兜底） */
     private void feedNativePtyLive(String text) {
         if (text == null || text.isEmpty()) return;
-        String clean = liveScreenDiff.feed(TerminalStreamParser.stripTuiDecorations(text));
+        // 事件流（events.jsonl）已就位时 PTY 流静默丢弃：避免与结构化事件重复渲染
+        if (liveEvents != null) return;
+        String clean = TerminalStreamParser.stripTuiDecorations(text);
         if (clean.trim().isEmpty()) return;
         synchronized (nativeLiveStream) {
             nativeLiveStream.append(clean);
@@ -5201,13 +5307,13 @@ public class MainActivity extends Activity {
         if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
     }
 
-    /** 切视图时重置流（跨会话隔离） */
+    /** 切视图时重置流（跨会话隔离）：同时重启事件流线程（切到新会话文件） */
     private void resetNativeLiveStream() {
         synchronized (nativeLiveStream) { nativeLiveStream.setLength(0); }
         nativeLastLiveLen = 0;
-        liveScreenDiff.reset();
         TextView live = findViewById(R.id.native_live);
         if (live != null) live.setText("");
+        startEventsStream();
     }
 
     /** 原生视图：映射 CLI 字段到 GUI。reasonix 会话实时写入 jsonl，这里按字段增量渲染气泡 */
@@ -5386,6 +5492,7 @@ public class MainActivity extends Activity {
         getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "terminal").apply();
         updateMenuViewLabel();
         resetNativeLiveStream();
+        stopEventsStream();   // 终端模式无需事件流
         TextView liveOut = findViewById(R.id.native_live);
         if (liveOut != null) liveOut.setVisibility(View.GONE);
         View nativeChatLayout = findViewById(R.id.native_chat);
@@ -5590,6 +5697,7 @@ public class MainActivity extends Activity {
         super.onDestroy();
         if (sCurrent == this) sCurrent = null;
         stopRootPolling();
+        stopEventsStream();   // 停事件流守护线程
         // 后台运行模式：环境与 Activity 生命周期解耦，退出 Activity 不杀 proot
         // （由前台服务保活继续后台运行，重新打开时 onCreate 复用环境与终端 I/O）；
         // 关闭模式时照旧清理。

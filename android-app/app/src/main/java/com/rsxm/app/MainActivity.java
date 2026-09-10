@@ -1595,255 +1595,94 @@ public class MainActivity extends Activity {
     /** MCP 服务器面板：管理当前项目 .mcp.json 的 mcpServers（reasonix 按项目根 .mcp.json
      *  发现 MCP 服务器）。列表（名称/类型/摘要）+ 添加/编辑表单 + 删除；保存后写回
      *  .mcp.json 并提示重启环境生效（MCP 服务器随 reasonix 会话启动连接）。 */
+    /** MCP 服务器（最简化）：读取/编辑当前项目 .mcp.json 原始 JSON，一个输入框搞定。 */
     private void showMcpDialog() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), dp(12));
         panel.addView(createDarkTip(
-                "MCP 服务器写入当前项目 .mcp.json（reasonix 按项目发现 MCP 能力）。\n"
-                        + "本地命令型选 stdio（command + args），远程选 http（url + headers）。\n"
-                        + "保存后重启环境生效（可稍后在项目面板重新进入项目）。"));
-        final TextView curView = new TextView(this);
-        curView.setTextColor(0xFF7FDB8A);
-        curView.setTextSize(13);
-        curView.setTypeface(null, android.graphics.Typeface.BOLD);
-        curView.setPadding(dp(2), dp(8), dp(2), dp(4));
-        addV(panel, curView, 0);
-        // 服务器列表（固定高度 + 二级滑动；每行 名称/摘要 + 编辑/删除）
-        panel.addView(createDarkSectionTitle("已配置服务器"));
-        final ScrollView listScroll = new ScrollView(this);
-        final LinearLayout listBox = new LinearLayout(this);
-        listBox.setOrientation(LinearLayout.VERTICAL);
-        listScroll.addView(listBox);
-        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(230));
-        listLp.topMargin = dp(6);
-        panel.addView(listScroll, listLp);
-        // 新增/编辑表单
-        panel.addView(createDarkSectionTitle("添加 / 编辑"));
-        final EditText nameInput = createDarkEditText("名称（如 github，字母数字._-）",
-                InputType.TYPE_CLASS_TEXT);
-        addV(panel, nameInput, 6);
-        final Spinner typeSpin = new Spinner(this);
-        typeSpin.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"stdio（本地命令）", "http（远程服务）", "sse（远程兼容）"}));
-        addV(panel, typeSpin, 6);
-        final EditText cmdInput = createDarkEditText("stdio：command（如 npx、node、python3）",
-                InputType.TYPE_CLASS_TEXT);
-        addV(panel, cmdInput, 6);
-        final EditText argsInput = createDarkEditText("stdio：args（空格分隔，如 -y @server/github）",
-                InputType.TYPE_CLASS_TEXT);
-        addV(panel, argsInput, 6);
-        final EditText envInput = createDarkEditText("stdio：env JSON（可空，如 {\"KEY\":\"V\"}）",
-                InputType.TYPE_CLASS_TEXT);
-        addV(panel, envInput, 6);
-        final EditText urlInput = createDarkEditText("http/sse：url（如 https://host/mcp）",
-                InputType.TYPE_CLASS_TEXT);
-        addV(panel, urlInput, 6);
-        final EditText hdrInput = createDarkEditText("http/sse：headers JSON（可空，如 {\"Authorization\":\"Bearer x\"}）",
-                InputType.TYPE_CLASS_TEXT);
-        addV(panel, hdrInput, 6);
-        final CheckBox autoStartChk = new CheckBox(this);
-        autoStartChk.setText("随会话自动启动（取消则需手动 reasonix mcp start）");
-        autoStartChk.setTextColor(0xFFCCCCCC);
-        autoStartChk.setTextSize(13);
-        autoStartChk.setChecked(true);
-        addV(panel, autoStartChk, 4);
-        final List<McpManager.ServerSpec> editing = new ArrayList<>(); // 单元素：正在编辑的原名（null=新增）
-        // 类型切换：stdio/http 字段显隐（放 wrap 容器里整体可见性切换）
-        final LinearLayout stdioBox = new LinearLayout(this);
-        stdioBox.setOrientation(LinearLayout.VERTICAL);
-        stdioBox.addView(cmdInput); stdioBox.addView(argsInput); stdioBox.addView(envInput);
-        final LinearLayout httpBox = new LinearLayout(this);
-        httpBox.setOrientation(LinearLayout.VERTICAL);
-        httpBox.addView(urlInput); httpBox.addView(hdrInput);
-        addV(panel, stdioBox, 0);
-        addV(panel, httpBox, 0);
-        typeSpin.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) {
-                stdioBox.setVisibility(pos == 0 ? View.VISIBLE : View.GONE);
-                httpBox.setVisibility(pos == 0 ? View.GONE : View.VISIBLE);
+                "MCP 服务器配置写入当前项目 .mcp.json（reasonix 按项目发现 MCP 能力）。\n"
+                + "保存后重启环境生效。格式示例：\n"
+                + "{ \"mcpServers\": { \"github\": { \"command\": \"npx\", "
+                + "\"args\": [\"-y\",\"@server/github\"], \"auto_start\": true } } }"));
+
+        final TextView pathInfo = createDarkResult();
+        addV(panel, pathInfo, 8);
+
+        final EditText jsonInput = new EditText(this);
+        jsonInput.setHint(".mcp.json 完整内容（JSON）");
+        jsonInput.setTextColor(0xFFFFFFFF);
+        jsonInput.setHintTextColor(0xFF707070);
+        jsonInput.setTextSize(12);
+        jsonInput.setTypeface(android.graphics.Typeface.MONOSPACE);
+        jsonInput.setBackgroundColor(0xFF1A1A1A);
+        jsonInput.setMinLines(6);
+        jsonInput.setGravity(android.view.Gravity.TOP | android.view.Gravity.START);
+        addV(panel, jsonInput, 6);
+
+        final TextView status = createDarkResult();
+        addV(panel, status, 8);
+
+        // 载入：读 .mcp.json
+        final Runnable refresh = new Runnable() {
+            @Override public void run() {
+                new Thread(() -> {
+                    String dir = McpManager.projectDir(MainActivity.this);
+                    String path = dir + "/.mcp.json";
+                    try {
+                        File f = new File(path);
+                        if (f.exists()) {
+                            // chroot/proot 权限保护：先 chmod 再读
+                            execRootCommand("chmod a+r '" + f.getAbsolutePath() + "' 2>/dev/null", 5);
+                            byte[] bb = java.nio.file.Files.readAllBytes(f.toPath());
+                            String body = new String(bb, StandardCharsets.UTF_8);
+                            runOnUiThread(() -> {
+                                pathInfo.setText("文件：" + path);
+                                jsonInput.setText(body);
+                            });
+                        } else {
+                            runOnUiThread(() -> pathInfo.setText("（.mcp.json 不存在，保存时会自动创建）"));
+                        }
+                    } catch (Exception e) {
+                        runOnUiThread(() -> pathInfo.setText("（读取失败：" + e.getMessage() + "）"));
+                    }
+                }, "mcp-load").start();
             }
-            @Override public void onNothingSelected(android.widget.AdapterView<?> p) {}
-        });
-        // 操作行：保存表单 + 清空表单（恢复新增模式）
-        LinearLayout formBtns = new LinearLayout(this);
-        formBtns.setOrientation(LinearLayout.HORIZONTAL);
-        Button saveBtn = createDarkButton("保存到 .mcp.json");
-        Button resetBtn = createDarkButton("清空表单");
-        formBtns.addView(saveBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        formBtns.addView(resetBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        addV(panel, formBtns, 8);
-        resetBtn.setOnClickListener(v -> {
-            editing.clear();
-            fillMcpForm(nameInput, typeSpin, cmdInput, argsInput, envInput, urlInput, hdrInput,
-                    autoStartChk, null);
-        });
-        saveBtn.setOnClickListener(v -> saveMcpServers(nameInput, typeSpin, cmdInput, argsInput,
-                envInput, urlInput, hdrInput, autoStartChk, editing, listBox, curView));
-        loadMcpServers(listBox, curView, nameInput, typeSpin, cmdInput, argsInput, envInput,
-                urlInput, hdrInput, autoStartChk, editing);
-        showPanel("MCP 服务器", panel, null);
-    }
+        };
+        refresh.run();
 
-    /** 表单 ← spec（spec 为 null 时清空为新增模式） */
-    private void fillMcpForm(EditText nameInput, Spinner typeSpin, EditText cmdInput,
-                             EditText argsInput, EditText envInput, EditText urlInput,
-                             EditText hdrInput, CheckBox autoStartChk, McpManager.ServerSpec s) {
-        nameInput.setText(s == null ? "" : s.name);
-        typeSpin.setSelection(s == null || "stdio".equals(s.type) ? 0
-                : "http".equals(s.type) ? 1 : 2);
-        cmdInput.setText(s == null ? "" : s.command);
-        argsInput.setText(s == null ? "" : s.args);
-        envInput.setText(s == null ? "" : s.env);
-        urlInput.setText(s == null ? "" : s.url);
-        hdrInput.setText(s == null ? "" : s.headers);
-        autoStartChk.setChecked(s == null || s.autoStart);
-    }
-
-    /** 校验 JSON 文本可解析为 JSON 对象；不合法返回错误消息，合法返回 null */
-    private static String validateJsonObject(String text, String label) {
-        String t = text == null ? "" : text.trim();
-        if (t.isEmpty()) return null;
-        try {
-            new org.json.JSONObject(t);
-            return null;
-        } catch (Exception e) {
-            return label + " 不是合法的 JSON 对象";
-        }
-    }
-
-    /** 保存表单（新增或覆盖编辑项）到当前项目 .mcp.json，成功后刷新列表并提示重启生效 */
-    private void saveMcpServers(EditText nameInput, Spinner typeSpin, EditText cmdInput,
-                                EditText argsInput, EditText envInput, EditText urlInput,
-                                EditText hdrInput, CheckBox autoStartChk,
-                                List<McpManager.ServerSpec> editing, LinearLayout listBox,
-                                TextView curView) {
-        String name = nameInput.getText().toString().trim();
-        if (name.isEmpty()) { showToast("请输入服务器名称"); return; }
-        if (!name.matches("[A-Za-z0-9_.-]+")) { showToast("名称仅允许字母、数字、_ . -"); return; }
-        int typePos = typeSpin.getSelectedItemPosition();
-        String type = typePos == 0 ? "stdio" : typePos == 1 ? "http" : "sse";
-        McpManager.ServerSpec s = new McpManager.ServerSpec();
-        s.name = name;
-        s.type = type;
-        if (typePos == 0) {
-            s.command = cmdInput.getText().toString().trim();
-            if (s.command.isEmpty()) { showToast("stdio 类型必须填写 command"); return; }
-            s.args = argsInput.getText().toString().trim();
-            s.env = envInput.getText().toString().trim();
-            String err = validateJsonObject(s.env, "env");
-            if (err != null) { showToast(err); return; }
-        } else {
-            s.url = urlInput.getText().toString().trim();
-            if (s.url.isEmpty()) { showToast(type + " 类型必须填写 url"); return; }
-            s.headers = hdrInput.getText().toString().trim();
-            String err = validateJsonObject(s.headers, "headers");
-            if (err != null) { showToast(err); return; }
-        }
-        s.autoStart = autoStartChk.isChecked();
-        new Thread(() -> {
-            List<McpManager.ServerSpec> list = McpManager.loadServers(this);
-            // 编辑模式记录原名：改名时移除旧条目；重名判断需放行原名自身（覆盖编辑）
-            final String oldName = editing.isEmpty() ? null : editing.get(0).name;
-            boolean dup = list.stream().anyMatch(x -> x.name.equals(name)
-                    && !x.name.equals(oldName));
-            if (dup) {
-                runOnUiThread(() -> showToast("已存在同名服务器「" + name + "」"));
+        Button saveBtn = createDarkButton("保存 .mcp.json");
+        saveBtn.setOnClickListener(v -> {
+            String txt = jsonInput.getText().toString().trim();
+            if (txt.isEmpty()) { status.setText("内容为空"); return; }
+            try {
+                new org.json.JSONObject(txt);  // JSON 语法校验
+            } catch (Exception e) {
+                status.setText("JSON 语法错误：" + e.getMessage());
                 return;
             }
-            if (oldName != null) list.removeIf(x -> x.name.equals(oldName));
-            list.add(s);
-            String err = McpManager.saveServers(this, list);
-            runOnUiThread(() -> {
-                if (err != null) { showToast(err); return; }
-                editing.clear();
-                fillMcpForm(nameInput, typeSpin, cmdInput, argsInput, envInput, urlInput,
-                        hdrInput, autoStartChk, null);
-                loadMcpServers(listBox, curView, nameInput, typeSpin, cmdInput, argsInput,
-                        envInput, urlInput, hdrInput, autoStartChk, editing);
-                showToast("已保存，重启环境后生效");
-            });
-        }, "mcp-save").start();
-    }
-
-    /** 后台加载当前项目 .mcp.json 的服务器列表并渲染（顶部显示项目根路径） */
-    private void loadMcpServers(LinearLayout container, TextView curView, EditText nameInput,
-                                Spinner typeSpin, EditText cmdInput, EditText argsInput,
-                                EditText envInput, EditText urlInput, EditText hdrInput,
-                                CheckBox autoStartChk, List<McpManager.ServerSpec> editing) {
-        container.removeAllViews();
-        container.addView(createDarkTip("加载中..."));
-        new Thread(() -> {
-            String dir = McpManager.projectDir(this);
-            List<McpManager.ServerSpec> list = McpManager.loadServers(this);
-            runOnUiThread(() -> {
-                curView.setText("项目根：" + dir + "/.mcp.json");
-                container.removeAllViews();
-                if (list.isEmpty()) {
-                    container.addView(createDarkTip("（暂无 MCP 服务器，用下方表单添加）"));
-                    return;
+            new Thread(() -> {
+                String dir = McpManager.projectDir(MainActivity.this);
+                String path = dir + "/.mcp.json";
+                try {
+                    new java.io.File(path).getParentFile().mkdirs();
+                    java.nio.file.Files.write(new java.io.File(path).toPath(),
+                            txt.getBytes(StandardCharsets.UTF_8));
+                    runOnUiThread(() -> {
+                        status.setText("已保存\n请重启环境生效");
+                        showToast("已保存");
+                    });
+                } catch (Exception e) {
+                    runOnUiThread(() -> status.setText("保存失败：" + e.getMessage()));
                 }
-                for (McpManager.ServerSpec s : list) {
-                    container.addView(mcpRow(s, container, nameInput, typeSpin, cmdInput,
-                            argsInput, envInput, urlInput, hdrInput, autoStartChk, editing, curView));
-                }
-            });
-        }, "mcp-load").start();
-    }
-
-    /** 服务器行：名称 + 类型/摘要 + 编辑 + 删除 */
-    private View mcpRow(McpManager.ServerSpec s, LinearLayout container, EditText nameInput,
-                        Spinner typeSpin, EditText cmdInput, EditText argsInput, EditText envInput,
-                        EditText urlInput, EditText hdrInput, CheckBox autoStartChk,
-                        List<McpManager.ServerSpec> editing, TextView curView) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setBackgroundColor(0xFF141414);
-        row.setPadding(dp(10), dp(6), dp(10), dp(6));
-        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rp.bottomMargin = dp(4);
-        row.setLayoutParams(rp);
-        TextView info = new TextView(this);
-        boolean http = "http".equals(s.type) || "sse".equals(s.type);
-        String brief = http ? s.url
-                : s.command + (s.args.isEmpty() ? "" : " " + s.args);
-        info.setText(s.name + "（" + s.type + (s.autoStart ? "" : "，手动启动") + "）\n" + brief);
-        info.setTextColor(0xFFE0E0E0);
-        info.setTextSize(13);
-        info.setLineSpacing(0, 1.1f);
-        row.addView(info);
-        LinearLayout btns = new LinearLayout(this);
-        btns.setOrientation(LinearLayout.HORIZONTAL);
-        Button edit = createDarkButton("编辑");
-        edit.setOnClickListener(v -> {
-            editing.clear();
-            editing.add(s);
-            fillMcpForm(nameInput, typeSpin, cmdInput, argsInput, envInput, urlInput, hdrInput,
-                    autoStartChk, s);
-            showToast("已载入表单，修改后点「保存到 .mcp.json」");
+            }, "mcp-save").start();
         });
-        btns.addView(edit, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        Button del = createDarkButton("删除");
-        del.setOnClickListener(v -> new Thread(() -> {
-            List<McpManager.ServerSpec> list = McpManager.loadServers(this);
-            list.removeIf(x -> x.name.equals(s.name));
-            String err = McpManager.saveServers(this, list);
-            runOnUiThread(() -> {
-                if (err != null) { showToast(err); return; }
-                if (!editing.isEmpty() && editing.get(0).name.equals(s.name)) editing.clear();
-                loadMcpServers(container, curView, nameInput, typeSpin, cmdInput, argsInput,
-                        envInput, urlInput, hdrInput, autoStartChk, editing);
-                showToast("已删除，重启环境后生效");
-            });
-        }, "mcp-del").start());
-        btns.addView(del, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        row.addView(btns);
-        return row;
+        addV(panel, saveBtn, 8);
+
+        showPanel("MCP 服务器", panel, null);
+        refresh.run();
     }
 
-    /* ==================== 开发环境 ==================== */
 
     /** 开发环境：一键安装常用开发环境（Alpine 包管理器，后台安装 + 面板内实时进度） */
     private void showDevEnvDialog() {

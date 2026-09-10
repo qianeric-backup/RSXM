@@ -596,8 +596,7 @@ public class MainActivity extends Activity {
             if (heightDiff > dp(120)) {
                 // 键盘弹出
                 if (nativeViewOn) {
-                    ScrollView sv = findViewById(R.id.native_scroll);
-                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                    autoScrollBottom(true);   // 键盘弹出=用户正在输入，强制滚底
                 }
             }
         });
@@ -5118,6 +5117,10 @@ public class MainActivity extends Activity {
     private long lastLiveFlush = 0;
     /** 生成进行中标记：发送后按钮切「停止」，收到新 assistant 消息/超时 后恢复「发送」 */
     private volatile boolean genInFlight = false;
+    /** 用户正在触摸翻阅消息列表：置位期间暂停「自动滚到底部」抢占（v2.0.23 修复无法回看）。
+     *  触摸按下置位；松手后 4s 无新内容追加则自动清除（新回复继续可见）。 */
+    private volatile boolean userScrolling = false;
+    private long lastUserScrollAt = 0;
     private static final String BTN_SEND = "发送";
     private static final String BTN_STOP = "⏹ 停止";
     /** 高级设置面板内的动态标签控件引用（状态刷新用；面板关闭后为 null） */
@@ -5242,8 +5245,7 @@ public class MainActivity extends Activity {
             android.text.Spannable sp = (android.text.Spannable) live.getText();
             sp.setSpan(new android.text.style.ForegroundColorSpan(color), start, sp.length(),
                     android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-            ScrollView sv = findViewById(R.id.native_scroll);
-            if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+            autoScrollBottom(false);   // 用户回看时不抢占
         });
     }
 
@@ -5264,8 +5266,7 @@ public class MainActivity extends Activity {
                 sp.setSpan(new android.text.style.ForegroundColorSpan(0xFFB0BEC5), s2, sp.length(),
                         android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
-            ScrollView sv = findViewById(R.id.native_scroll);
-            if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+            autoScrollBottom(false);   // 用户回看时不抢占
         });
     }
 
@@ -5303,8 +5304,42 @@ public class MainActivity extends Activity {
         String next = existing + delta;
         if (next.length() > 128 * 1024) next = next.substring(next.length() - 128 * 1024);
         live.setText(next);
+        autoScrollBottom(false);
+    }
+
+    /**
+     * 统一自动滚底入口（v2.0.23）：用户触摸翻阅期间（userScrolling）不抢占滚动位置；
+     * 只有松手超过 4s（或 force）时才跟随新内容滚到底。
+     * force=true（用户主动发送/切视图/键盘弹出）时无视 userScrolling 直接滚底。
+     */
+    private void autoScrollBottom(boolean force) {
         ScrollView sv = findViewById(R.id.native_scroll);
-        if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+        if (sv == null) return;
+        boolean recentTouch = userScrolling && (System.currentTimeMillis() - lastUserScrollAt) < 4000;
+        if (recentTouch && !force) return;   // 用户正在回看：不打断
+        if (!recentTouch) userScrolling = false;
+        sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+    }
+
+    /** 消息列表触摸监听：按下/移动置位 userScrolling（安装于 enterNativeView） */
+    private void installScrollTouchGuard() {
+        ScrollView sv = findViewById(R.id.native_scroll);
+        if (sv == null) return;
+        sv.setOnTouchListener((v, ev) -> {
+            switch (ev.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                case android.view.MotionEvent.ACTION_MOVE:
+                    userScrolling = true;
+                    lastUserScrollAt = System.currentTimeMillis();
+                    break;
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    lastUserScrollAt = System.currentTimeMillis();
+                    // 不立即清 userScrolling：4s 缓冲内新内容不抢占，之后恢复自动跟随
+                    break;
+            }
+            return false;   // 不消费事件：ScrollView 正常滚动
+        });
     }
 
     /** 切视图时重置流（跨会话隔离）：同时重启事件流线程（切到新会话文件） */
@@ -5344,9 +5379,8 @@ public class MainActivity extends Activity {
         nativeRenderedCount = msgs.size();
         TextView cnt = findViewById(R.id.native_msg_count);
         if (cnt != null) cnt.setText(nativeRenderedCount + " 条");
-        // 自动滚到底部
-        ScrollView sv = findViewById(R.id.native_scroll);
-        if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+        // 自动滚到底部（v2.0.23：用户回看时不抢占，替代原无条件 fullScroll）
+        autoScrollBottom(false);
     }
 
     /** 把一条字段化消息渲染为气泡（role→方向/配色、model→标签、usage→统计、tool→灰色） */
@@ -5430,6 +5464,7 @@ public class MainActivity extends Activity {
         getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "native").apply();
         updateMenuViewLabel();
         resetNativeLiveStream();
+        installScrollTouchGuard();   // v2.0.23：触摸翻阅期间暂停自动滚底
         TextView liveIn = findViewById(R.id.native_live);
         if (liveIn != null) liveIn.setVisibility(View.VISIBLE);
         View nativeChatLayout = findViewById(R.id.native_chat);
@@ -5463,16 +5498,12 @@ public class MainActivity extends Activity {
         final EditText input = findViewById(R.id.native_input);
         if (input != null) {
             input.setOnFocusChangeListener((v, hasFocus) -> {
-                if (hasFocus) {
-                    ScrollView sv = findViewById(R.id.native_scroll);
-                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
-                }
+                if (hasFocus) autoScrollBottom(true);   // 用户输入中，强制
             });
             input.addTextChangedListener(new android.text.TextWatcher() {
                 @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
                 @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
-                    ScrollView sv = findViewById(R.id.native_scroll);
-                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                    autoScrollBottom(true);   // 用户输入中，强制
                 }
                 @Override public void afterTextChanged(android.text.Editable s) {}
             });
@@ -5567,13 +5598,14 @@ public class MainActivity extends Activity {
     private void sendNativeInput() {
         EditText et = findViewById(R.id.native_input);
         if (et == null) return;
-        String txt = et.getText().toString();
-        if (txt.isEmpty()) return;
-        if (genInFlight) {   // 生成中再次点击 = 停止（发送 Esc 中断 reasonix 本轮）
-            write("\u001b");
-            setGenInFlight(false);
+        // 停止分支必须在 txt.isEmpty() 检查之前：生成中输入框必然为空（发送时已清空），
+        // 放在后面则永远走不到停止逻辑（v2.0.23 修复「停止按钮无效」）。
+        if (genInFlight) {   // 生成中再次点击 = 停止（Esc 中断 reasonix 本轮）
+            stopNativeGeneration();
             return;
         }
+        String txt = et.getText().toString();
+        if (txt.isEmpty()) return;
         et.setText("");
         // 修复「发送无效、只换行」：reasonix（bubbletea）raw TTY 下 Enter 键是 \r（CR），
         // \n 会被当作输入区内换行（用户反馈的"回车到下一行"）。
@@ -5601,14 +5633,39 @@ public class MainActivity extends Activity {
                 nativeRenderedCount++;   // 递增计数：jsonl 中该 user 消息到达时不再重复渲染
                 TextView cnt = findViewById(R.id.native_msg_count);
                 if (cnt != null) cnt.setText(nativeRenderedCount + " 条");
-                ScrollView sv = findViewById(R.id.native_scroll);
-                if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                autoScrollBottom(true);   // 用户自己发送的消息，强制滚底
             });
         }
         // 发送后按钮切「停止」，直到 AI 回复落地（jsonl 新 assistant 消息）或 120s 超时
         setGenInFlight(true);
         // 保持输入焦点：多轮对话无需每次点输入框
         et.requestFocus();
+    }
+
+    /**
+     * 停止 reasonix 本轮生成（v2.0.23 修复「停止按钮无效」）。
+     * 单发 ESC（\u001b）常不够：reasonix（bubbletea）对 ESC 的处理依赖 TUI 状态
+     * （idle 时第一次 Esc 只武装 rewind、审批面板中 Esc=拒绝等），且 PTY 流中
+     * 孤立 0x1b 可能被输入解析吞掉。改为双信号 + 短重试：
+     *   1) ESC：取消流式 turn（chat_tui.go case "esc" → m.ctrl.Cancel()）
+     *   2) 300ms 后若仍在生成 → Ctrl+C（0x03）：同样触发 Cancel，对卡死的
+     *      工具进程/provider 流更有效
+     *   3) 600ms 后再补一发 Esc（可能第一次被输入框状态机消费）
+     * 立即复位按钮为「发送」：实际中断由 reasonix 侧生效；若未真正中断，
+     * 用户再次发送新消息自然恢复——比按钮卡死体验好。
+     */
+    private void stopNativeGeneration() {
+        write("\u001b");
+        new Thread(() -> {
+            try {
+                Thread.sleep(300);
+                if (genInFlight) write("\u0003");   // Ctrl+C 兜底
+                Thread.sleep(300);
+                if (genInFlight) write("\u001b");   // 再补 Esc
+            } catch (Exception ignored) {}
+        }, "native-stop").start();
+        setGenInFlight(false);
+        pushOutput("\r\n[已发送中断信号（Esc+Ctrl+C）]\r\n");
     }
 
     /** 生成中状态切换：主界面按钮在「发送/停止」间互切 */
@@ -5637,8 +5694,7 @@ public class MainActivity extends Activity {
                                 setGenInFlight(false);
                                 ui.post(() -> {
                                     appendNativeMessages(m);
-                                    ScrollView sv = findViewById(R.id.native_scroll);
-                                    if (sv != null) sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+                                    autoScrollBottom(false);   // AI 回复落地：用户回看时不抢占
                                 });
                                 return;
                             }

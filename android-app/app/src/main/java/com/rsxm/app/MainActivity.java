@@ -3016,18 +3016,15 @@ public class MainActivity extends Activity {
 
     /** 向 guest 终端发送命令（用户需已退到 shell；reasonix 会话内无效） */
     private void sendToTerminal(String cmd) {
-        try {
-            if (sProcIn != null) {
-                sProcIn.write((cmd + "\n").getBytes(StandardCharsets.UTF_8));
-                sProcIn.flush();
-                pushOutput("\r\n[已发送 adb 命令到终端]\r\n");
-                Log.d(TAG, "sent to terminal: " + cmd.replace("\n", " ; "));
-            } else {
-                pushOutput("\r\n[终端未就绪]\r\n");
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "send to terminal failed", e);
+        // v2.0.25：走 write()（与 xterm 键入/resize 共用同一把 sProcIn 锁），
+        // 旧实现直接写 sProcIn，会与其他线程字节交错
+        if (sProcIn == null) {
+            pushOutput("\r\n[终端未就绪]\r\n");
+            return;
         }
+        write(cmd + "\n");
+        pushOutput("\r\n[已发送 adb 命令到终端]\r\n");
+        Log.d(TAG, "sent to terminal: " + cmd.replace("\n", " ; "));
     }
 
     /** 获取本机局域网 IPv4 地址（遍历网络接口；优先 wlan*——无线调试配对要求与手机同网段，

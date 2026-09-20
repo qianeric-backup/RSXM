@@ -198,6 +198,12 @@ public final class McpManager {
         return isExecFailure(out) ? "写入 .mcp.json 失败（root 桥返回错误）" : null;
     }
 
+    /** v2.0.25：MainActivity MCP 面板保存 .mcp.json 的 root 桥兜底写入口。
+     *  guestAbsPath 为 guest 绝对路径（如 /root/<项目>/.mcp.json）；返回 null=成功 */
+    public static String writeGuestFile(Context ctx, String guestAbsPath, String content) {
+        return writeFileAny(ctx, new File(guestAbsPath), content);
+    }
+
     /** root 桥执行结果是否为失败/超时（execRootCommand 约定的错误文本） */
     private static boolean isExecFailure(String out) {
         return out == null || out.startsWith("(超时") || out.startsWith("(执行失败") || out.startsWith("(root");

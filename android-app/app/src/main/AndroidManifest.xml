@@ -23,7 +23,9 @@
         android:label="RSXM V2.0.0"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
-        android:theme="@style/AppTheme">
+        android:theme="@style/AppTheme"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
 
         <!-- FileProvider：无 root 修复 native 库时向系统安装器分享 APK -->
         <provider
@@ -51,7 +53,12 @@
         <service
             android:name=".BackgroundService"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <!-- Android 14 要求 specialUse 前台服务声明子类型说明（缺失会 Play 拒审） -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep the proot Linux environment (reasonix AI assistant) alive while running in the background." />
+        </service>
         <!-- Shizuku 客户端权限提供方（Shizuku API 必需；12.x provider 随 APK 打包，未装 Shizuku 不崩溃） -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
@@ -59,6 +66,6 @@
             android:multiprocess="false"
             android:enabled="true"
             android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+            android:permission="moe.shizuku.manager.permission.API_V23" />
     </application>
 </manifest>

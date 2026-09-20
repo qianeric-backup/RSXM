@@ -5,7 +5,6 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.RandomAccessFile;
-import java.nio.charset.CharsetDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -86,8 +85,18 @@ public class EventsJSONLParser {
             byte[] buf = new byte[(int) Math.min(avail, 4 * 1024 * 1024)];
             int n = raf.read(buf);
             if (n <= 0) return false;
-            lastOffset += n;
-            String text = decodeUtf8(buf, n, raf);
+            // 行对齐消费（v2.0.25 修复）：只消费到最后一个完整 '\n'，尾部不完整行
+            // （半条 JSON 或半个多字节 UTF-8 字符）留在文件里下轮再读。
+            // 旧实现 lastOffset += n 先行推进再解析，写入方尚未写完的尾行字节被永久
+            // 跳过（事件丢失/乱码）；'\n' 不会出现在多字节 UTF-8 序列内部，按它截断
+            // 天然是字符安全边界，无需 CharsetDecoder 容错。
+            int limit = -1;
+            for (int b = n - 1; b >= 0; b--) {
+                if (buf[b] == '\n') { limit = b; break; }
+            }
+            if (limit < 0) return false;   // 本次没有完整行：不推进 offset，等待下次
+            lastOffset += limit + 1;
+            String text = new String(buf, 0, limit + 1, StandardCharsets.UTF_8);
             boolean changed = false;
             boolean inJson = false, str = false, esc = false;
             int lineStart = 0;
@@ -120,32 +129,10 @@ public class EventsJSONLParser {
                     }
                 }
             }
-            // 尾部不完整 JSON 行：推进 offset 不能越过其起点（UTF-8 字节层面已是行对齐——上一 poll 字节边界对齐到 \n）
+            // 尾部不完整 JSON 行：不会出现——消费范围已行对齐（截止最后一个 '\n'）
             return changed;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    /** UTF-8 解码，容错块尾多字节截断：完整前缀立即处理，残余留给下次（offset 不回退）。 */
-    private static String decodeUtf8(byte[] buf, int n, RandomAccessFile raf) {
-        CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
-                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
-        try {
-            return dec.decode(java.nio.ByteBuffer.wrap(buf, 0, n)).toString();
-        } catch (java.nio.charset.CharacterCodingException e) {
-            int valid = 0;
-            while (valid < n) {
-                byte b = buf[valid];
-                int rem = (b & 0x80) == 0 ? 1
-                        : (b & 0xE0) == 0xC0 ? 2
-                        : (b & 0xF0) == 0xE0 ? 3
-                        : (b & 0xF8) == 0xF0 ? 4 : 1;
-                if (valid + rem > n) break;
-                valid += rem;
-            }
-            return new String(buf, 0, valid, StandardCharsets.UTF_8);
         }
     }
 
@@ -207,9 +194,10 @@ public class EventsJSONLParser {
             if (content.isEmpty()) return;
             // 关键去重：reasonix 生成的 content 是「当前流式 so far 全量」，
             // append 每 revision 重发同一 message 的最新快照。
-            // 通过比对 pendingText 前缀识别增量：
-            if (pendingText.length() > 0 && content.startsWith(pendingText.toString())) {
-                String delta = content.substring(pendingText.length());
+            String pend = pendingText.toString();
+            if (content.startsWith(pend)) {
+                // 正常增长：只发增量
+                String delta = content.substring(pend.length());
                 pendingText.append(delta);
                 if (!delta.isEmpty()) {
                     Event ev = new Event();
@@ -219,6 +207,11 @@ public class EventsJSONLParser {
                     ev.revision = rev;
                     out.add(ev);
                 }
+            } else if (pend.startsWith(content)) {
+                // 快照缩短（replace/compact 重写比之前短）：静默重置缓冲，
+                // 不把整段重发当新文本渲染（旧实现会整段重复显示）
+                pendingText.setLength(0);
+                pendingText.append(content);
             } else {
                 // 新一轮 turn（用户提问后）：content 与 pending 前缀不重合 → 整段为新文本
                 pendingText.setLength(0);

@@ -68,9 +68,13 @@ EOF
         echo "[adb] apk update ..."
         apk update 2>&1 | tail -2
         echo "[adb] apk add android-tools ..."
-        if apk add --no-cache android-tools 2>&1 | tail -5; then
+        # v2.0.25 修复：旧写法 `apk add ... | tail -5` 的 if 取的是 tail 退出码（恒 0），
+        # 安装失败也谎报"已安装"。改为落地日志文件再按真实退出码分流。
+        if apk add --no-cache android-tools > /tmp/apk.log 2>&1; then
+            tail -5 /tmp/apk.log
             echo "[adb 已安装] $(adb version 2>/dev/null | head -1)"
         else
+            tail -5 /tmp/apk.log
             echo "[adb 安装失败]"
         fi
     ) &
@@ -107,7 +111,8 @@ adb_state() {
 [ -f /root/.adb_ip ] || { status "no_ip"; echo "无 /root/.adb_ip（请重开应用）"; exit 1; }
 HOST_IP=$(cat /root/.adb_ip)
 case "$HOST_IP" in
-    *.*.*.*) : ;;
+    # v2.0.25：收紧为数字点分校验（guest 内可写文件，避免任意内容被拼进下方扫描命令）
+    [0-9]*.[0-9]*.[0-9]*.[0-9]*) : ;;
     *) status "bad_ip"; echo "IP 无效: $HOST_IP"; exit 1 ;;
 esac
 # 已有 device 直接复用（免配对直连）
@@ -203,6 +208,20 @@ SH
         i=$((i+1))
     done
     if command -v adb >/dev/null 2>&1; then
+        # v2.0.25：root 桥 wrapper 此刻补建（旧实现只在 entry.sh 顶部 adb 已存在时创建，
+        # 而 adb 是后台安装的——首次启动会静默缺失 `adb shell` 走 root 桥的能力）
+        if [ -x /usr/bin/adb ] && [ ! -f /usr/local/bin/adb ]; then
+            cat > /usr/local/bin/adb <<'SH'
+#!/bin/sh
+# adb wrapper: rx-adb —— root 可用时 adb shell 走 root 命令桥（无需无线调试）
+if [ "$1" = "shell" ] && [ -n "$2" ] && [ -f /root/.root-ok ]; then
+    shift
+    exec /usr/local/bin/root "$@"
+fi
+exec /usr/bin/adb "$@"
+SH
+            chmod 755 /usr/local/bin/adb
+        fi
         mkdir -p ~/.android
         # 6) 密钥完整性校验：adbkey 丢失会退回"每次都要配对"，缺失则重新生成。
         #    adbkey 持久化于 /root/.android（rootfs 持久），密钥不变 → 免配对直连。
@@ -545,8 +564,11 @@ fi
 # 无论是否 wrapper 都强制重写 wrapper（幂等），保证 reasonix 更新/升级后包装参数
 # （含 YOLO 审批模式开关）始终为最新；restartEnvironment 必走 entry.sh，因此更新后自动重新包装。
 if [ -x /usr/local/bin/reasonix ]; then
-    # 检测 reasonix 是否已是 wrapper（ASCII 标记 rx-wrap；不用 head -1 + 中文，busybox grep 不可靠）
-    if ! grep -q "rx-wrap" /usr/local/bin/reasonix 2>/dev/null; then
+    # 检测 reasonix 是否已是 wrapper：取首 2 字节判断 shebang。
+    # v2.0.25 修复：旧实现 grep -q "rx-wrap" 对 ELF 做文本扫描——新版本二进制恰含
+    # "rx-wrap" 字节串时会跳过备份，随后被 wrapper 覆盖销毁。wrapper 以 "#!" 开头，
+    # ELF 以 \x7fELF 开头：非 "#!" 即视为需要备份的二进制。
+    if [ "$(head -c 2 /usr/local/bin/reasonix 2>/dev/null)" != "#!" ]; then
         mv -f /usr/local/bin/reasonix /usr/local/bin/reasonix.bin 2>/dev/null
         echo "[reasonix] 检测到新版本二进制，已备份为 reasonix.bin"
     fi

@@ -63,8 +63,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.json.JSONObject;
-import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
 import java.util.zip.GZIPInputStream;
 
 import androidx.core.view.GravityCompat;
@@ -116,10 +114,16 @@ public class MainActivity extends Activity {
     private volatile boolean keysToolbarVisible = false;
     /** 复用环境标记：后台模式开启时 Activity 重建复用运行中的 proot 环境 */
     private volatile boolean reuseEnv = false;
-    /** 开发环境安装中标记：防止并发安装互相覆盖 guest 内 .env-done/.env-install.log */
-    private volatile boolean devEnvInstalling = false;
+    /** 开发环境安装中标记（static，v2.0.25：安装任务是进程级的 nohup 脚本+15 分钟轮询线程，
+     *  跨 Activity 存活；实例字段在后台模式 Activity 重建后归零 → 可重复发起安装，
+     *  第二次 rm 标记文件会让旧任务完成码归属错乱、新旧 apk 并发锁冲突） */
+    private static volatile boolean sDevEnvInstalling = false;
     /** 正在安装的环境名称（null 表示无任务；面板重开时据此恢复禁用/提示状态） */
-    private volatile String devEnvInstallingName = null;
+    private static volatile String sDevEnvInstallingName = null;
+    /** 面板代际（v2.0.25 B4 修复）：安装线程经 runOnUiThread 更新发起时捕获的旧面板
+     *  View——面板重开后新面板进度永远不刷新。每次 showDevEnvDialog ++；安装线程
+     *  回调发现代际不符则只写终端输出，不再触碰旧控件。 */
+    private int panelGen = 0;
     /** apk 日志进度模式：(x/N) Installing ... */
     private static final Pattern APK_PROGRESS = Pattern.compile("\\((\\d+)/(\\d+)\\)");
     private DrawerLayout drawerLayout;
@@ -337,16 +341,23 @@ public class MainActivity extends Activity {
     }
 
     /** 处理 guest 的 root 命令队列（一次一个，串行；结果写回 .root-out 带 __DONE__ 标记） */
+    private final java.util.concurrent.atomic.AtomicBoolean rootBridgeBusy =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     private void processRootCommandQueue() {
+        // 串行保证：上一条命令还在执行时新命令留在 .root-cmd 等下一轮，
+        // 避免两条命令并发执行把 .root-out（含 __DONE__ 标记）写花
+        if (!rootBridgeBusy.compareAndSet(false, true)) return;
+        boolean dispatched = false;
         try {
             File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
             File cmdFile = new File(rootDir, ".root-cmd");
             File outFile = new File(rootDir, ".root-out");
-            if (!cmdFile.exists()) return;
+            if (!cmdFile.exists()) return;   // finally 复位
             String cmd = new String(java.nio.file.Files.readAllBytes(cmdFile.toPath()),
                     StandardCharsets.UTF_8).trim();
             cmdFile.delete();
-            if (cmd.isEmpty()) return;
+            if (cmd.isEmpty()) return;       // finally 复位
             Log.d(TAG, "root bridge cmd: " + cmd);
             new Thread(() -> {
                 String r = execRootCommand(cmd, 25);
@@ -356,10 +367,15 @@ public class MainActivity extends Activity {
                                     .getBytes(StandardCharsets.UTF_8));
                 } catch (Exception e) {
                     Log.w(TAG, "root out write failed", e);
+                } finally {
+                    rootBridgeBusy.set(false);   // 命令线程结束才允许下一条
                 }
             }, "root-bridge").start();
+            dispatched = true;   // 已派发：busy 由命令线程释放
         } catch (Exception e) {
             Log.w(TAG, "root queue failed", e);
+        } finally {
+            if (!dispatched) rootBridgeBusy.set(false);   // 未派发路径（无命令/异常）必须复位
         }
     }
 
@@ -446,8 +462,18 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 探测 su 路径（含 KernelSU/Magisk；找不到则回退 PATH 中的 su） */
+    /** 探测 su 路径（含 KernelSU/Magisk；找不到则回退 PATH 中的 su）。
+     *  结果缓存（v2.0.25）：旧实现每次 execRootCommand 都重新探测，PATH 回退分支
+     *  还要起一次 `su -c id`（最多等 3s），拖慢每条 root 命令。 */
+    private static volatile String sSuPathCache;
+
     private String findSuPath() {
+        String cached = sSuPathCache;
+        if (cached != null) {
+            // 绝对路径缓存失效重探；"su"（PATH 回退）视为稳定
+            if ("su".equals(cached) || new File(cached).exists()) return cached;
+            sSuPathCache = null;
+        }
         String[] paths = {
                 "/system/bin/su", "/system/xbin/su", "/sbin/su", "/vendor/bin/su",
                 "/system/bin/.ext/.su", "/system/usr/we-need-root/su-backup",
@@ -458,7 +484,10 @@ public class MainActivity extends Activity {
         for (String p : paths) {
             boolean ex = new File(p).exists();
             Log.d(TAG, "root probe: " + p + " exists=" + ex);
-            if (ex) return p;
+            if (ex) {
+                sSuPathCache = p;
+                return p;
+            }
         }
         // 回退：直接使用 "su"（走 PATH，KernelSU/Magisk 通常已加入 PATH）
         try {
@@ -470,6 +499,7 @@ public class MainActivity extends Activity {
                 p.destroy();
                 if (s.contains("uid=0")) {
                     Log.d(TAG, "root probe: PATH su works: " + s.trim());
+                    sSuPathCache = "su";
                     return "su";
                 }
             } else {
@@ -506,22 +536,58 @@ public class MainActivity extends Activity {
         }, "root-precheck").start();
     }
 
-    /** 执行 root 命令（su -c），返回 stdout+stderr（失败返回 null）；包内可见供 McpManager root 桥兜底 */
+    /** 执行 root 命令（su -c），返回 stdout+stderr（失败返回 null）；包内可见供 McpManager root 桥兜底。
+     *  约定错误文本（供 McpManager.isExecFailure 识别）：“(超时…” / “(root 执行失败…” */
     String execRootCommand(String cmd, int timeoutSec) {
         String su = findSuPath();
         if (su == null) return null;
+        Process p = null;
         try {
-            Process p = new ProcessBuilder(su, "-c", cmd)
+            p = new ProcessBuilder(su, "-c", cmd)
                     .redirectErrorStream(true).start();
-            if (!p.waitFor(timeoutSec, TimeUnit.SECONDS)) {
-                p.destroy();
-                return "(超时)";
+            // 看门狗：超时杀进程（排水循环会一直读到 EOF，需要外部强超时兜底）
+            final boolean[] timedOut = {false};
+            final Process fp = p;
+            Thread watchdog = new Thread(() -> {
+                try {
+                    Thread.sleep(timeoutSec * 1000L);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (fp.isAlive()) {
+                    timedOut[0] = true;   // v2.0.25：超时带标记返回（旧实现返回无标记的部分输出，
+                    fp.destroyForcibly(); // McpManager.isExecFailure 会把截断输出当合法内容）
+                }
+            }, "root-exec-watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
+            // 持续排水直到 EOF（v2.0.25 修复：旧实现 waitFor 后才读且只读一次 8KB——
+            // 输出超过管道缓冲（64KB）时命令写阻塞 → 误判「(超时)」；长输出被截断）
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            try (InputStream in = p.getInputStream()) {
+                while ((n = in.read(buf)) > 0) {
+                    bos.write(buf, 0, n);
+                    if (bos.size() >= 512 * 1024) {   // 上限保护：异常超长输出截断
+                        p.destroy();
+                        break;
+                    }
+                }
             }
-            byte[] out = new byte[8192];
-            int n = p.getInputStream().read(out);
-            return n > 0 ? new String(out, 0, n, StandardCharsets.UTF_8) : "";
+            p.waitFor(3, TimeUnit.SECONDS);
+            watchdog.interrupt();
+            String out = bos.toString("UTF-8");
+            if (timedOut[0]) {
+                return "(超时) " + out;   // 带约定错误前缀：部分输出可读但调用方可识别为失败
+            }
+            if (out.isEmpty() && !p.isAlive() && p.exitValue() != 0) {
+                return "(root 执行失败 exit=" + p.exitValue() + ")";
+            }
+            return out;
         } catch (Exception e) {
             Log.w(TAG, "root exec failed: " + e);
+            if (p != null) p.destroy();
             return null;
         }
     }
@@ -1046,6 +1112,12 @@ public class MainActivity extends Activity {
                 final String name = parseSkillName(content);
                 final String finalContent = content;
                 runOnUiThread(() -> {
+                    // v2.0.25：SAF 选择期间面板可能已关/重建——面板已关时字段引用指向脱离
+                    // View，填进去用户看不到还提示"已导入"。面板未开则放弃填充。
+                    if (findViewById(R.id.panel_overlay).getVisibility() != View.VISIBLE) {
+                        pushOutput("\r\n[SKILL 已取消（面板已关闭），重新打开面板再导入]\r\n");
+                        return;
+                    }
                     if (skillNameInput != null) skillNameInput.setText(name == null ? "" : name);
                     if (skillContentInput != null) skillContentInput.setText(finalContent);
                     pushOutput("\r\n[已导入" + (name != null ? " " + name : "") + "，检查后点「安装 SKILL」完成安装]\r\n");
@@ -1266,9 +1338,20 @@ public class MainActivity extends Activity {
                     trash.mkdirs();
                     boolean ok = f.renameTo(new File(trash, f.getName()));
                     if (!ok) {
-                        execRootCommand("mkdir -p '" + sq(trash.getAbsolutePath()) + "' && mv '"
-                                + sq(f.getAbsolutePath()) + "' '" + sq(trash.getAbsolutePath()) + "/' 2>&1", 10);
-                        ok = !f.exists();
+                        // v2.0.25 修复：trash 同名文件时 busybox mv 会静默覆盖，回收站旧会话丢失——
+                        // 用 mv -n 禁覆盖 + 冲突时目标名追加时间戳
+                        String tgt = sq(trash.getAbsolutePath() + "/" + f.getName());
+                        String o = execRootCommand("mkdir -p '" + sq(trash.getAbsolutePath())
+                                + "' && mv -n '" + sq(f.getAbsolutePath()) + "' '" + tgt + "' 2>&1"
+                                + " && (! test -e '" + sq(f.getAbsolutePath()) + "' && echo TRASH_MOVED_OK)", 10);
+                        ok = o != null && o.contains("TRASH_MOVED_OK");
+                        if (!ok) {
+                            // 同名冲突兜底：目标改名（加时间戳）再移
+                            o = execRootCommand("mv '" + sq(f.getAbsolutePath()) + "' '"
+                                    + sq(trash.getAbsolutePath() + "/" + f.getName() + "."
+                                    + System.currentTimeMillis()) + "' 2>&1 && echo TRASH_MOVED_OK", 10);
+                            ok = o != null && o.contains("TRASH_MOVED_OK");
+                        }
                     }
                     final boolean r = ok;
                     runOnUiThread(() -> {
@@ -1456,7 +1539,7 @@ public class MainActivity extends Activity {
                     String name = path.substring(path.lastIndexOf('/') + 1);
                     ok = deleteRecursive(new File("/storage/emulated/0/ReasonixProjects", name));
                 } else {
-                    String out = executeInGuest("rm -rf " + path + " && echo DELETED_OK", 10);
+                    String out = executeInGuest("rm -rf '" + sq(path) + "' && echo DELETED_OK", 10);
                     ok = out != null && out.contains("DELETED_OK");
                 }
                 if (!ok) {
@@ -1497,6 +1580,11 @@ public class MainActivity extends Activity {
             pushOutput("\r\n[请输入项目名称]\r\n");
             return false;
         }
+        // v2.0.25：显式拒绝 "." / ".."
+        if (name.equals(".") || name.equals("..") || name.startsWith(".")) {
+            pushOutput("\r\n[项目名称不允许以 . 开头或使用相对目录]\r\n");
+            return false;
+        }
         if (!name.matches("[A-Za-z0-9_.-]+")) {
             pushOutput("\r\n[项目名称仅允许字母、数字、_ . -]\r\n");
             return false;
@@ -1523,7 +1611,7 @@ public class MainActivity extends Activity {
                     }
                     ok = true;
                 } else {
-                    String out = executeInGuest("mkdir -p " + path + " && echo MKDIR_OK", 10);
+                    String out = executeInGuest("mkdir -p '" + sq(path) + "' && echo MKDIR_OK", 10);
                     ok = out != null && out.contains("MKDIR_OK");
                 }
                 if (!ok) {
@@ -1562,7 +1650,7 @@ public class MainActivity extends Activity {
                     }
                     ok = true;
                 } else {
-                    String out = executeInGuest("mkdir -p " + path + " && echo MKDIR_OK", 10);
+                    String out = executeInGuest("mkdir -p '" + sq(path) + "' && echo MKDIR_OK", 10);
                     ok = out != null && out.contains("MKDIR_OK");
                 }
                 if (!ok) {
@@ -1663,28 +1751,41 @@ public class MainActivity extends Activity {
             new Thread(() -> {
                 String dir = McpManager.projectDir(MainActivity.this);
                 String path = dir + "/.mcp.json";
+                byte[] data = txt.getBytes(StandardCharsets.UTF_8);
                 try {
                     new java.io.File(path).getParentFile().mkdirs();
-                    java.nio.file.Files.write(new java.io.File(path).toPath(),
-                            txt.getBytes(StandardCharsets.UTF_8));
+                    java.nio.file.Files.write(new java.io.File(path).toPath(), data);
                     runOnUiThread(() -> {
                         status.setText("已保存\n请重启环境生效");
                         showToast("已保存");
                     });
-                } catch (Exception e) {
-                    runOnUiThread(() -> status.setText("保存失败：" + e.getMessage()));
+                } catch (Exception directFail) {
+                    // v2.0.25 修复：chroot 模式下项目文件为 root 属主，直写必失败——回退
+                    // root 桥 heredoc 写入（McpManager.writeFileAny 同款兜底）
+                    try {
+                        String err = McpManager.writeGuestFile(MainActivity.this, path, txt);
+                        if (err != null) throw new Exception(err);
+                        runOnUiThread(() -> {
+                            status.setText("已保存（root 桥）\n请重启环境生效");
+                            showToast("已保存");
+                        });
+                    } catch (Exception e2) {
+                        runOnUiThread(() -> status.setText("保存失败：" + directFail.getMessage() + " / " + e2.getMessage()));
+                    }
                 }
             }, "mcp-save").start();
         });
         addV(panel, saveBtn, 8);
 
         showPanel("MCP 服务器", panel, null);
-        refresh.run();
+        // v2.0.25：只发起一次 refresh（旧代码 showPanel 前后各一次，第二次落地晚会
+        // 冲掉用户已输入的 json 内容）
     }
 
 
     /** 开发环境：一键安装常用开发环境（Alpine 包管理器，后台安装 + 面板内实时进度） */
     private void showDevEnvDialog() {
+        panelGen++;   // 面板重建：安装线程的旧 View 引用作废（回调检测代际后放弃更新）
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), 0);
@@ -1794,7 +1895,7 @@ public class MainActivity extends Activity {
         panel.addView(envScroll, envLp);
         loadInstalledEnvs(envList, envs, progressBox, progressTitle, progressBar, progressText);
         // 面板重开时若仍有安装任务在后台进行：恢复显示进度区
-        String installing = devEnvInstallingName;
+        String installing = sDevEnvInstallingName;
         if (installing != null) {
             progressBox.setVisibility(View.VISIBLE);
             progressTitle.setText(installing + " 安装中...");
@@ -1938,12 +2039,12 @@ public class MainActivity extends Activity {
     private void installDevEnv(String name, String packages, String keyCmds,
                                View progressBox, TextView progressTitle, ProgressBar progressBar,
                                TextView progressText, LinearLayout envList, String[][] envs) {
-        if (devEnvInstalling) {
+        if (sDevEnvInstalling) {
             runOnUiThread(() -> pushOutput("\r\n[开发环境] 已有安装任务进行中，请等待完成\r\n"));
             return;
         }
-        devEnvInstalling = true;
-        devEnvInstallingName = name;
+        sDevEnvInstalling = true;
+        sDevEnvInstallingName = name;
         pushOutput("\r\n[开发环境] 开始安装 " + name + "（后台进行，进度见面板，可继续使用终端）...\r\n");
         runOnUiThread(() -> {
             progressBox.setVisibility(View.VISIBLE);
@@ -1954,6 +2055,7 @@ public class MainActivity extends Activity {
             progressText.setText("正在更新软件源索引...");
         });
         new Thread(() -> {
+            final int gen = panelGen;   // 代际捕获：面板重开后回调不再更新旧控件（B4）
             try {
                 // 安装脚本经 base64 写入 guest（服务循环用 sh -c "$CMD" 执行，命令内不能含双引号），
                 // 再 nohup 后台执行，避免 20s timeout 杀掉长安装。
@@ -1993,6 +2095,7 @@ public class MainActivity extends Activity {
                         }
                         final int fDone = done, fTotal = total;
                         runOnUiThread(() -> {
+                            if (gen != panelGen) return;   // 面板已关/重开：旧控件不更新
                             if (fDone > 0 && fTotal > 0) {
                                 int pct = Math.min(99, fDone * 100 / fTotal);
                                 progressBar.setIndeterminate(false);
@@ -2018,6 +2121,7 @@ public class MainActivity extends Activity {
                                 + (ok ? "[完成] 可直接在终端使用 " + name + " 环境\r\n"
                                 : "[失败] 请检查网络（aliyun 源）后重试\r\n");
                         runOnUiThread(() -> {
+                            if (gen != panelGen) { pushOutput(msg); return; }   // 面板已换：只写终端
                             progressTitle.setText(name + (ok ? " 安装完成" : " 安装失败"));
                             progressTitle.setTextColor(ok ? 0xFF7FDB8A : 0xFFFF6B6B);
                             progressBar.setIndeterminate(false);
@@ -2031,6 +2135,7 @@ public class MainActivity extends Activity {
                     }
                 }
                 runOnUiThread(() -> {
+                    if (gen != panelGen) return;   // 面板已换：旧控件引用作废
                     progressTitle.setText(name + " 安装超时");
                     progressTitle.setTextColor(0xFFFFD54F);
                     progressBar.setIndeterminate(false);
@@ -2042,6 +2147,7 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 Log.e(TAG, "install dev env failed", e);
                 runOnUiThread(() -> {
+                    if (gen != panelGen) return;   // 面板已换：旧控件引用作废
                     progressTitle.setText(name + " 安装失败");
                     progressTitle.setTextColor(0xFFFF6B6B);
                     progressBar.setIndeterminate(false);
@@ -2051,8 +2157,8 @@ public class MainActivity extends Activity {
                     pushOutput("\r\n[开发环境] 安装失败: " + e.getMessage() + "\r\n");
                 });
             } finally {
-                devEnvInstalling = false;
-                devEnvInstallingName = null;
+                sDevEnvInstalling = false;
+                sDevEnvInstallingName = null;
             }
         }, "dev-env").start();
     }
@@ -2094,6 +2200,11 @@ public class MainActivity extends Activity {
                         progressBox, progressTitle, progressBar, progressText));
             } catch (Exception e) {
                 Log.e(TAG, "load installed envs failed", e);
+                // v2.0.25：检测失败要有 UI 反馈，不能永远卡「检测中...」
+                runOnUiThread(() -> {
+                    container.removeAllViews();
+                    container.addView(createDarkTip("（检测失败：" + e.getMessage() + "）"));
+                });
             }
         }, "env-installed-load").start();
     }
@@ -2167,14 +2278,15 @@ public class MainActivity extends Activity {
     /** 删除开发环境：guest 内 nohup apk del，完成后刷新已安装列表 */
     private void uninstallDevEnv(String name, String packages, LinearLayout container, String[][] envs,
                                  View progressBox, TextView progressTitle, ProgressBar progressBar, TextView progressText) {
-        if (devEnvInstalling) {
+        if (sDevEnvInstalling) {
             runOnUiThread(() -> pushOutput("\r\n[开发环境] 有安装/删除任务进行中，请等待完成\r\n"));
             return;
         }
-        devEnvInstalling = true;
-        devEnvInstallingName = name + " 删除";
+        sDevEnvInstalling = true;
+        sDevEnvInstallingName = name + " 删除";
         pushOutput("\r\n[开发环境] 开始删除 " + name + "（后台进行）...\r\n");
         new Thread(() -> {
+            final int gen = panelGen;   // 代际捕获：面板重开后不再刷新旧列表控件
             try {
                 String script = "#!/bin/sh\n"
                         + "# 等待其他 apk 操作完成（防并发 apk 数据库锁冲突）\n"
@@ -2195,8 +2307,10 @@ public class MainActivity extends Activity {
                     String st = executeInGuest("cat /root/.env-done 2>/dev/null", 6);
                     if (st != null && st.contains("INSTALL_DONE_")) {
                         runOnUiThread(() -> {
+                            if (gen == panelGen) {   // 面板已换：旧容器列表不刷新（B4）
+                                loadInstalledEnvs(container, envs, progressBox, progressTitle, progressBar, progressText);
+                            }
                             pushOutput("\r\n[开发环境] " + name + " 已删除\r\n");
-                            loadInstalledEnvs(container, envs, progressBox, progressTitle, progressBar, progressText);
                         });
                         return;
                     }
@@ -2205,8 +2319,8 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 Log.e(TAG, "uninstall dev env failed", e);
             } finally {
-                devEnvInstalling = false;
-                devEnvInstallingName = null;
+                sDevEnvInstalling = false;
+                sDevEnvInstallingName = null;
             }
         }, "dev-env-del").start();
     }
@@ -2301,6 +2415,15 @@ public class MainActivity extends Activity {
 
         btnLogin.setOnClickListener(v -> {
             String tok = tokenInput.getText().toString().trim();
+            // 掩码占位（预填的 ghp_xxxx••••••••）不是真实 token：直接提交必然失败，
+            // 若仍是掩码占位则按未输入处理，提示用户重输
+            if (!tok.isEmpty() && tok.contains("••••")) {
+                if (tokenInput.getTag() != null && tok.startsWith(
+                        tokenInput.getTag().toString().substring(0, Math.min(8, tokenInput.getTag().toString().length())))) {
+                    status.setText("token 已遮蔽显示，如需重新验证请先清除后粘贴完整 token。");
+                    return;
+                }
+            }
             if (tok.isEmpty()) {
                 status.setText("请输入 token。");
                 return;
@@ -2501,7 +2624,7 @@ public class MainActivity extends Activity {
         if (!savedPairPort.isEmpty()) pairPort.setText(savedPairPort);
         EditText pairCode = createDarkEditText("配对码（6 位数字）", InputType.TYPE_CLASS_NUMBER);
         if (savedPairCode.length() == 6) pairCode.setText(savedPairCode);
-        TextView tip = createDarkTip("本机 IP：" + ip + "\n"
+        TextView tip = createDarkTip("本机 IP：" + fip + "\n"
                 + "手机「开发者选项 → 无线调试」开启后：首次填配对端口+配对码点「配对并连接」；\n"
                 + "之后点「自动连接」免配对直连；连接后 reasonix 内可直接 adb shell / adb install。");
         // 独立状态行（执行后自动刷新）
@@ -2592,25 +2715,40 @@ public class MainActivity extends Activity {
         });
         addV(panel, szBtn, 8);
         // 全屏面板展示（取代系统弹窗，避免遮挡控件）
-        showPanel("ADB 调试", panel, this::stopAdbStatusRefresh);
+        Runnable autoConnect = () -> runAdbInGuest("adb-autoconnect", resultView, statusLine);
+        // 面板关闭时同步取消：stop 轮询 + 摘掉 600ms 延迟任务（旧实现面板关闭后仍会
+        // 发起至多 150s 的 adb 命令并占住 adbCmdLock）
+        showPanel("ADB 调试", panel, () -> {
+            stopAdbStatusRefresh();
+            statusLine.removeCallbacks(autoConnect);
+        });
         // 状态实时刷新：面板打开期间每 4 秒用 adb devices 检查真实连接（防快照过期）
         startAdbStatusRefresh(statusLine);
         // 操作逻辑优化：状态未知（首次/环境刚启动）时自动触发一次检测，免去手动点击
         if (status.contains("未知")) {
-            statusLine.postDelayed(() -> runAdbInGuest("adb-autoconnect", resultView, statusLine), 600);
+            statusLine.postDelayed(autoConnect, 600);
         }
     }
 
     /** ADB 状态定时刷新：面板打开期间每 4 秒检查 adb devices 真实状态（防快照过期显示不符） */
     private final Handler adbStatusRefresher = new Handler(Looper.getMainLooper());
     private Runnable adbStatusTask;
+    /** 轮询存活标记（v2.0.25 修复泄漏：worker 在 runOnUiThread 里自我 postDelayed 重排，
+     *  stopAdbStatusRefresh 只 removeCallbacks——面板关闭时 worker 正在执行（每轮 0.3~10s，
+     *  在飞概率高）→ 回调结束后又在 stop 之后 self-reschedule，轮询永久泄漏且与用户命令抢锁） */
+    private final java.util.concurrent.atomic.AtomicBoolean adbStatusActive =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     private void startAdbStatusRefresh(TextView statusLine) {
         stopAdbStatusRefresh();
+        adbStatusActive.set(true);
+        final TextView fStatusLine = statusLine;
         adbStatusTask = new Runnable() {
             @Override
             public void run() {
+                if (!adbStatusActive.get()) return;   // 面板已关：在飞的循环到此终止
                 new Thread(() -> {
+                    if (!adbStatusActive.get()) return;
                     String st;
                     boolean wifiOff = false;
                     // 系统无线调试开关检测（经 root 桥读系统设置，不依赖 adb 连接）
@@ -2642,7 +2780,8 @@ public class MainActivity extends Activity {
                     }
                     final String statusText = st;   // final 副本供 lambda 捕获
                     runOnUiThread(() -> {
-                        if (statusLine != null) statusLine.setText("连接状态：" + statusText);
+                        if (!adbStatusActive.get()) return;   // 已停止：不再更新也不重排
+                        if (fStatusLine != null) fStatusLine.setText("连接状态：" + statusText);
                         adbStatusRefresher.postDelayed(this, 4000);
                     });
                 }, "adb-status").start();
@@ -2652,6 +2791,7 @@ public class MainActivity extends Activity {
     }
 
     private void stopAdbStatusRefresh() {
+        adbStatusActive.set(false);   // 先停活标记（在飞 worker 不再重排），再摘回调
         if (adbStatusTask != null) {
             adbStatusRefresher.removeCallbacks(adbStatusTask);
             adbStatusTask = null;
@@ -2744,8 +2884,9 @@ public class MainActivity extends Activity {
 
     /** 经 Shizuku 权限执行 shell 命令（adb 权限；Shizuku 服务常驻 → 持久化，不依赖本应用存活） */
     private String execViaShizuku(String cmd, int timeoutSec) {
+        Process p = null;
         try {
-            Process p = Shizuku.newProcess(new String[]{"sh", "-c", cmd}, null, null);
+            p = Shizuku.newProcess(new String[]{"sh", "-c", cmd}, null, null);
             StringBuilder sb = new StringBuilder();
             byte[] buf = new byte[4096];
             long deadline = System.currentTimeMillis() + timeoutSec * 1000L;
@@ -2760,6 +2901,8 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Log.w(TAG, "shizuku exec failed", e);
             return null;
+        } finally {
+            if (p != null) p.destroy();   // v2.0.25：超时/异常后不留子进程泄漏
         }
     }
 
@@ -2887,19 +3030,26 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 获取本机局域网 IPv4 地址（遍历网络接口） */
+    /** 获取本机局域网 IPv4 地址（遍历网络接口；优先 wlan*——无线调试配对要求与手机同网段，
+     *  旧实现按枚举顺序取第一个非环回 IPv4，可能取到 rmnet 蜂窝地址导致配对失败） */
     private String getLocalIpAddress() {
         try {
+            String fallback = null;
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 if (!ni.isUp() || ni.isLoopback()) continue;
+                boolean wlan = ni.getName() != null && ni.getName().startsWith("wlan");
                 for (InetAddress addr : Collections.list(ni.getInetAddresses())) {
                     byte[] b = addr.getAddress();
                     if (b.length == 4 && (b[0] & 0xff) != 0) {
                         String ip = addr.getHostAddress();
-                        if (ip != null && !ip.startsWith("127.")) return ip;
+                        if (ip != null && !ip.startsWith("127.")) {
+                            if (wlan) return ip;      // Wi-Fi 地址优先
+                            if (fallback == null) fallback = ip;
+                        }
                     }
                 }
             }
+            return fallback;
         } catch (Exception e) {
             Log.w(TAG, "getLocalIpAddress failed", e);
         }
@@ -2979,7 +3129,12 @@ public class MainActivity extends Activity {
                         StandardCharsets.UTF_8).split("\n")) {
                     String t = l.trim();
                     if (t.startsWith("[[providers]]")) {
-                        if (name != null) list.add(new ProviderInfo(name, kind, baseUrl, apiKeyEnv, model, models));
+                        if (name != null) {
+                            // 中间块 flush 同样补 api_key_env 兜底（v2.0.25：旧只在末块兜底，
+                            // 中间 provider 的 apiKeyEnv=null → .env 读写落空、删除误判失败）
+                            String ae = (apiKeyEnv == null || apiKeyEnv.isEmpty()) ? "API_KEY" : apiKeyEnv;
+                            list.add(new ProviderInfo(name, kind, baseUrl, ae, model, models));
+                        }
                         name = null; kind = null; baseUrl = null; apiKeyEnv = null; model = null; models = null;
                         continue;
                     }
@@ -3007,7 +3162,11 @@ public class MainActivity extends Activity {
                         }
                     }
                 }
-                if (name != null) list.add(new ProviderInfo(name, kind, baseUrl, apiKeyEnv, model, models));
+                if (name != null) {
+                    // api_key_env 缺失/为空时兜底 API_KEY，避免读写 .env 时落空
+                    if (apiKeyEnv == null || apiKeyEnv.isEmpty()) apiKeyEnv = "API_KEY";
+                    list.add(new ProviderInfo(name, kind, baseUrl, apiKeyEnv, model, models));
+                }
             } catch (Exception ignored) {}
         }
         return list;
@@ -3059,13 +3218,20 @@ public class MainActivity extends Activity {
 
     /** 加载 provider 的可选模型到模型 Spinner：静态 models 优先，否则联网拉取，失败兜底静态表。
      *  供切换 provider 与点击「刷新模型列表」复用。 */
+    /** 模型下拉请求序号（v2.0.25 修复异步竞态）：切 provider/测试连通性/刷新列表三条
+     *  异步链路共用 adapter，旧回调后至会覆盖新 provider 的列表——保存时把旧 provider
+     *  的模型名经 setProviderDefaultModel 写进新 provider 块（config 写脏）。 */
+    private volatile int modelReqSeq = 0;
+
     private void loadModelsForProvider(final ProviderInfo p, final File env,
                                        final ArrayAdapter<String> modelAdapter, final Spinner modelSpinner) {
         if (p == null) return;
+        final int reqId = ++modelReqSeq;
         // 静态 models 已配：直接填充（无需联网）
         if (p.models != null && !p.models.isEmpty()) {
             final List<String> list = p.models;
             runOnUiThread(() -> {
+                if (reqId != modelReqSeq) return;   // 已有更新的请求，放弃过期结果
                 modelAdapter.clear();
                 for (String s : list) modelAdapter.add(s);
                 modelAdapter.notifyDataSetChanged();
@@ -3085,6 +3251,7 @@ public class MainActivity extends Activity {
             List<String> fetched = fetchModelsFromProvider(p.baseUrl, key, p.kind);
             final List<String> finalList = (fetched != null) ? fetched : new ArrayList<String>();
             runOnUiThread(() -> {
+                if (reqId != modelReqSeq) return;   // 过期结果丢弃
                 modelAdapter.clear();
                 for (String s : finalList) modelAdapter.add(s);
                 modelAdapter.notifyDataSetChanged();
@@ -3104,43 +3271,46 @@ public class MainActivity extends Activity {
         try {
             if (conf == null || !conf.exists() || providerName == null || modelName == null) return false;
             List<String> lines = new ArrayList<>(java.nio.file.Files.readAllLines(conf.toPath(), StandardCharsets.UTF_8));
+            // 块定位：[[providers]] 重置 → name 行匹配则进入目标块（name 行在块头，须无条件参与匹配）
             boolean inTarget = false, found = false;
             for (int i = 0; i < lines.size(); i++) {
                 String t = lines.get(i).trim();
                 if (t.startsWith("[[providers]]")) {
                     inTarget = false;
                 } else if (t.startsWith("[")) {
+                    inTarget = false;   // 遇其他 section：目标块已结束（防越块改写/插入）
                     continue;
-                } else if (inTarget && t.startsWith("name =")) {
+                } else if (t.startsWith("name")) {
                     java.util.regex.Matcher m = java.util.regex.Pattern
                             .compile("^name\\s*=\\s*\"([^\"]+)\"").matcher(t);
-                    if (m.find() && m.group(1).equals(providerName)) inTarget = true;
+                    inTarget = m.find() && m.group(1).equals(providerName);
                 }
-                if (inTarget && t.startsWith("default =")) {
-                    lines.set(i, "default     = \"" + modelName + "\"");
+                if (inTarget && t.startsWith("default")) {
+                    lines.set(i, "default     = \"" + tomlEsc(modelName) + "\"");
                     found = true;
                     break;
                 }
             }
             if (!found) {
-                // 未找到 default 字段：在目标 provider 块内追加（定位到该块 api_key_env 行后）
+                // 未找到 default 字段：插到目标块末行之后（下一 [[providers]] 前），不越出块边界
                 int insertAfter = -1;
+                boolean inBlk = false;
                 for (int i = 0; i < lines.size(); i++) {
                     String t = lines.get(i).trim();
                     if (t.startsWith("[[providers]]")) {
-                        insertAfter = -1;
+                        inBlk = false;
                     } else if (t.startsWith("[")) {
+                        inBlk = false;   // 遇其他 section：目标块已结束
                         continue;
-                    } else if (t.startsWith("name =")) {
+                    } else if (t.startsWith("name")) {
                         java.util.regex.Matcher m = java.util.regex.Pattern
                                 .compile("^name\\s*=\\s*\"([^\"]+)\"").matcher(t);
-                        if (m.find() && m.group(1).equals(providerName)) insertAfter = i;
-                    } else if (insertAfter >= 0) {
-                        insertAfter = i;
+                        inBlk = m.find() && m.group(1).equals(providerName);
                     }
+                    if (inBlk) insertAfter = i;
                 }
                 if (insertAfter >= 0) {
-                    lines.add(insertAfter + 1, "default     = \"" + modelName + "\"");
+                    lines.add(insertAfter + 1, "default     = \"" + tomlEsc(modelName) + "\"");
                     found = true;
                 }
             }
@@ -3155,15 +3325,74 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 联网拉取可选模型列表：GET {base_url}/models（OpenAI 兼容），解析 data[].id；失败返回 null。
-     *  若 base_url 命中已知厂商域名且拉取失败，返回内置静态模型表兜底（保证面板仍可选）。 */
-    private List<String> fetchModelsFromProvider(String baseUrl, String apiKey, String kind) {
-        List<String> models = new ArrayList<>();
-        if (baseUrl == null || baseUrl.isEmpty()) return null;
-        String url = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        if (!url.endsWith("/models")) url += "/models";
+    /** 改写 config.toml 中指定 provider 块的 base_url 行（手动修改 API URL），无则插入块尾；返回是否成功 */
+    private boolean setProviderBaseUrl(File conf, String providerName, String newUrl) {
         try {
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            if (conf == null || !conf.exists() || providerName == null || newUrl == null || newUrl.isEmpty()) return false;
+            List<String> lines = new ArrayList<>(java.nio.file.Files.readAllLines(conf.toPath(), StandardCharsets.UTF_8));
+            boolean inTarget = false, found = false;
+            int insertAfter = -1;
+            for (int i = 0; i < lines.size(); i++) {
+                String t = lines.get(i).trim();
+                if (t.startsWith("[[providers]]")) {
+                    inTarget = false;
+                } else if (t.startsWith("[")) {
+                    inTarget = false;   // 遇其他 section：目标块已结束（防越块改写/插入）
+                    continue;
+                } else if (t.startsWith("name")) {
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("^name\\s*=\\s*\"([^\"]+)\"").matcher(t);
+                    inTarget = m.find() && m.group(1).equals(providerName);
+                }
+                if (inTarget) {
+                    if (t.startsWith("base_url")) {
+                        lines.set(i, "base_url    = \"" + tomlEsc(newUrl) + "\"");
+                        found = true;
+                        break;
+                    }
+                    insertAfter = i;
+                }
+            }
+            if (!found && insertAfter >= 0) {
+                lines.add(insertAfter + 1, "base_url    = \"" + tomlEsc(newUrl) + "\"");
+                found = true;
+            }
+            if (found) {
+                java.nio.file.Files.write(conf.toPath(), String.join("\n", lines).getBytes(StandardCharsets.UTF_8));
+                return true;
+            }
+            return false;
+        } catch (Exception e) {
+            Log.e(TAG, "set provider base url failed", e);
+            return false;
+        }
+    }
+
+    /** 联网拉取可选模型列表：优先 GET {base_url}/models（OpenAI 兼容，解析 data[].id）；
+     *  Anthropic 风格端点（kind=anthropic 或 URL 含 /anthropic）追加 GET {base_url}/v1/models
+     *  （x-api-key 鉴权）重试。失败返回 null（UI 保持空列表，可手动填模型名）。 */
+    private List<String> fetchModelsFromProvider(String baseUrl, String apiKey, String kind) {
+        List<String> models = tryFetchModelsOpenAI(baseUrl, apiKey);
+        if (models != null && !models.isEmpty()) return models;
+        String base = normalizeBaseUrl(baseUrl);
+        if (base.isEmpty()) return null;
+        boolean anthropicLike = (kind != null && kind.toLowerCase().contains("anthropic"))
+                || base.toLowerCase().contains("/anthropic");
+        if (anthropicLike) {
+            List<String> alt = tryFetchModelsAnthropic(base, apiKey);
+            if (alt != null && !alt.isEmpty()) return alt;
+        }
+        return (models != null && !models.isEmpty()) ? models : null;
+    }
+
+    /** OpenAI 风格：GET {base}/models（Bearer 鉴权），解析 data[].id；失败返回 null */
+    private List<String> tryFetchModelsOpenAI(String baseUrl, String apiKey) {
+        String base = normalizeBaseUrl(baseUrl);
+        if (base.isEmpty()) return null;
+        String url = base.endsWith("/models") ? base : base + "/models";
+        java.net.HttpURLConnection conn = null;
+        try {
+            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
             conn.setConnectTimeout(8000);
             conn.setReadTimeout(8000);
             conn.setRequestMethod("GET");
@@ -3173,23 +3402,226 @@ public class MainActivity extends Activity {
             conn.setRequestProperty("Accept", "application/json");
             int code = conn.getResponseCode();
             if (code == 200) {
-                java.io.InputStream in = conn.getInputStream();
-                StringBuilder sb = new StringBuilder();
-                byte[] buf = new byte[4096];
-                int n;
-                while ((n = in.read(buf)) > 0) sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
-                String body = sb.toString();
-                // data: [ {"id":"model-a","object":"model",...}, ... ]
-                java.util.regex.Matcher m = java.util.regex.Pattern
-                        .compile("\"id\"\\s*:\\s*\"([^\"]+)\"").matcher(body);
-                while (m.find()) models.add(m.group(1));
-                if (!models.isEmpty()) return models;
+                try (java.io.InputStream in = conn.getInputStream()) {
+                    return parseModelIds(readAllStream(in));
+                }
             }
         } catch (Exception e) {
-            Log.w(TAG, "fetch models failed: " + url, e);
+            Log.w(TAG, "fetch models (openai) failed: " + url, e);
+        } finally {
+            if (conn != null) conn.disconnect();   // 防_keep-alive 连接泄漏
         }
-        // 不要兜底：无法联网/无 /models 时返回 null（UI 保持空列表，不显示任何模型）
         return null;
+    }
+
+    /** Anthropic 风格：GET {base}/v1/models（x-api-key + anthropic-version 鉴权），解析 data[].id；失败返回 null */
+    private List<String> tryFetchModelsAnthropic(String baseUrl, String apiKey) {
+        String base = normalizeBaseUrl(baseUrl);
+        if (base.isEmpty()) return null;
+        String url = base.endsWith("/v1/models") ? base : base + "/v1/models";
+        java.net.HttpURLConnection conn = null;
+        try {
+            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
+            conn.setRequestMethod("GET");
+            if (apiKey != null && !apiKey.isEmpty()) {
+                conn.setRequestProperty("x-api-key", apiKey);
+                conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+            }
+            conn.setRequestProperty("anthropic-version", "2023-06-01");
+            conn.setRequestProperty("Accept", "application/json");
+            int code = conn.getResponseCode();
+            if (code == 200) {
+                try (java.io.InputStream in = conn.getInputStream()) {
+                    return parseModelIds(readAllStream(in));
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "fetch models (anthropic) failed: " + url, e);
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+        return null;
+    }
+
+    // ==================== 连通性测试 ====================
+
+    /** 连通性测试结果（结构化，UI 据此展示结论与配色） */
+    private static class ProbeResult {
+        boolean reachable;    // 网络层可达（收到任意 HTTP 响应）
+        boolean authOk;       // 鉴权通过（未出现 401/403）
+        int code = -1;        // 最后一次 HTTP 状态码（-1 = 网络异常）
+        String via;           // 命中的探测端点（/models 或 /v1/messages）
+        String detail = "";   // 附加信息（异常摘要/服务端错误摘录）
+        List<String> models;  // 探测得到的模型列表（可空）
+    }
+
+    /** 归一化 base_url：去首尾空白与尾部 /；无协议时默认补 https:// */
+    private String normalizeBaseUrl(String url) {
+        if (url == null) return "";
+        String u = url.trim();
+        while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
+        if (!u.isEmpty() && !u.matches("(?i)^[a-z][a-z0-9+.-]*://.*")) u = "https://" + u;
+        return u;
+    }
+
+    /** TOML 基本字符串转义（v2.0.25：用户输入含 " 或 \ 时直拼引号串会打坏整个
+     *  config.toml——之后 parse 全面失败、所有 set* 写入失效）。 */
+    private static String tomlEsc(String v) {
+        if (v == null) return "";
+        return v.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    /** 连通性探测：先 OpenAI 风格 GET {base}/models；401/403 直接判鉴权失败，
+     *  其余（404/异常）再试 Anthropic 风格 POST {base}/v1/messages（max_tokens=1 最小请求）。
+     *  耗时网络操作，必须在工作线程调用。 */
+    private ProbeResult probeProvider(String baseUrl, String apiKey, String kind, String model) {
+        ProbeResult r = new ProbeResult();
+        String base = normalizeBaseUrl(baseUrl);
+        if (base.isEmpty()) { r.detail = "API URL 为空"; return r; }
+        boolean hasKey = apiKey != null && !apiKey.isEmpty();
+        // ---- 第 1 步：OpenAI 风格 GET /models ----
+        String modelsUrl = base.endsWith("/models") ? base : base + "/models";
+        java.net.HttpURLConnection c1 = null;
+        try {
+            c1 = (java.net.HttpURLConnection) new java.net.URL(modelsUrl).openConnection();
+            c1.setConnectTimeout(8000);
+            c1.setReadTimeout(8000);
+            c1.setRequestMethod("GET");
+            c1.setRequestProperty("Accept", "application/json");
+            if (hasKey) c1.setRequestProperty("Authorization", "Bearer " + apiKey);
+            int code = c1.getResponseCode();
+            r.code = code; r.via = "/models"; r.reachable = true;
+            if (code == 200) {
+                r.authOk = true;
+                try (java.io.InputStream in = c1.getInputStream()) {
+                    r.models = parseModelIds(readAllStream(in));
+                }
+                r.detail = "GET /models 成功";
+                return r;
+            }
+            if (code == 401 || code == 403) {
+                r.authOk = false;
+                String err = excerptBody(c1.getErrorStream());
+                r.detail = !err.isEmpty() ? err : "HTTP " + code;
+                return r;   // 端点存在但鉴权失败：无需再探测
+            }
+            r.detail = "HTTP " + code;
+        } catch (Exception e) {
+            r.detail = e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            if (c1 != null) c1.disconnect();
+        }
+        // ---- 第 2 步：Anthropic 风格 POST /v1/messages（最小请求验证鉴权）----
+        String msgUrl = base.endsWith("/v1/messages") ? base : base + "/v1/messages";
+        java.net.HttpURLConnection c2 = null;
+        try {
+            c2 = (java.net.HttpURLConnection) new java.net.URL(msgUrl).openConnection();
+            c2.setConnectTimeout(8000);
+            c2.setReadTimeout(15000);
+            c2.setRequestMethod("POST");
+            c2.setRequestProperty("Content-Type", "application/json");
+            c2.setRequestProperty("anthropic-version", "2023-06-01");
+            c2.setDoOutput(true);
+            if (hasKey) {
+                c2.setRequestProperty("x-api-key", apiKey);
+                c2.setRequestProperty("Authorization", "Bearer " + apiKey);
+            }
+            String reqModel = (model != null && !model.isEmpty()) ? model : "deepseek-chat";
+            String body = "{\"model\":\"" + reqModel + "\",\"max_tokens\":1,"
+                    + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+            c2.getOutputStream().write(body.getBytes(StandardCharsets.UTF_8));
+            c2.getOutputStream().close();
+            int code = c2.getResponseCode();
+            // 第 2 步覆盖状态码（v2.0.25：旧实现保留第 1 步的 r.code，第 2 步异常时
+            // formatProbeResult 会拿第一步的 404 拼出错误的「鉴权失败」结论）
+            r.code = code; r.via = "/v1/messages"; r.reachable = true;
+            if (code == 200 || code == 201) {
+                r.authOk = true;
+                r.detail = "messages 接口正常";
+                r.models = new ArrayList<>();
+                r.models.add(reqModel);
+            } else if (code == 400) {
+                // 400 = 请求体/模型名问题：端点存在且鉴权通过（鉴权失败通常 401/403）
+                r.authOk = true;
+                String err = excerptBody(c2.getErrorStream());
+                r.detail = !err.isEmpty() ? err : "HTTP 400（请检查默认模型名）";
+            } else {
+                if (code == 401 || code == 403) r.authOk = false;   // 仅明确鉴权失败才标 authOk=false
+                String err = excerptBody(c2.getErrorStream());
+                r.detail = "HTTP " + code + (!err.isEmpty() ? "：" + err : "");
+            }
+        } catch (Exception e) {
+            String msg = e.getClass().getSimpleName() + ": " + e.getMessage();
+            r.detail = (r.detail == null || r.detail.isEmpty()) ? msg : r.detail + "；" + msg;
+        } finally {
+            if (c2 != null) c2.disconnect();
+        }
+        return r;
+    }
+
+    /** 把探测结果格式化为人读结论（✓/△/✗ 前缀，UI 直接展示） */
+    private String formatProbeResult(ProbeResult r) {
+        if (r == null) return "";
+        if (!r.reachable) {
+            return "✗ 连接失败：" + r.detail + "\n请检查网络、URL 拼写与协议（http/https）";
+        }
+        if (r.authOk && "/models".equals(r.via) && r.models != null && !r.models.isEmpty()) {
+            return "✓ 连通正常，鉴权通过（GET /models，" + r.models.size() + " 个模型）";
+        }
+        if (r.authOk && "/v1/messages".equals(r.via)) {
+            return "✓ 连通正常，鉴权通过（messages 接口" + (r.code == 400 ? "，请核对默认模型名" : "正常") + "）";
+        }
+        if (!r.authOk && (r.code == 429 || r.code >= 500)) {
+            // v2.0.25：429/5xx 是服务端问题，不是鉴权失败——别让用户白排查 API Key
+            return "△ 端点可达，但服务端返回 HTTP " + r.code + "（"
+                    + (r.code == 429 ? "限流" : "服务端错误") + "）\n" + r.detail;
+        }
+        if (!r.authOk) {
+            return "✗ 端点可达但鉴权失败（HTTP " + r.code + "）：API Key 无效或未填写\n" + r.detail;
+        }
+        if (r.code == 404 || r.code == 405) {
+            return "△ 端点可达，但 /models 与 /v1/messages 均不可用（HTTP " + r.code + "）\n"
+                    + "请确认 URL 路径：OpenAI 兼容填 …/v1，Anthropic 兼容填 …/anthropic";
+        }
+        return "△ 端点可达（HTTP " + r.code + "），但未通过标准接口验证\n" + r.detail;
+    }
+
+    /** 读流为字符串（UTF-8）：经 InputStreamReader 解码（v2.0.25：旧实现按固定字节块
+     *  new String，多字节 UTF-8 字符跨块会被切成 U+FFFD 乱码；且旧实现不关流） */
+    private String readAllStream(java.io.InputStream in) {
+        if (in == null) return "";
+        StringBuilder sb = new StringBuilder();
+        try (java.io.Reader reader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(in, StandardCharsets.UTF_8))) {
+            char[] buf = new char[2048];
+            int n;
+            while ((n = reader.read(buf)) > 0) sb.append(buf, 0, n);
+        } catch (Exception ignored) {}
+        return sb.toString();
+    }
+
+    /** 读响应错误体前 ~240 字符（供探测结果展示服务端报错原文）；自动关闭流 */
+    private String excerptBody(java.io.InputStream in) {
+        if (in == null) return "";
+        try (java.io.InputStream fin = in) {
+            String s = readAllStream(fin);
+            s = s.replaceAll("\\s+", " ").trim();
+            return s.length() > 240 ? s.substring(0, 240) + "…" : s;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 从响应 JSON 提取模型 id 列表（"id":"xxx"） */
+    private List<String> parseModelIds(String body) {
+        List<String> models = new ArrayList<>();
+        if (body == null || body.isEmpty()) return models;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("\"id\"\\s*:\\s*\"([^\"]+)\"").matcher(body);
+        while (m.find()) models.add(m.group(1));
+        return models;
     }
 
 
@@ -3224,11 +3656,21 @@ public class MainActivity extends Activity {
             conf.getParentFile().mkdirs();
             StringBuilder sb = new StringBuilder();
             sb.append("\n[[providers]]\n");
-            sb.append("name        = \"").append(p.name).append("\"\n");
-            sb.append("kind        = \"").append(p.kind == null || p.kind.isEmpty() ? "openai" : p.kind).append("\"\n");
-            sb.append("base_url    = \"").append(p.baseUrl).append("\"\n");
-            sb.append("model       = \"").append(p.model).append("\"\n");
-            sb.append("api_key_env = \"").append(p.apiKeyEnv).append("\"\n");
+            sb.append("name        = \"").append(tomlEsc(p.name)).append("\"\n");
+            sb.append("kind        = \"").append(tomlEsc(p.kind == null || p.kind.isEmpty() ? "openai" : p.kind)).append("\"\n");
+            sb.append("base_url    = \"").append(tomlEsc(p.baseUrl == null ? "" : p.baseUrl)).append("\"\n");
+            sb.append("model       = \"").append(tomlEsc(p.model)).append("\"\n");
+            sb.append("api_key_env = \"").append(tomlEsc(p.apiKeyEnv)).append("\"\n");
+            // 静态模型列表持久化（v2.0.25：否则重开面板 parse 后丢失，每次都要重新联网拉取）
+            if (p.models != null && !p.models.isEmpty()) {
+                StringBuilder arr = new StringBuilder();
+                for (String m : p.models) {
+                    if (m == null || m.isEmpty()) continue;
+                    if (arr.length() > 0) arr.append(", ");
+                    arr.append('"').append(tomlEsc(m)).append('"');
+                }
+                if (arr.length() > 0) sb.append("models      = [").append(arr).append("]\n");
+            }
             java.nio.file.Files.write(conf.toPath(),
                     ((conf.exists() ? "\n" : "") + sb.toString()).getBytes(StandardCharsets.UTF_8),
                     conf.exists()
@@ -3261,7 +3703,7 @@ public class MainActivity extends Activity {
                     }
                     if (!hasName && tj.startsWith("name")) {
                         java.util.regex.Matcher m = java.util.regex.Pattern
-                                .compile("^name\s*=\s*\"([^\"]+)\"").matcher(tj);
+                                .compile("^name\\s*=\\s*\"([^\"]+)\"").matcher(tj);
                         if (m.find() && m.group(1).equals(p.name)) target = true;
                         hasName = true;
                     }
@@ -3336,8 +3778,9 @@ public class MainActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), dp(12));
-        panel.addView(createDarkTip("选择 AI Provider 并填写其 API Key（支持 DeepSeek 及其他任意 OpenAI/Anthropic 兼容服务，"
-                + "如 Kimi、GLM、MiniMax、OpenRouter 等。可在「+ 新增 Provider」里配置自定义端点）。切换后保存重启生效。"));
+        panel.addView(createDarkTip("选择 AI Provider 并填写其 API Key，可直接修改 API URL 切换端点/代理（保存写回 config.toml）。"
+                + "支持 DeepSeek 及其他任意 OpenAI/Anthropic 兼容服务（Kimi、GLM、MiniMax、OpenRouter 等）。"
+                + "建议先「测试连通性」确认 URL 与 Key 可用，再保存重启生效。"));
         // Provider 选择
         panel.addView(createDarkSectionTitle("选择 Provider"));
         final Spinner providerSpinner = new Spinner(this);
@@ -3361,6 +3804,15 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
         spinnerLp.topMargin = dp(6);
         panel.addView(providerSpinner, spinnerLp);
+        // API URL（base_url）：手动编辑所选 provider 的端点，保存后写回 config.toml（换端点/代理无需重建）
+        panel.addView(createDarkSectionTitle("API URL（base_url）"));
+        final EditText urlInput = createDarkEditText("https://api.deepseek.com/anthropic 或 https://host/v1",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        {
+            ProviderInfo p0 = providers.get(Math.max(0, Math.min(curIdx, providers.size() - 1)));
+            urlInput.setText(p0.baseUrl != null ? p0.baseUrl : "");
+        }
+        addV(panel, urlInput, 4);
         // API Key：填写所选 provider 的密钥（api_key_env 变量），保存后写入 .env
         panel.addView(createDarkSectionTitle("API Key"));
         addV(panel, input, 6);
@@ -3385,35 +3837,107 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
         modelLp.topMargin = dp(6);
         panel.addView(modelSpinner, modelLp);
-        // 刷新按钮：重新联网拉取该 provider 的模型列表
+        // 手动输入模型名：/models 不可用时兜底（保存时优先于下拉选择）
+        panel.addView(createDarkSectionTitle("模型名（手动输入，可选）"));
+        final EditText modelManualInput = createDarkEditText("留空则使用上方下拉选择的模型",
+                InputType.TYPE_CLASS_TEXT);
+        addV(panel, modelManualInput, 4);
+        // 操作行：测试连通性 + 刷新模型列表（并排，节省纵向空间）
+        LinearLayout probeRow = new LinearLayout(this);
+        probeRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button testBtn = createDarkButton("测试连通性");
         Button refreshModelBtn = createDarkButton("刷新模型列表");
+        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tLp.rightMargin = dp(4);
+        LinearLayout.LayoutParams rLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        rLp.leftMargin = dp(4);
+        probeRow.addView(testBtn, tLp);
+        probeRow.addView(refreshModelBtn, rLp);
+        addV(panel, probeRow, 8);
+        // 测试/刷新结果展示区（异步更新：绿=通过，黄=可达但异常，红=失败）
+        final TextView probeStatus = new TextView(this);
+        probeStatus.setTextSize(12);
+        probeStatus.setLineSpacing(0, 1.3f);
+        probeStatus.setVisibility(View.GONE);
+        addV(panel, probeStatus, 6);
+        // 测试连通性：用当前 URL + 输入框实时 Key（未保存也可测）探测端点与鉴权
+        testBtn.setOnClickListener(v -> {
+            int sel = providerSpinner.getSelectedItemPosition();
+            if (sel < 0 || sel >= providers.size()) return;
+            ProviderInfo p = providers.get(sel);
+            String url = normalizeBaseUrl(urlInput.getText().toString());
+            if (url.isEmpty()) {
+                probeStatus.setVisibility(View.VISIBLE);
+                probeStatus.setTextColor(0xFFFF6B6B);
+                probeStatus.setText("✗ 请先填写 API URL");
+                return;
+            }
+            String key = input.getText().toString().trim();
+            if (key.isEmpty()) key = readApiKeyFromEnv(env, p.apiKeyEnv);
+            String manual = modelManualInput.getText().toString().trim();
+            String probeModel = !manual.isEmpty() ? manual
+                    : (modelSpinner.getSelectedItem() != null ? modelSpinner.getSelectedItem().toString() : null);
+            final String fKey = key, fModel = probeModel;
+            testBtn.setEnabled(false);
+            testBtn.setText("测试中…");
+            probeStatus.setVisibility(View.VISIBLE);
+            probeStatus.setTextColor(0xFFAAAAAA);
+            probeStatus.setText("… 正在测试 " + url);
+            final int reqId = ++modelReqSeq;   // 发起时取号；过期回调不再覆盖下拉
+            new Thread(() -> {
+                ProbeResult r = probeProvider(url, fKey, p.kind, fModel);
+                runOnUiThread(() -> {
+                    testBtn.setEnabled(true);
+                    testBtn.setText("测试连通性");
+                    probeStatus.setVisibility(View.VISIBLE);
+                    boolean pass = r.reachable && r.authOk;
+                    probeStatus.setTextColor(pass ? 0xFF7CD97C : (r.reachable ? 0xFFFFD166 : 0xFFFF6B6B));
+                    probeStatus.setText(formatProbeResult(r));
+                    // 探测到模型列表：顺手填入模型下拉（省一次「刷新模型列表」）
+                    if (r.models != null && !r.models.isEmpty() && reqId == modelReqSeq) {
+                        modelAdapter.clear();
+                        for (String s : r.models) modelAdapter.add(s);
+                        modelAdapter.notifyDataSetChanged();
+                        modelSpinner.setSelection(0);
+                    }
+                });
+            }, "rx-probe").start();
+        });
+        // 刷新按钮：用「当前编辑中的 URL」重新拉取该 provider 的模型列表（未保存的修改同样生效）
         refreshModelBtn.setOnClickListener(v -> {
             int sel = providerSpinner.getSelectedItemPosition();
             if (sel < 0 || sel >= providers.size()) return;
             ProviderInfo p = providers.get(sel);
+            ProviderInfo pe = new ProviderInfo(p.name, p.kind,
+                    normalizeBaseUrl(urlInput.getText().toString()), p.apiKeyEnv, p.model, null);
+            String manual = modelManualInput.getText().toString().trim();
+            final String hintModel = (!manual.isEmpty() && pe.model != null && !pe.model.isEmpty() && !manual.equals(pe.model))
+                    ? manual : pe.model;
             // 异步拉取，避免阻塞 UI
+            final int reqId = ++modelReqSeq;   // 发起时取号；过期回调不再覆盖（防旧 provider 模型写脏 config）
             new Thread(() -> {
-                String key = readApiKeyFromEnv(env, p.apiKeyEnv);
-                List<String> fetched = fetchModelsFromProvider(p.baseUrl, key, p.kind);
-                // 不要兜底：拉取失败/无 /models 时保持空列表（UI 不显示任何模型）
+                String key = input.getText().toString().trim();
+                if (key.isEmpty()) key = readApiKeyFromEnv(env, pe.apiKeyEnv);
+                List<String> fetched = fetchModelsFromProvider(pe.baseUrl, key, pe.kind);
+                // 不要兜底：拉取失败/无 /models 时保持空列表（可用下方手动输入模型名）
                 final List<String> finalList = (fetched != null) ? fetched : new ArrayList<String>();
                 runOnUiThread(() -> {
+                    if (reqId != modelReqSeq) return;   // 过期结果丢弃
                     modelAdapter.clear();
                     for (String s : finalList) modelAdapter.add(s);
                     modelAdapter.notifyDataSetChanged();
                     // 尝试选中当前默认模型
                     int idx = 0;
-                    if (p.model != null) {
+                    if (hintModel != null) {
                         for (int i = 0; i < finalList.size(); i++) {
-                            if (finalList.get(i).equals(p.model)) { idx = i; break; }
+                            if (finalList.get(i).equals(hintModel)) { idx = i; break; }
                         }
                     }
                     modelSpinner.setSelection(idx);
                 });
             }, "rx-fetch-models").start();
         });
-        addV(panel, refreshModelBtn, 4);
-        // 切换 Provider：更新 hint（api_key_env 变量名）与已存值回显
+        // 切换 Provider：更新 hint（api_key_env 变量名）、已存值回显与 API URL 回显
         providerSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(android.widget.AdapterView<?> parent, android.view.View view, int pos, long id) {
@@ -3424,6 +3948,9 @@ public class MainActivity extends Activity {
                     String saved = readApiKeyFromEnv(env, envName);
                     input.setText(saved);
                     input.setSelection(saved.length());
+                    // 同步回显该 provider 的 API URL（可手动修改后保存）
+                    urlInput.setText(p.baseUrl != null ? p.baseUrl : "");
+                    modelManualInput.setText("");   // 换 provider 后手动模型名清空，避免误写入
                     // 加载该 provider 的模型列表（静态 models 优先，否则联网拉取，失败兜底）
                     loadModelsForProvider(p, env, modelAdapter, modelSpinner);
                 }
@@ -3436,25 +3963,51 @@ public class MainActivity extends Activity {
             int sel = providerSpinner.getSelectedItemPosition();
             if (sel < 0 || sel >= providers.size()) return;
             final ProviderInfo p = providers.get(sel);
+            final int fSel = sel;
             String key = input.getText().toString().trim();
             if (key.isEmpty()) {
                 pushOutput("\r\n[请填写 " + (p.apiKeyEnv != null ? p.apiKeyEnv : "API") + " API Key]\r\n");
                 return;
             }
+            String envVar = (p.apiKeyEnv != null && !p.apiKeyEnv.isEmpty()) ? p.apiKeyEnv : "API_KEY";
             try {
                 // 写入 .env 对应变量（保留其他 provider 的 key）
-                upsertEnvVariable(env, p.apiKeyEnv, key);
-                // 同时写两层默认：顶层 default_model=provider 名 + provider 块 default=用户选中的模型
-                boolean modelOk = setDefaultModel(conf, p.name);
-                int mSel = modelSpinner.getSelectedItemPosition();
-                String chosenModel = mSel >= 0 ? (String) modelSpinner.getItemAtPosition(mSel) : null;
-                if (chosenModel != null && !chosenModel.isEmpty()) {
-                    modelOk = setProviderDefaultModel(conf, p.name, chosenModel) || modelOk;
+                upsertEnvVariable(env, envVar, key);
+                // 手动 URL：与 config.toml 不一致时写回（换端点/代理无需重建 provider）
+                boolean urlOk = true;
+                String newUrl = normalizeBaseUrl(urlInput.getText().toString());
+                if (!newUrl.isEmpty() && !newUrl.equals(normalizeBaseUrl(p.baseUrl))) {
+                    urlOk = setProviderBaseUrl(conf, p.name, newUrl);
+                    p.baseUrl = newUrl;   // 同步内存，后续拉模型/展示即时生效
+                    if (fSel < display.size()) {
+                        display.set(fSel, p.name + "（" + newUrl + "）");
+                        spinnerAdapter.notifyDataSetChanged();
+                    }
                 }
-                Log.d(TAG, "API key + provider updated: " + p.name + " env=" + p.apiKeyEnv + " modelOk=" + modelOk);
+                // 同时写两层默认：顶层 default_model=provider 名 + provider 块 default=用户选中的模型
+                // 模型来源：手动输入优先（/models 不可用兜底），其次下拉选择
+                boolean modelOk = setDefaultModel(conf, p.name);
+                String manual = modelManualInput.getText().toString().trim();
+                String chosenModel;
+                if (!manual.isEmpty()) {
+                    chosenModel = manual;
+                } else {
+                    int mSel = modelSpinner.getSelectedItemPosition();
+                    chosenModel = mSel >= 0 ? (String) modelSpinner.getItemAtPosition(mSel) : null;
+                }
+                if (chosenModel != null && !chosenModel.isEmpty()) {
+                    // && 而非 ||（v2.0.25：|| 会把块内 default 写入失败掩盖成成功）
+                    modelOk = modelOk && setProviderDefaultModel(conf, p.name, chosenModel);
+                }
+                Log.d(TAG, "API key + provider updated: " + p.name + " env=" + envVar
+                        + " url=" + p.baseUrl + " urlOk=" + urlOk + " modelOk=" + modelOk);
                 hidePanel();
-                pushOutput("\r\n[" + p.name + " API Key 已更新" + (modelOk ? "，已切换默认模型 " + (chosenModel != null ? chosenModel : p.name) : "，但默认模型写入失败（config.toml 未生成？）")
-                        + "，正在重启环境...]\r\n");
+                String msg = "\r\n[" + p.name + " API Key 已更新"
+                        + (urlOk ? "" : "，URL 写入失败")
+                        + (modelOk ? "，已切换默认模型 " + (chosenModel != null ? chosenModel : p.name)
+                        : "，但默认模型写入失败（config.toml 未生成？）")
+                        + "，正在重启环境...]\r\n";
+                pushOutput(msg);
                 restartEnvironment();
             } catch (Exception e) {
                 Log.e(TAG, "save api key failed", e);
@@ -3480,9 +4033,14 @@ public class MainActivity extends Activity {
                             : ""))
                     .setNegativeButton("取消", null)
                     .setPositiveButton("删除", (d, w) -> {
-                        if (removeProviderFromConfig(conf, p) && removeEnvVariable(env, p.apiKeyEnv)) {
+                        // config 块删除成功即视为成功（v2.0.25：旧实现 env 变量缺失/文件不存在
+                        // 时整体判失败——文件已删但 UI 不更新，且重开面板再删永远失败）
+                        boolean cfgOk = removeProviderFromConfig(conf, p);
+                        if (cfgOk) {
+                            boolean envOk = removeEnvVariable(env, p.apiKeyEnv);
                             providers.remove(sel);
-                            pushOutput("\r\n[Provider 已删除：" + p.name + "]\r\n");
+                            pushOutput("\r\n[Provider 已删除：" + p.name
+                                    + (envOk ? "]\r\n" : "]（.env 变量清理失败，可忽略）\r\n"));
                             if (curModel.equals(p.name)) {
                                 // 删除的是当前默认：重置 default_model 为剩余的第一个（无则留空）
                                 boolean ok = false;
@@ -3492,7 +4050,7 @@ public class MainActivity extends Activity {
                             }
                             showApiKeyConfigDialog();  // 重开面板刷新列表
                         } else {
-                            pushOutput("\r\n[Provider 删除失败（config.toml 或 .env 写入异常）]\r\n");
+                            pushOutput("\r\n[Provider 删除失败（config.toml 写入异常）]\r\n");
                         }
                     })
                     .show();
@@ -3518,8 +4076,8 @@ public class MainActivity extends Activity {
                 InputType.TYPE_CLASS_TEXT);
         addV(panel, kindInput, 4);
         panel.addView(createDarkSectionTitle("base_url（API 端点）"));
-        final EditText urlInput = createDarkEditText("如 https://api.moonshot.cn/v1（OpenAI 兼容）",
-                InputType.TYPE_CLASS_TEXT);
+        final EditText urlInput = createDarkEditText("OpenAI 兼容如 https://api.moonshot.cn/v1；Anthropic 兼容如 https://api.deepseek.com/anthropic",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         addV(panel, urlInput, 4);
         panel.addView(createDarkSectionTitle("默认模型"));
         final Spinner modelSpinner = new Spinner(this);
@@ -3545,30 +4103,99 @@ public class MainActivity extends Activity {
         final EditText envInput = createDarkEditText("如 KIMI_API_KEY（大写字母数字下划线）",
                 InputType.TYPE_CLASS_TEXT);
         addV(panel, envInput, 4);
-        // 「拉取模型」：读 base_url + .env 中该 api_key_env 的 key（可为空→静态表兜底）联网列出可选模型
+        // 操作行：「拉取模型」+「测试连通性」并排；结果共用下方状态区
+        LinearLayout probeRow = new LinearLayout(this);
+        probeRow.setOrientation(LinearLayout.HORIZONTAL);
         Button pullBtn = createDarkButton("拉取模型");
+        Button testBtn = createDarkButton("测试连通性");
+        LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        pLp.rightMargin = dp(4);
+        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tLp.leftMargin = dp(4);
+        probeRow.addView(pullBtn, pLp);
+        probeRow.addView(testBtn, tLp);
+        addV(panel, probeRow, 4);
+        // 状态展示区（拉取/测试结果；绿=通过，黄=可达但异常，红=失败）
+        final TextView probeStatus = new TextView(this);
+        probeStatus.setTextSize(12);
+        probeStatus.setLineSpacing(0, 1.3f);
+        probeStatus.setVisibility(View.GONE);
+        addV(panel, probeStatus, 6);
+        // 「测试连通性」：用当前填写的 base_url + .env 已存 key（可能为空）探测端点与鉴权
+        testBtn.setOnClickListener(v -> {
+            String baseUrl = normalizeBaseUrl(urlInput.getText().toString());
+            String envVar = envInput.getText().toString().trim();
+            String kind = kindInput.getText().toString().trim();
+            if (baseUrl.isEmpty()) {
+                probeStatus.setVisibility(View.VISIBLE);
+                probeStatus.setTextColor(0xFFFF6B6B);
+                probeStatus.setText("✗ 请先填写 base_url");
+                return;
+            }
+            String key = readApiKeyFromEnv(env, envVar);
+            testBtn.setEnabled(false);
+            testBtn.setText("测试中…");
+            probeStatus.setVisibility(View.VISIBLE);
+            probeStatus.setTextColor(0xFFAAAAAA);
+            probeStatus.setText("… 正在测试 " + baseUrl);
+            final int reqId = ++modelReqSeq;   // 过期探测结果不覆盖下拉
+            new Thread(() -> {
+                ProbeResult r = probeProvider(baseUrl, key, kind, null);
+                runOnUiThread(() -> {
+                    testBtn.setEnabled(true);
+                    testBtn.setText("测试连通性");
+                    probeStatus.setVisibility(View.VISIBLE);
+                    boolean pass = r.reachable && r.authOk;
+                    probeStatus.setTextColor(pass ? 0xFF7CD97C : (r.reachable ? 0xFFFFD166 : 0xFFFF6B6B));
+                    probeStatus.setText(formatProbeResult(r));
+                    // 探测到模型列表：填入模型下拉（等效「拉取模型」）
+                    if (r.models != null && !r.models.isEmpty() && reqId == modelReqSeq) {
+                        modelAdapter.clear();
+                        for (String s : r.models) modelAdapter.add(s);
+                        modelAdapter.notifyDataSetChanged();
+                        modelSpinner.setSelection(0);
+                    }
+                });
+            }, "rx-probe-new").start();
+        });
+        // 「拉取模型」：读 base_url + .env 中该 api_key_env 的 key（可为空→静态表兜底）联网列出可选模型
         pullBtn.setOnClickListener(v -> {
-            String baseUrl = urlInput.getText().toString().trim();
+            String baseUrl = normalizeBaseUrl(urlInput.getText().toString());   // 与 testBtn 一致（尾斜杠/空格归一）
             String envVar = envInput.getText().toString().trim();
             String kind = kindInput.getText().toString().trim();
             if (baseUrl.isEmpty() || envVar.isEmpty()) {
-                pushOutput("\r\n[请先填写 base_url 与 api_key_env，再拉取模型]\r\n");
+                probeStatus.setVisibility(View.VISIBLE);
+                probeStatus.setTextColor(0xFFFFD166);
+                probeStatus.setText("△ 请先填写 base_url 与 api_key_env，再拉取模型");
                 return;
             }
+            pullBtn.setEnabled(false);
+            pullBtn.setText("拉取中…");
+            final int reqId = ++modelReqSeq;   // 过期拉取结果不覆盖下拉
             new Thread(() -> {
                 String key = readApiKeyFromEnv(env, envVar);
                 List<String> fetched = fetchModelsFromProvider(baseUrl, key, kind);
                 // 不要兜底：拉取失败/无 /models 时保持空列表（不显示任何模型）
                 final List<String> finalList = (fetched != null) ? fetched : new ArrayList<String>();
                 runOnUiThread(() -> {
+                    pullBtn.setEnabled(true);
+                    pullBtn.setText("拉取模型");
+                    if (reqId != modelReqSeq) return;   // 过期结果丢弃
                     modelAdapter.clear();
                     for (String s : finalList) modelAdapter.add(s);
                     modelAdapter.notifyDataSetChanged();
                     modelSpinner.setSelection(0);
+                    probeStatus.setVisibility(View.VISIBLE);
+                    if (finalList.isEmpty()) {
+                        probeStatus.setTextColor(0xFFFFD166);
+                        probeStatus.setText("△ 未能获取模型列表（端点可能无 /models 接口），可保存后用「手动输入模型名」");
+                    } else {
+                        probeStatus.setTextColor(0xFF7CD97C);
+                        probeStatus.setText("✓ 拉取成功，" + finalList.size() + " 个模型可选");
+                    }
                 });
             }, "rx-pull-models").start();
         });
-        addV(panel, pullBtn, 4);
         Button okBtn = createDarkButton("保存 Provider");
         okBtn.setOnClickListener(v -> {
             String name = nameInput.getText().toString().trim();
@@ -3580,6 +4207,11 @@ public class MainActivity extends Activity {
                     ? modelSpinner.getSelectedItem().toString().trim() : "";
             if (name.isEmpty() || baseUrl.isEmpty() || envVar.isEmpty()) {
                 pushOutput("\r\n[请填写 Provider 名称、base_url 与 api_key_env]\r\n");
+                return;
+            }
+            // env 变量名格式校验（v2.0.25：非法字符会打坏 .env 的 KEY=VALUE 结构）
+            if (!envVar.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+                pushOutput("\r\n[api_key_env 仅允许字母/数字/下划线且不以数字开头]\r\n");
                 return;
             }
             if (model.isEmpty()) model = name;
@@ -3827,18 +4459,28 @@ public class MainActivity extends Activity {
             pb.environment().put("TMPDIR", nativeLibDir);
             pb.environment().put("PROOT_TMP_DIR", getFilesDir().getAbsolutePath());
             Process p = pb.start();
-            StringBuilder sb = new StringBuilder();
-            java.io.InputStream in = p.getInputStream();
-            byte[] buf = new byte[4096];
-            long deadline = System.currentTimeMillis() + 20000;
-            while (System.currentTimeMillis() < deadline) {
-                int n = in.read(buf);
-                if (n > 0) sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
-                if (n < 0) break;    // 流关闭：proot 已退出
-            }
-            try { p.waitFor(2, TimeUnit.SECONDS); } catch (Exception ignored) {}
-            p.destroy();
-            return sb.toString();
+            // v2.0.25 修复死锁：旧实现 deadline 只在 in.read() 返回后检查——proot 启动后
+            // 无输出且不退出时 read 永久阻塞，20s 兜底失效（ds2 线程永久卡死、按钮锁死）。
+            // 改为后台排水线程 + 主调用线程限时 waitFor，超时强杀。
+            final StringBuilder sb = new StringBuilder();
+            Thread drainer = new Thread(() -> {
+                try (java.io.InputStream din = p.getInputStream()) {
+                    byte[] dbuf = new byte[4096];
+                    int n;
+                    while ((n = din.read(dbuf)) > 0) {
+                        synchronized (sb) { sb.append(new String(dbuf, 0, n, StandardCharsets.UTF_8)); }
+                    }
+                } catch (Exception ignored) {}
+            }, "oneshot-drain");
+            drainer.setDaemon(true);
+            drainer.start();
+            boolean exited = false;
+            try { exited = p.waitFor(20, TimeUnit.SECONDS); } catch (Exception ignored) {}
+            if (!exited) p.destroyForcibly();
+            drainer.join(3000);   // 排水线程最多再等 3s 收尾
+            String result;
+            synchronized (sb) { result = sb.toString(); }
+            return result;
         } catch (Exception e) {
             Log.w(TAG, "one-shot proot exec failed", e);
             return null;
@@ -3895,24 +4537,36 @@ public class MainActivity extends Activity {
                 npmVer = new String(java.nio.file.Files.readAllBytes(vf.toPath()), StandardCharsets.UTF_8).trim();
             } catch (Exception ignored) {}
         }
-        String ver = (npmVer != null && !npmVer.isEmpty()) ? "v" + npmVer
-                : extractReasonixVersion(new File(new File(getFilesDir(), "rootfs/usr/local/bin"), "reasonix"));
+        final String ver = (npmVer != null && !npmVer.isEmpty()) ? "v" + npmVer : null;
         TextView verView = new TextView(this);
-        verView.setText("当前版本：" + (ver != null ? ver : "未知（内置 1.31.4）"));
+        verView.setText("当前版本：" + (ver != null ? ver : "检测中…"));
         verView.setTextColor(0xFF7FDB8A);
         verView.setTextSize(14);
         verView.setTypeface(null, android.graphics.Typeface.BOLD);
         addV(panel, verView, 0);
+        if (ver == null) {
+            // v2.0.25：buildinfo 提取要读 2MB 二进制+正则，挪到后台线程（原在主线程面板构建里同步执行）
+            new Thread(() -> {
+                final String v = extractReasonixVersion(
+                        new File(new File(getFilesDir(), "rootfs/usr/local/bin"), "reasonix"));
+                runOnUiThread(() -> verView.setText("当前版本：" + (v != null ? v : "未知（内置 1.31.4）")));
+            }, "rx-local-ver").start();
+        }
         // 异步查询最新版本并自动填入最新下载链接
         final String curVer = ver;
         new Thread(() -> {
             try {
-                java.net.URL u = new java.net.URL("https://registry.npmmirror.com/@reasonix/cli-linux-arm64/latest");
+                java.net.HttpURLConnection conn = (java.net.HttpURLConnection)
+                        new java.net.URL("https://registry.npmmirror.com/@reasonix/cli-linux-arm64/latest").openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(15000);
                 byte[] buf = new byte[8192];
                 int n;
                 StringBuilder sb = new StringBuilder();
-                try (java.io.InputStream in = u.openStream()) {
+                try (java.io.InputStream in = conn.getInputStream()) {
                     while ((n = in.read(buf)) > 0) sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                } finally {
+                    conn.disconnect();
                 }
                 java.util.regex.Matcher mv = java.util.regex.Pattern
                         .compile("\"version\"\\s*:\\s*\"([\\d.]+)\"").matcher(sb.toString());
@@ -3972,7 +4626,10 @@ public class MainActivity extends Activity {
                 pushOutput("\r\n[正在下载 reasonix 更新包...]\r\n");
                 File tmp = new File(getCacheDir(), "reasonix-update.tgz");
                 long total = 0;
-                try (InputStream in = new URL(url).openStream();
+                java.net.HttpURLConnection dl = (java.net.HttpURLConnection) new URL(url).openConnection();
+                dl.setConnectTimeout(15000);
+                dl.setReadTimeout(60000);   // v2.0.25 修复：旧 URL.openStream() 无超时，网络黑洞时线程永久挂起
+                try (InputStream in = dl.getInputStream();
                      FileOutputStream out = new FileOutputStream(tmp)) {
                     byte[] buf = new byte[65536];
                     int n;
@@ -3980,6 +4637,8 @@ public class MainActivity extends Activity {
                         out.write(buf, 0, n);
                         total += n;
                     }
+                } finally {
+                    dl.disconnect();
                 }
                 Log.d(TAG, "downloaded " + total + " bytes");
                 pushOutput("\r\n[下载完成 (" + (total / 1024 / 1024) + " MB)，正在解压...]\r\n");
@@ -4018,14 +4677,27 @@ public class MainActivity extends Activity {
             if (read < 512) break;              // 结束
             if (allZero(header)) break;         // 两个空块结束
             String name = new String(header, 0, 100, StandardCharsets.UTF_8).replace("\0", "").trim();
-            long size = 0;
+            long size = -1;
             String sizeStr = new String(header, 124, 12, StandardCharsets.US_ASCII).trim();
             try {
-                size = Long.parseLong(sizeStr, 8);
+                size = sizeStr.matches("[0-7]+") ? Long.parseLong(sizeStr, 8) : -1;
             } catch (Exception ignored) {}
-            if (name.equals(targetName)) {
+            // v2.0.25 修复：size 解析失败按 0 处理会把成员写成 0 字节文件（reasonix 损坏）；
+            // GNU base-256 / 截断为负同理。解析失败或不合理（负值/超 256MB）直接报错。
+            if (size < 0 || size > 256L * 1024 * 1024) {
+                throw new IOException("tar 成员 " + name + " 大小异常: " + sizeStr);
+            }
+            if (name.equals(targetName) || name.equals("./" + targetName)
+                    || name.equals("package/" + targetName) || name.equals("./package/" + targetName)) {
+                if (size == 0) {
+                    found = true;   // 空成员：匹配成功但不写空文件
+                    break;
+                }
                 byte[] data = new byte[(int) size];
-                readFully(in, data);
+                int got = readFully(in, data);
+                // v2.0.25 修复：tar 截断时旧实现忽略 readFully 返回值，静默把零填充垃圾
+                // 写成 reasonix 二进制（只剩「恢复内置」可救）
+                if (got < data.length) throw new IOException("tar 成员 " + name + " 被截断");
                 out.write(data);
                 found = true;
                 break;
@@ -4126,21 +4798,28 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_UPDATE_RESONIX && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            applyReasonixUpdate(data.getData());
+            // v2.0.25：io 挪后台线程（几十 MB ContentResolver 复制走 FUSE，主线程极易 ANR）
+            final Uri uri = data.getData();
+            pushOutput("\r\n[正在复制新版 reasonix...]\r\n");
+            new Thread(() -> applyReasonixUpdate(uri), "rx-apply-update").start();
         } else if (requestCode == REQ_SKILL_IMPORT && resultCode == RESULT_OK && data != null && data.getData() != null) {
             importSkillFromUri(data.getData());
         } else if (requestCode == REQ_CREATE_ENV_TEMPLATE && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            try (OutputStream os = getContentResolver().openOutputStream(data.getData())) {
-                if (os != null) {
-                    os.write(ENV_TEMPLATE_CONTENT.getBytes(StandardCharsets.UTF_8));
-                    pushOutput("\r\n[模板已保存（.rsxmenv），编辑后可在开发环境面板「导入模板」导入]\r\n");
-                } else {
-                    pushOutput("\r\n[保存模板失败: 无法写入所选位置]\r\n");
+            // v2.0.25：写文件挪后台线程（openOutputStream+write 在主线程会 ANR）
+            final Uri tUri = data.getData();
+            new Thread(() -> {
+                try (OutputStream os = getContentResolver().openOutputStream(tUri)) {
+                    if (os != null) {
+                        os.write(ENV_TEMPLATE_CONTENT.getBytes(StandardCharsets.UTF_8));
+                        pushOutput("\r\n[模板已保存（.rsxmenv），编辑后可在开发环境面板「导入模板」导入]\r\n");
+                    } else {
+                        pushOutput("\r\n[保存模板失败: 无法写入所选位置]\r\n");
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "save env template failed", e);
+                    pushOutput("\r\n[保存模板失败: " + e.getMessage() + "]\r\n");
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "save env template failed", e);
-                pushOutput("\r\n[保存模板失败: " + e.getMessage() + "]\r\n");
-            }
+            }, "rx-save-template").start();
         } else if (requestCode == REQ_IMPORT_ENV_TEMPLATE && resultCode == RESULT_OK && data != null && data.getData() != null) {
             importEnvTemplate(data.getData());
         }
@@ -4224,15 +4903,27 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 杀掉 proot 进程并重启整个 Linux 环境（MANAGE_EXTERNAL_STORAGE 授权后调用，使 FUSE 权限生效） */
+    /** 杀掉 proot 进程并重启整个 Linux 环境（MANAGE_EXTERNAL_STORAGE 授权后调用，使 FUSE 权限生效）。
+     *  envRestarting 进程内互斥（v2.0.25）：synchronized 只护住"派发"，kill+start 在裸线程里跑，
+     *  快速连点「新建/切换项目/继续会话」会派发两个 restart 线程，kill/start 交错可产生
+     *  两套并存 proot 环境（PTY 竞争、排版错乱）。进行中再次触发直接忽略。 */
+    private final java.util.concurrent.atomic.AtomicBoolean envRestarting =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     private synchronized void restartEnvironment() {
         if (!environmentStarted) return;   // 环境尚未启动，无需重启（正常流程会启动）
+        if (!envRestarting.compareAndSet(false, true)) {
+            Log.d(TAG, "restart already in progress, skip");
+            return;
+        }
         new Thread(() -> {
             try {
                 killProotTree();
                 startEnvironment();
             } catch (Exception e) {
                 Log.e(TAG, "restart failed", e);
+            } finally {
+                envRestarting.set(false);
             }
         }, "env-restart").start();
     }
@@ -4301,11 +4992,15 @@ public class MainActivity extends Activity {
      *  线程安全：与原生发送线程共享 sProcIn，加锁避免字节交错。 */
     @JavascriptInterface
     public void write(String data) {
-        if (sProcIn == null || data == null) return;
+        if (data == null) return;
+        // 与 resize()/原生发送线程共享 sProcIn：同一把锁避免字节交错；
+        // 锁内重取引用（killProotTree 置 null 与写入并发时不 NPE）
         synchronized (this) {
+            OutputStream out = sProcIn;
+            if (out == null) return;
             try {
-                sProcIn.write(data.getBytes(StandardCharsets.UTF_8));
-                sProcIn.flush();
+                out.write(data.getBytes(StandardCharsets.UTF_8));
+                out.flush();
             } catch (IOException e) {
                 Log.w(TAG, "write failed", e);
             }
@@ -4332,13 +5027,19 @@ public class MainActivity extends Activity {
      */
     @JavascriptInterface
     public void resize(int rows, int cols) {
-        if (sProcIn == null || rows <= 0 || cols <= 0) return;
-        try {
-            String seq = "\u001b]50;" + rows + ";" + cols + "\u0007";
-            sProcIn.write(seq.getBytes(StandardCharsets.UTF_8));
-            sProcIn.flush();
-        } catch (IOException e) {
-            Log.w(TAG, "resize failed", e);
+        if (rows <= 0 || cols <= 0) return;
+        // v2.0.25 修复：旧实现无锁直写 sProcIn，与 write() 并发时带外序列可能
+        // 插进按键字节流中间（PTY 输入错乱）。与 write() 共用同一把锁。
+        synchronized (this) {
+            OutputStream out = sProcIn;
+            if (out == null) return;
+            try {
+                String seq = "\u001b]50;" + rows + ";" + cols + "\u0007";
+                out.write(seq.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+            } catch (IOException e) {
+                Log.w(TAG, "resize failed", e);
+            }
         }
     }
 
@@ -4712,12 +5413,13 @@ public class MainActivity extends Activity {
             Process tp = new ProcessBuilder("/system/bin/tar", "-xzf",
                     ds2Bundle.getAbsolutePath(), "-C", ds2Root.getAbsolutePath())
                     .redirectErrorStream(true).start();
-            byte[] tb = new byte[4096];
-            int tn = tp.getInputStream().read(tb);
-            int tcode = tp.waitFor();
+            // 持续排水到 EOF 再限时等待（v2.0.25 修复：旧实现只 read 一次 4096 字节，
+            // 输出超过管道缓冲时 tar 写阻塞 → waitFor 永久卡住环境启动）
+            String tout = drainProcessOutput(tp, 20);
+            int tcode = tp.exitValue();
             if (tcode != 0) {
                 Log.w(TAG, "toybox tar exit=" + tcode + " out=" +
-                        (tn > 0 ? new String(tb, 0, tn, StandardCharsets.UTF_8) : "(no out)"));
+                        (tout.isEmpty() ? "(no out)" : tout));
                 tarMiss = true;
             }
         } catch (Exception te) {
@@ -4806,12 +5508,12 @@ public class MainActivity extends Activity {
             Process tp2 = new ProcessBuilder("/system/bin/tar", "-xzf",
                     ds2Bundle.getAbsolutePath(), "-C", ds2Root.getAbsolutePath())
                     .redirectErrorStream(true).start();
-            byte[] tb2 = new byte[4096];
-            int tn2 = tp2.getInputStream().read(tb2);
-            int tc2 = tp2.waitFor();
+            // 同 refreshAssets：排水到 EOF + 限时等待，防输出超缓冲卡死启动
+            String tout2 = drainProcessOutput(tp2, 20);
+            int tc2 = tp2.exitValue();
             if (tc2 != 0) {
                 Log.w(TAG, "setup tar exit=" + tc2 + " out=" +
-                        (tn2 > 0 ? new String(tb2, 0, tn2, StandardCharsets.UTF_8) : "(no out)"));
+                        (tout2.isEmpty() ? "(no out)" : tout2));
                 firstTarMiss = true;
             }
         } catch (Exception te2) {
@@ -5015,25 +5717,57 @@ public class MainActivity extends Activity {
     /** 启动环境输出 reader：把进程 stdout 转发到终端（proot/chroot 共用）。
      *  用 CharsetDecoder 增量解码：按块 new String(buf,0,n,UTF_8) 会把多字节 UTF-8
      *  字符在块边界截断成 U+FFFD 乱码（中文/emoji 显示混乱的根本原因）。 */
+    /** 增量 UTF-8 解码器（v2.0.25 修复中文乱码的根因）：跨读块保留不完整多字节序列。
+     *  旧实现单参 dec.decode(ByteBuffer) 是「一次性完整解码」便捷方法——每次调用
+     *  会 reset 解码器状态，多字节字符恰在读块边界被切开时仍解析成 U+FFFD
+     *  （此前注释声称已修复，实际修复无效）。 */
+    private static final class Utf8StreamDecoder {
+        private final java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+        private byte[] carry = new byte[0];
+
+        /** 喂入一块新数据；endOfInput=true 时冲刷残留（流结束时调用） */
+        String feed(byte[] buf, int n, boolean endOfInput) {
+            try {
+                byte[] all = new byte[carry.length + n];
+                System.arraycopy(carry, 0, all, 0, carry.length);
+                System.arraycopy(buf, 0, all, carry.length, n);
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(all);
+                StringBuilder out = new StringBuilder();
+                java.nio.CharBuffer cb = java.nio.CharBuffer.allocate(512);
+                while (bb.hasRemaining()) {
+                    java.nio.charset.CoderResult r = dec.decode(bb, cb, endOfInput);
+                    cb.flip();
+                    out.append(cb);
+                    cb.clear();
+                    if (r.isUnderflow()) break;
+                    if (r.isMalformed() || r.isUnmappable()) r.throwException(); // REPLACE 下不会触发
+                }
+                int rem = bb.remaining();
+                carry = new byte[rem];
+                System.arraycopy(all, bb.position(), carry, 0, rem);
+                return out.toString();
+            } catch (Exception e) {
+                return "";
+            }
+        }
+    }
+
     private void startEnvReader(Process p) {
         // reader 绑定启动时刻的进程（局部捕获），避免重启环境后读到新进程的流
         Thread reader = new Thread(() -> {
             try (InputStream in = p.getInputStream()) {
-                java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
-                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
-                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+                Utf8StreamDecoder dec = new Utf8StreamDecoder();
                 byte[] buf = new byte[8192];
                 int n;
                 while ((n = in.read(buf)) > 0) {
-                    ByteBuffer bb = ByteBuffer.wrap(buf, 0, n);
-                    CharBuffer cb = dec.decode(bb);
-                    pushOutput(cb.toString());
+                    String chunk = dec.feed(buf, n, false);
+                    if (!chunk.isEmpty()) pushOutput(chunk);
                 }
                 // 冲刷解码器残留（流结束时补出末尾字符）
-                try {
-                    CharBuffer tail = dec.decode(ByteBuffer.allocate(0));
-                    if (tail.length() > 0) pushOutput(tail.toString());
-                } catch (Exception ignored) {}
+                String tail = dec.feed(new byte[0], 0, true);
+                if (!tail.isEmpty()) pushOutput(tail);
             } catch (IOException e) {
                 Log.w(TAG, "reader ended", e);
             }
@@ -5062,29 +5796,53 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 执行命令并把输出转发到终端；非零退出码抛异常 */
-    private void runCmd(String... cmd) throws IOException {
-        Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+    /** 持续排水读取进程输出直到 EOF，限时 waitSec 秒；超时杀进程。返回全部输出（截断到 16KB）。
+     *  修复模式：waitFor 前必须排空管道，否则输出超过管道缓冲（64KB）时子进程写阻塞卡死。 */
+    private static String drainProcessOutput(Process p, int waitSec) {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
         try (InputStream in = p.getInputStream()) {
-            java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
-                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
-                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                if (bos.size() >= 16 * 1024) break;   // 上限：日志足够，防内存膨胀
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (!p.waitFor(waitSec, TimeUnit.SECONDS)) p.destroy();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            p.destroy();
+        }
+        String s = bos.toString();
+        return s.length() > 16 * 1024 ? s.substring(0, 16 * 1024) : s;
+    }
+
+    /** 执行命令并把输出转发到终端；非零退出码抛异常 */
+    private void runCmd(String... cmd) throws IOException {        Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+        try (InputStream in = p.getInputStream()) {
+            Utf8StreamDecoder dec = new Utf8StreamDecoder();
             byte[] buf = new byte[4096];
             int n;
             while ((n = in.read(buf)) > 0) {
-                CharBuffer cb = dec.decode(ByteBuffer.wrap(buf, 0, n));
-                pushOutput(cb.toString());
+                String chunk = dec.feed(buf, n, false);
+                if (!chunk.isEmpty()) pushOutput(chunk);
             }
-            try {
-                CharBuffer tail = dec.decode(ByteBuffer.allocate(0));
-                if (tail.length() > 0) pushOutput(tail.toString());
-            } catch (Exception ignored) {}
+            String tail = dec.feed(new byte[0], 0, true);
+            if (!tail.isEmpty()) pushOutput(tail);
         }
         int code;
         try {
-            code = p.waitFor();
+            // 限时等待（v2.0.25：根fs 解压等被调命令挂起时不得永久阻塞环境启动线程）
+            if (!p.waitFor(180, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                code = -1;
+            } else {
+                code = p.exitValue();
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            p.destroyForcibly();
             code = -1;
         }
         if (code != 0) {
@@ -5114,7 +5872,7 @@ public class MainActivity extends Activity {
     private final StringBuilder nativeLiveStream = new StringBuilder();
     private volatile boolean nativeLiveDirty = false;
     private int nativeLastLiveLen = 0;
-    private long lastLiveFlush = 0;
+    private volatile long lastLiveFlush = 0;   // volatile：env-reader/桥线程多线程读写
     /** 生成进行中标记：发送后按钮切「停止」，收到新 assistant 消息/超时 后恢复「发送」 */
     private volatile boolean genInFlight = false;
     /** 用户正在触摸翻阅消息列表：置位期间暂停「自动滚到底部」抢占（v2.0.23 修复无法回看）。
@@ -5167,15 +5925,21 @@ public class MainActivity extends Activity {
 
     // ---- 事件流（events.jsonl 结构化增量），app-bin 实时流兜底 ----
 
-    /** 结构化事件流解析器：读会话 events.jsonl（desktop 同源），零 TUI 框架行 */
-    private EventsJSONLParser liveEvents;
+    /** 结构化事件流解析器：读会话 events.jsonl（desktop 同源），零 TUI 框架行。
+     *  volatile：主线程 start/stopEventsStream 写，env-reader 线程 feedNativePtyLive 读 */
+    private volatile EventsJSONLParser liveEvents;
     /** 事件流解析线程（守护）：主线程退出时自动结束 */
     private volatile Thread eventsThread;
 
     /** 启动原生视图时调用：找当前最新 events.jsonl 并开始轮询 */
     private void startEventsStream() {
+        startEventsStream(null);
+    }
+
+    /** 带指定解析器启动事件流（preferred 为 null 时全局定位最新 events.jsonl） */
+    private void startEventsStream(EventsJSONLParser preferred) {
         stopEventsStream();
-        liveEvents = resolveLatestEventsFile();
+        liveEvents = (preferred != null) ? preferred : resolveLatestEventsFile();
         if (liveEvents == null) return;
         Thread t = new Thread(() -> {
             EventsJSONLParser p = liveEvents;
@@ -5351,19 +6115,62 @@ public class MainActivity extends Activity {
         startEventsStream();
     }
 
+    /** 会话 jsonl 轮询执行器（v2.0.25 修复 ANR：pollNativeSession 每秒在主线程完整读+解析
+     *  会话 jsonl（AI 长会话可达数十 MB），mapper 未定位时还遍历全部 projects 目录。
+     *  挪到单线程后台执行器，仅渲染回主线程。） */
+    private final java.util.concurrent.ExecutorService pollExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "native-poll");
+                t.setDaemon(true);
+                return t;
+            });
+
     /** 原生视图：映射 CLI 字段到 GUI。reasonix 会话实时写入 jsonl，这里按字段增量渲染气泡 */
     private void pollNativeSession() {
-        SessionFieldMapper m = sessionMapper;
-        if (m == null) {
-            // 尚无会话文件（reasonix 可能刚启动/多项目）：每轮重试解析定位
-            sessionMapper = resolveCurrentSessionMapper();
-            m = sessionMapper;
-            if (m == null) return;
-        }
-        final SessionFieldMapper mapper = m;
-        boolean changed = mapper.poll();
-        if (!changed) return;
-        ui.post(() -> appendNativeMessages(mapper));
+        pollExecutor.execute(() -> {
+            try {
+                SessionFieldMapper m = sessionMapper;
+                if (m == null) {
+                    // 尚无会话文件（reasonix 可能刚启动/多项目）：每轮重试解析定位（后台线程做目录遍历 IO）
+                    m = resolveCurrentSessionMapper();
+                    if (m == null) return;
+                    sessionMapper = m;
+                    // v2.0.25 修复：首次会话/新会话创建后事件流不会自动跟随——旧实现只在
+                    // enterNativeView 时定位一次 events.jsonl，定位不到（会话还没建立）就永远
+                    // 走 PTY 剥离兜底（TUI 框架行噪音）。会话定位成功时同步把事件流指向它。
+                    final SessionFieldMapper fm = m;
+                    ui.post(() -> {
+                        syncEventsStreamToSession(fm);
+                        TextView info = findViewById(R.id.native_session_info);
+                        if (info != null) {
+                            info.setText("会话：" + (fm.file() != null ? fm.file().getName() : "—"));
+                        }
+                    });
+                }
+                boolean changed = m.poll();
+                if (!changed) return;
+                final SessionFieldMapper mapper = m;
+                ui.post(() -> appendNativeMessages(mapper));
+            } catch (Exception ignored) {}
+        });
+    }
+
+    /** 把 events.jsonl 事件流对齐到当前会话（与会话文件同目录同名 .events.jsonl） */
+    private void syncEventsStreamToSession(SessionFieldMapper m) {
+        try {
+            File f = m.file();
+            String name = f.getName();
+            int dot = name.lastIndexOf(".jsonl");
+            String evName = (dot > 0 ? name.substring(0, dot) : name) + ".events.jsonl";
+            File evFile = new File(f.getParentFile(), evName);
+            File cur = (liveEvents != null) ? liveEvents.file() : null;
+            if (evFile.exists() && !evFile.equals(cur)) {
+                // 新会话有专属事件流文件：直接绑定（不取全局最新，避免多项目时选错）
+                startEventsStream(new EventsJSONLParser(evFile));
+            } else if (liveEvents == null) {
+                startEventsStream();
+            }
+        } catch (Exception ignored) {}
     }
 
     /** 把 SessionFieldMapper 新解析出的消息追加渲染为气泡；序号/定位逻辑幂等 */
@@ -5372,10 +6179,16 @@ public class MainActivity extends Activity {
         if (list == null) return;
         java.util.List<SessionFieldMapper.MappedMessage> msgs = m.all();
         if (msgs.size() <= nativeRenderedCount) return;
+        // v2.0.25：只有「正文非空的新 assistant 消息」才算回复落地。
+        // 旧实现在任意新消息（tool/reasoning/user）到达时就复位 genInFlight，
+        // 生成刚开始（reasoning/工具调用先落盘）按钮就被弹回「发送」，无法停止。
+        boolean replyLanded = false;
         for (int i = nativeRenderedCount; i < msgs.size(); i++) {
-            list.addView(renderMessageBubble(msgs.get(i)));
+            SessionFieldMapper.MappedMessage mm = msgs.get(i);
+            list.addView(renderMessageBubble(mm));
+            if (mm.isAssistant() && !mm.content.isEmpty()) replyLanded = true;
         }
-            if (genInFlight) setGenInFlight(false);
+        if (genInFlight && replyLanded) setGenInFlight(false);
         nativeRenderedCount = msgs.size();
         TextView cnt = findViewById(R.id.native_msg_count);
         if (cnt != null) cnt.setText(nativeRenderedCount + " 条");
@@ -5450,12 +6263,12 @@ public class MainActivity extends Activity {
         return wrap;
     }
 
-    /** 切换终端视图 / 原生会话视图（记忆用户选择，重启后恢复） */
+    /** 切换终端视图 / 原生会话视图（与侧滑栏「视图切换」同语义：当前是对话则回终端） */
     private void toggleNativeView() {
         if (nativeViewOn) {
-            enterNativeView();
-        } else {
             exitNativeView();
+        } else {
+            enterNativeView();
         }
     }
 
@@ -5656,13 +6469,13 @@ public class MainActivity extends Activity {
      */
     private void stopNativeGeneration() {
         write("\u001b");
+        // 三连信号无条件发送（v2.0.25 修复：旧实现线程内检查 genInFlight，
+        // 而主线程在启动线程后立刻 setGenInFlight(false)——300ms/600ms 后的
+        // 兜底 Ctrl+C / Esc 永远不可达，实际只发出了第一发 Esc）。
+        // idle 态收到多余 Ctrl+C/Esc 对 reasonix 无副作用（清输入/无操作）。
         new Thread(() -> {
-            try {
-                Thread.sleep(300);
-                if (genInFlight) write("\u0003");   // Ctrl+C 兜底
-                Thread.sleep(300);
-                if (genInFlight) write("\u001b");   // 再补 Esc
-            } catch (Exception ignored) {}
+            try { Thread.sleep(300); write("\u0003"); } catch (Exception ignored) {}   // Ctrl+C 兜底
+            try { Thread.sleep(300); write("\u001b"); } catch (Exception ignored) {}   // 再补 Esc
         }, "native-stop").start();
         setGenInFlight(false);
         pushOutput("\r\n[已发送中断信号（Esc+Ctrl+C）]\r\n");
@@ -5680,7 +6493,12 @@ public class MainActivity extends Activity {
         });
         if (on) {
             final SessionFieldMapper m = sessionMapper;
-            final long sentAt = System.currentTimeMillis() - 3000;   // 容忍 3s 时钟差
+            // 基线：发送时的消息数（v2.0.25 修复「停止按钮 1 秒内被复位」）。
+            // 旧实现从后往前找"任意 assistant 消息"——上一轮的旧 assistant 消息
+            // 首轮轮询（1s）即命中 → setGenInFlight(false) → 按钮立刻弹回「发送」，
+            // 用户根本来不及点停止。现要求出现【基线之后的新】assistant 消息
+            // 且正文非空（空 content 视为 reasoning 占位，不算回复落地）。
+            final int baseline = (m != null) ? m.all().size() : 0;
             new Thread(() -> {
                 // 轮询 jsonl（1s），一旦出现新的 assistant 消息即恢复「发送」；120s 超时兜底
                 for (int i = 0; i < 120 && genInFlight; i++) {
@@ -5688,9 +6506,9 @@ public class MainActivity extends Activity {
                     if (m != null) {
                         m.poll();
                         java.util.List<SessionFieldMapper.MappedMessage> all = m.all();
-                        for (int j = all.size() - 1; j >= 0; j--) {
+                        for (int j = all.size() - 1; j >= baseline; j--) {
                             SessionFieldMapper.MappedMessage msg = all.get(j);
-                            if (msg.isAssistant()) {
+                            if (msg.isAssistant() && !msg.content.isEmpty()) {
                                 setGenInFlight(false);
                                 ui.post(() -> {
                                     appendNativeMessages(m);
@@ -5715,12 +6533,21 @@ public class MainActivity extends Activity {
             batch = sPendingOutput.toString();
             sPendingOutput.setLength(0);
         }
-        if (webView == null) return;
+        final WebView wv = webView;
+        if (wv == null) return;
         final Handler h = new Handler(Looper.getMainLooper());
+        final int chunkCount = (batch.length() + FLUSH_CHUNK - 1) / FLUSH_CHUNK;
         for (int i = 0; i < batch.length(); i += FLUSH_CHUNK) {
             final String part = batch.substring(i, Math.min(batch.length(), i + FLUSH_CHUNK));
-            h.postDelayed(() -> webView.evaluateJavascript("window.onTermData(" + jsQuote(part) + ")", null),
-                    (i / FLUSH_CHUNK) * 80L);
+            final long delay = (i / FLUSH_CHUNK) * 80L;
+            h.postDelayed(() -> {
+                // lambda 执行期才检查（v2.0.25 修复：onDestroy 置空 webView 后滞留分块
+                // 回调触发主线程 NPE 崩溃；捕获执行期引用，失效即丢弃）
+                if (wv == null) return;
+                try {
+                    wv.evaluateJavascript("window.onTermData(" + jsQuote(part) + ")", null);
+                } catch (Exception ignored) {}
+            }, delay);
         }
     }
 
@@ -5754,6 +6581,11 @@ public class MainActivity extends Activity {
         if (sCurrent == this) sCurrent = null;
         stopRootPolling();
         stopEventsStream();   // 停事件流守护线程
+        // 停会话 jsonl 轮询（v2.0.25 修复泄漏：旧实现 postDelayed 链永不停止，
+        // Activity 销毁后仍每秒在主线程做文件 IO 并持有已销毁 Activity）
+        nativePoller.removeCallbacks(nativePollTask);
+        nativePollStarted = false;
+        pollExecutor.shutdownNow();   // 停后台轮询执行器
         // 后台运行模式：环境与 Activity 生命周期解耦，退出 Activity 不杀 proot
         // （由前台服务保活继续后台运行，重新打开时 onCreate 复用环境与终端 I/O）；
         // 关闭模式时照旧清理。

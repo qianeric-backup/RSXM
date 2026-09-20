@@ -124,7 +124,9 @@ public class GitHubManager {
         return r;
     }
 
-    /** 验证并保存 token（登录）：成功返回 true 并记忆用户 */
+    /** 验证并保存 token（登录）：成功返回 true 并记忆用户。
+     *  v2.0.25 修复：仅鉴权失败（401/403）才清除 token——旧实现把网络超时/DNS 故障
+     *  也当成 token 失效 clearToken，一次瞬时网络错误就丢掉刚填的合法 token。 */
     public LoginResult login(String token) {
         saveToken(token);
         LoginResult r = fetchUser();
@@ -134,7 +136,7 @@ public class GitHubManager {
                     .putString("gh_name", r.name)
                     .putString("gh_avatar", r.avatar)
                     .apply();
-        } else {
+        } else if (r.error != null && (r.error.startsWith("HTTP 401") || r.error.startsWith("HTTP 403"))) {
             clearToken();
         }
         return r;

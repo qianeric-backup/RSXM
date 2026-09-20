@@ -6,8 +6,6 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
-import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -61,8 +59,9 @@ public class SessionFieldMapper {
     /** 是否已有内容 */
     public boolean hasMessages() { return !messages.isEmpty(); }
 
-    /** 已解析消息列表（只读使用） */
-    public List<MappedMessage> all() { return messages; }
+    /** 已解析消息列表快照：v2.0.25 起 poll 可能在后台线程执行、all() 在主线程渲染，
+     *  返回浅拷贝快照避免渲染期间后台追加导致 ConcurrentModificationException */
+    public synchronized List<MappedMessage> all() { return new ArrayList<>(messages); }
 
     /** 增量解析：按字节读取并用 CharsetDecoder 增量解码（避免多字节 UTF-8 在块边界截断，
      *  也避免字符/字节偏移混用导致的错位重复读）。无文件/无新增返回 false。 */
@@ -76,29 +75,17 @@ public class SessionFieldMapper {
             byte[] buf = new byte[(int) Math.min(avail, 2 * 1024 * 1024)];
             int n = raf.read(buf);
             if (n <= 0) return false;
-            lastOffset += n;
-            java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
-                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
-                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
-            String text;
-            try {
-                CharBuffer cb = dec.decode(java.nio.ByteBuffer.wrap(buf, 0, n));
-                text = cb.toString();
-            } catch (java.nio.charset.CharacterCodingException e) {
-                // 块尾可能是不完整多字节字符：仅解码完整前缀，剩余字节回退给下次轮询
-                int valid = 0;
-                while (valid < n) {
-                    byte b = buf[valid];
-                    int rem = (b & 0x80) == 0 ? 1
-                            : (b & 0xE0) == 0xC0 ? 2
-                            : (b & 0xF0) == 0xE0 ? 3
-                            : (b & 0xF8) == 0xF0 ? 4 : 1;
-                    if (valid + rem > n) break;
-                    valid += rem;
-                }
-                lastOffset -= (n - valid);
-                text = new String(buf, 0, valid, StandardCharsets.UTF_8);
+            // 行对齐消费（v2.0.25 修复）：只消费到最后一个完整 '\n'，尾部不完整行
+            // （写入方尚未写完的半条 JSON / 半个多字节字符）留在文件里下轮再读。
+            // 旧实现 lastOffset += n 先行推进，尾行被拆成两半各解析一次 → 消息丢失/错乱。
+            // '\n' 不会出现在多字节 UTF-8 序列内部，按它截断天然字符安全。
+            int limit = -1;
+            for (int b = n - 1; b >= 0; b--) {
+                if (buf[b] == '\n') { limit = b; break; }
             }
+            if (limit < 0) return false;   // 本次没有完整行：不推进 offset，等待下次
+            lastOffset += limit + 1;
+            String text = new String(buf, 0, limit + 1, StandardCharsets.UTF_8);
             boolean changed = false;
             for (String line : text.split("\n")) {
                 String s = line.trim();

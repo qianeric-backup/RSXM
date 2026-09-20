@@ -1,0 +1,67 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "版本名（留空则取 build.gradle versionName）"
+        required: false
+        default: ""
+      tag:
+        description: "git tag（留空则自动 v<versionName>）"
+        required: false
+        default: ""
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      - name: Build Release APK
+        run: |
+          cd android-app
+          ./gradlew :app:assembleRelease --no-daemon
+          ls -la app/build/outputs/apk/release/
+
+      - name: Snapshot version
+        id: ver
+        run: |
+          VN=$(grep -oP 'versionName "\K[0-9.]+' android-app/app/build.gradle | head -1)
+          if [ -n "${{ github.event.inputs.version_name }}" ]; then VN="${{ github.event.inputs.version_name }}"; fi
+          echo "ver=$VN" >> "$GITHUB_OUTPUT"
+
+      - name: Copy APK to dist
+        run: |
+          VN="${{ steps.ver.outputs.ver }}"
+          cp android-app/app/build/outputs/apk/release/app-release.apk dist/app-release-$VN.apk
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.ver.outputs.ver }}"
+          name: "RSXM v${{ steps.ver.outputs.ver }}"
+          draft: false
+          prerelease: false
+          files: |
+            dist/app-release-${{ steps.ver.outputs.ver }}.apk
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: dist/app-release-*.apk

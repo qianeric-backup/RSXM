@@ -62,6 +62,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.zip.GZIPInputStream;
 
@@ -2489,6 +2490,7 @@ public class MainActivity extends Activity {
         addV(panel, createDarkSectionTitle("AI 能力"), 12);
         addV(panel, createDarkMenuRow("SKILL", "安装/管理 reasonix 技能", null, () -> showSkillInstallDialog()), 4);
         addV(panel, createDarkMenuRow("MCP 服务器", "管理当前项目 .mcp.json", null, () -> showMcpDialog()), 4);
+        addV(panel, createDarkMenuRow("Serve 模式（无头对话）", "结构化对话/历史回显/回溯/审批，不依赖终端 TUI", null, () -> showServeDialog()), 4);
 
         // 运行模式
         addV(panel, createDarkSectionTitle("运行模式"), 12);
@@ -4517,6 +4519,406 @@ public class MainActivity extends Activity {
         });
         showToast(keysToolbarVisible ? "快捷键工具栏已显示" : "快捷键工具栏已隐藏");
     }
+
+    /* ==================== Serve 模式（reasonix serve 无头 HTTP 引擎） ==================== */
+
+    /** Serve 面板存活标记：面板关闭时轮询线程退出 */
+    private final java.util.concurrent.atomic.AtomicBoolean servePanelActive =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 正在生成中（submit 后到 running=false 之间） */
+    private volatile boolean serveTurnBusy = false;
+    /** 面板控件引用（showServeDialog 每次重写；轮询/点击回调据此刷新） */
+    private TextView serveStatusView;
+    private LinearLayout serveHistoryBox;
+    private TextView serveTodoView;
+    private LinearLayout serveCkBox;
+    private EditText serveInputField;
+
+    /** 构造一个指向当前引擎的客户端（按 port-file 推断端口，token 从持久文件读） */
+    private ReasonixServe serveClient() {
+        int port = ReasonixServe.readBoundPort(getFilesDir());
+        if (port <= 0) port = 8787;
+        return new ReasonixServe(port, ReasonixServe.readToken(getFilesDir()));
+    }
+
+    private void showServeDialog() {
+        servePanelActive.set(true);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(12));
+
+        panel.addView(createDarkTip("Serve 模式：reasonix serve 无头 HTTP 引擎（JSON 接口，无 TUI 依赖）。\n"
+                + "结构化对话/历史回显/checkpoint 回溯/审批模式切换。127.0.0.1 直连，token 持久化。"));
+
+        final TextView status = createDarkResult();
+        status.setMaxLines(3);
+        addV(panel, status, 6);
+        status.setText("… 检测 serve 引擎状态");
+        serveStatusView = status;
+
+        // 启停行
+        LinearLayout ctrl = new LinearLayout(this);
+        ctrl.setOrientation(LinearLayout.HORIZONTAL);
+        Button startBtn = createDarkButton("启动");
+        startBtn.setOnClickListener(v -> serveStart());
+        Button stopBtn = createDarkButton("停止");
+        stopBtn.setOnClickListener(v -> {
+            new Thread(() -> executeInGuest(
+                    "pkill -f 'reasonix.*[s]erve' 2>/dev/null; echo OK", 6), "serve-stop").start();
+            showToast("已发送停止指令");
+        });
+        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bl.rightMargin = dp(6);
+        ctrl.addView(startBtn, bl);
+        ctrl.addView(stopBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        addV(panel, ctrl, 6);
+
+        // 输入 + 发送 / 停止生成 / 新会话
+        final EditText input = createDarkEditText("对 reasonix 说点什么…（Enter 发送）", InputType.TYPE_CLASS_TEXT);
+        serveInputField = input;
+        input.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+                    || (event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER)) {
+                serveSubmit();
+                return true;
+            }
+            return false;
+        });
+        addV(panel, input, 4);
+        LinearLayout sendRow = new LinearLayout(this);
+        sendRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button sendBtn = createDarkButton("发送");
+        sendBtn.setOnClickListener(v -> serveSubmit());
+        Button cancelBtn = createDarkButton("中断");
+        cancelBtn.setOnClickListener(v -> serveCancel());
+        Button newBtn = createDarkButton("新会话");
+        newBtn.setOnClickListener(v -> serveNewSession());
+        sendRow.addView(sendBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        clp.leftMargin = dp(4);
+        sendRow.addView(cancelBtn, clp);
+        addV(panel, sendRow, 6);
+        addV(panel, newBtn, 6);
+
+        // 审批模式切换（/tool-approval-mode）
+        panel.addView(createDarkSectionTitle("工具审批模式"));
+        LinearLayout approveRow = new LinearLayout(this);
+        approveRow.setOrientation(LinearLayout.HORIZONTAL);
+        String[][] modes = {{"manual", "手动"}, {"ask", "询问"}, {"auto", "自动"},
+                {"acceptEdits", "自编辑"}, {"bypassPermissions", "YOLO"}};
+        for (String[] m : modes) {
+            Button mb = createDarkButton(m[1]);
+            mb.setTextSize(12);
+            mb.setOnClickListener(v -> serveSetApprovalMode(m[0]));
+            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            mlp.rightMargin = dp(4);
+            approveRow.addView(mb, mlp);
+        }
+        addV(panel, approveRow, 6);
+
+        // 历史气泡区（复用原生气泡渲染；不依赖 TUI）
+        panel.addView(createDarkSectionTitle("对话历史"));
+        LinearLayout historyBox = new LinearLayout(this);
+        historyBox.setOrientation(LinearLayout.VERTICAL);
+        serveHistoryBox = historyBox;
+        addV(panel, historyBox, 2);
+
+        // Todos
+        panel.addView(createDarkSectionTitle("Todos"));
+        final TextView todoView = createDarkResult();
+        serveTodoView = todoView;
+        addV(panel, todoView, 2);
+        todoView.setText("（读取中…）");
+
+        // Checkpoints
+        panel.addView(createDarkSectionTitle("Checkpoints（点按回溯）"));
+        LinearLayout ckBox = new LinearLayout(this);
+        ckBox.setOrientation(LinearLayout.VERTICAL);
+        serveCkBox = ckBox;
+        addV(panel, ckBox, 2);
+        ckBox.addView(createDarkTip("（读取中…）"));
+
+        showPanel("Serve 模式", panel, () -> servePanelActive.set(false));
+
+        // 首次加载：状态探测 + 就绪则拉历史/extras
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            String st = client.status();
+            if (st != null) {
+                runOnUiThread(() -> serveRenderStatus(st));
+                serveReloadHistory(false);
+                serveRenderExtras();
+            } else if (servePanelActive.get()) {
+                runOnUiThread(() -> serveBeginIdleStatus());
+            }
+        }, "serve-init").start();
+
+        // 面板打开期间轮询（2s）：状态 + 回合结束检测
+        new Thread(() -> {
+            while (servePanelActive.get()) {
+                try { Thread.sleep(2000); } catch (InterruptedException e) { break; }
+                if (!servePanelActive.get()) break;
+                ReasonixServe client = serveClient();
+                String st = client.status();
+                if (st == null) {
+                    if (servePanelActive.get()) runOnUiThread(this::serveBeginIdleStatus);
+                    continue;
+                }
+                runOnUiThread(() -> serveRenderStatus(st));
+                boolean running = client.isRunning();
+                if (serveTurnBusy && !running) {
+                    serveTurnBusy = false;
+                    runOnUiThread(() -> showToast("回复已完成"));
+                    serveReloadHistory(true);
+                    serveRenderExtras();
+                }
+            }
+        }, "serve-poll").start();
+    }
+
+    /** 面板内联兜底文案（引擎离线） */
+    private void serveBeginIdleStatus() {
+        TextView s = serveStatusView;
+        if (s != null) {
+            s.setText("○ serve 未运行（点上方「启动」）");
+            s.setTextColor(0xFF999999);
+        }
+    }
+
+    /** 启动 serve 引擎（guest 内 nohup；token/端口/日志持久化于 /root/.rsxm-serve-*） */
+    private void serveStart() {
+        showToast("正在启动 serve 引擎…");
+        new Thread(() -> {
+            String token = ReasonixServe.readToken(getFilesDir());
+            if (token.isEmpty()) token = ReasonixServe.generateToken();
+            // 宿主侧同步写一份（proot 模式 app uid 可写；chroot 模式 root 属主时此步失败靠 guest 落盘兜底读取）
+            try {
+                java.nio.file.Files.write(
+                        new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath(),
+                        (token + "\n").getBytes(StandardCharsets.UTF_8));
+            } catch (Exception ignored) {}
+            String out = executeInGuest(
+                    "printf '%s\\n' '" + sq(token) + "' > " + ReasonixServe.TOKEN_FILE_GUEST
+                            + "; rm -f " + ReasonixServe.PORT_FILE_GUEST + " " + ReasonixServe.PID_FILE_GUEST + "; "
+                            + "pkill -f 'reasonix.*[s]erve' 2>/dev/null; sleep 0.5; "
+                            + "cd /root; "
+                            + "nohup reasonix serve --addr 127.0.0.1:8787 --auth token "
+                            + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
+                            + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
+                            + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "
+                            + ">" + ReasonixServe.LOG_FILE_GUEST + " 2>&1 & echo SERVE_STARTED", 10);
+            boolean spawned = out != null && out.contains("SERVE_STARTED");
+            ReasonixServe client = serveClient();
+            for (int i = 0; i < 15 && spawned && !client.isUp(); i++) {
+                try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+            }
+            boolean up = client.isUp();
+            runOnUiThread(() -> {
+                if (up) {
+                    showToast("✓ serve 已在线（2 秒后状态自动刷新）");
+                    serveReloadHistory(true);
+                    serveRenderExtras();
+                } else {
+                    TextView s = serveStatusView;
+                    if (s != null) {
+                        s.setText("✗ serve 启动" + (spawned ? "超时：请先在环境里安装/更新 reasonix" : "失败：环境未就绪")
+                                + "（日志 /root/.rsxm-serve.log）");
+                        s.setTextColor(0xFFFF6B6B);
+                    }
+                }
+            });
+        }, "serve-start").start();
+    }
+
+    /** 提交一条消息：POST /submit → user 气泡即时回显 → running=false 后自动刷新历史 */
+    private void serveSubmit() {
+        EditText input = serveInputField;
+        if (input == null) return;
+        String text = input.getText().toString().trim();
+        if (text.isEmpty()) return;
+        input.setText("");
+        ReasonixServe client = serveClient();
+        if (!client.isUp()) {
+            showToast("serve 引擎未在线，请先启动");
+            return;
+        }
+        new Thread(() -> {
+            boolean sent = client.submit(text);
+            if (!sent) {
+                runOnUiThread(() -> showToast("提交失败（引擎未在线或鉴权失败）"));
+                return;
+            }
+            serveTurnBusy = true;
+            runOnUiThread(() -> {
+                LinearLayout box = serveHistoryBox;
+                if (box != null) {
+                    SessionFieldMapper.MappedMessage mm = new SessionFieldMapper.MappedMessage();
+                    mm.role = "user";
+                    mm.content = text;
+                    box.addView(renderMessageBubble(mm));
+                }
+            });
+            // 轮询 /status 直到 running=false（上限 15 分钟）
+            for (int i = 0; i < 900 && serveTurnBusy && servePanelActive.get(); i++) {
+                try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                if (!client.isRunning()) {
+                    serveTurnBusy = false;
+                    runOnUiThread(() -> showToast("回复已完成"));
+                    serveReloadHistory(true);
+                    serveRenderExtras();
+                    break;
+                }
+            }
+            serveTurnBusy = false;   // 超时/面板关闭兜底
+        }, "serve-submit").start();
+    }
+
+    /** POST /cancel 中断当前回合 */
+    private void serveCancel() {
+        currentServeClientSafe().cancel();
+        showToast("已发送中断");
+    }
+
+    /** POST /new 开新会话并重绘历史 */
+    private void serveNewSession() {
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            if (!client.isUp()) {
+                runOnUiThread(() -> showToast("引擎未在线"));
+                return;
+            }
+            client.newSession();
+            runOnUiThread(() -> showToast("已开新会话"));
+            serveReloadHistory(false);
+        }, "serve-new").start();
+    }
+
+    /** POST /tool-approval-mode {"mode": m} 并回显结果 */
+    private void serveSetApprovalMode(String mode) {
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            boolean ok = client.setToolApprovalMode(mode);
+            String cur = ok ? client.toolApprovalMode() : null;
+            runOnUiThread(() -> {
+                TextView s = serveStatusView;
+                if (s != null) {
+                    s.setText(ok ? "✓ 审批模式已切换：" + cur : "✗ 模式切换失败（引擎未在线？）");
+                    s.setTextColor(ok ? 0xFF7FDB8A : 0xFFFF6B6B);
+                }
+            });
+        }, "serve-approve").start();
+    }
+
+    /** 引擎在线性检查包装：在线返回客户端，离线返回 null */
+    private ReasonixServe currentServeClientSafe() {
+        ReasonixServe client = serveClient();
+        return client.isUp() ? client : null;
+    }
+
+    /** 渲染 /status 摘要 */
+    private void serveRenderStatus(String st) {
+        TextView s = serveStatusView;
+        if (s == null) return;
+        try {
+            JSONObject o = new JSONObject(st);
+            JSONObject rt = o.optJSONObject("runtimeState");
+            boolean running = rt != null ? rt.optBoolean("running", false)
+                    : o.optBoolean("running", false);
+            String phase = rt != null ? rt.optString("phase", "") : "";
+            String label = o.optString("label", "");
+            long used = o.optLong("used", 0), window = o.optLong("window", 1);
+            String approve = o.optString("toolApprovalMode", "");
+            String goal = o.optString("goalStatus", "");
+            String text = (running ? "● " : "○ ") + (label.isEmpty() ? "serve 引擎" : label)
+                    + (phase.isEmpty() ? "" : " · " + phase)
+                    + " · 上下文 " + (used / 1000) + "k/" + (window / 1000) + "k"
+                    + " · 审批 " + (approve.isEmpty() ? "?" : approve)
+                    + (goal.isEmpty() || "stopped".equals(goal) ? "" : " · goal:" + goal);
+            s.setText(text);
+            s.setTextColor(running ? 0xFF7FDB8A : 0xFF8BE9FD);
+        } catch (Exception e) {
+            s.setText(st.length() > 160 ? st.substring(0, 160) : st);
+        }
+    }
+
+    /** 拉取 /history 渲染气泡（append=true 增量续补；false 重绘；线程安全） */
+    private void serveReloadHistory(boolean append) {
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            String h = client.history();
+            if (h == null) return;
+            List<SessionFieldMapper.MappedMessage> msgs = ReasonixServe.historyToMessages(h);
+            runOnUiThread(() -> {
+                LinearLayout box = serveHistoryBox;
+                if (box == null) return;
+                if (!append) box.removeAllViews();
+                int start = box.getChildCount();
+                for (int i = Math.max(0, start); i < msgs.size(); i++) {
+                    box.addView(renderMessageBubble(msgs.get(i)));
+                }
+            });
+        }, "serve-history").start();
+    }
+
+    /** 拉取 todos + checkpoints 渲染 */
+    private void serveRenderExtras() {
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            String todos = client.todos();
+            String cks = client.checkpoints();
+            runOnUiThread(() -> {
+                TextView tv = serveTodoView;
+                if (tv != null) {
+                    tv.setText(todos == null ? "（读取失败或为空）" : todos.replace("},{", "},\n{"));
+                }
+            });
+            List<Object[]> rows = new ArrayList<>();
+            if (cks != null) {
+                try {
+                    JSONArray arr = new JSONArray(cks);
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject c = arr.optJSONObject(i);
+                        if (c == null) continue;
+                        rows.add(new Object[]{c.optInt("turn", -1),
+                                c.optString("prompt", ""), c.optLong("time", 0)});
+                    }
+                } catch (Exception ignored) {}
+            }
+            final List<Object[]> fRows = rows;
+            runOnUiThread(() -> {
+                LinearLayout box = serveCkBox;
+                if (box == null) return;
+                box.removeAllViews();
+                if (fRows.isEmpty()) {
+                    box.addView(createDarkTip("（暂无 checkpoint）"));
+                    return;
+                }
+                for (Object[] row : fRows) {
+                    final int turn = (int) row[0];
+                    String p = String.valueOf(row[1]);
+                    if (p.length() > 60) p = p.substring(0, 60) + "…";
+                    LinearLayout line = new LinearLayout(this);
+                    line.setOrientation(LinearLayout.HORIZONTAL);
+                    TextView tvv = new TextView(this);
+                    tvv.setText("T" + turn + " · " + p);
+                    tvv.setTextColor(0xFFC9D1D9);
+                    tvv.setTextSize(12);
+                    tvv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                    line.addView(tvv);
+                    Button rw = createDarkButton("回溯");
+                    rw.setTextSize(11);
+                    rw.setOnClickListener(v -> {
+                        showToast("已请求回溯到 turn " + turn);
+                        new Thread(() -> serveClient().rewind(turn), "serve-rewind").start();
+                    });
+                    line.addView(rw, new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                    box.addView(line);
+                }
+            });
+        }, "serve-extras").start();
+    }
+
 
     /** 更新 reasonix：从手机选择新版文件，或恢复内置版本 */
     private void showUpdateResonixDialog() {

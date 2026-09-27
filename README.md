@@ -19,7 +19,7 @@
 - **GitHub 登录与自动打包**：主屏快捷栏与侧滑栏「GitHub」面板支持输入/保存 GitHub Personal Access Token（仅存本机 `SharedPreferences`，不写入 Linux 环境），`GET /user` 验证登录态并显示账户；一键触发仓库 [RSXM](https://github.com/qianeric-backup/RSXM) 的 `build-release.yml` workflow（`workflow_dispatch`，云端 `assembleRelease`），轮询构建状态，完成后下载构建产物 APK 并经系统安装器安装（token 需 `repo` + `actions` 权限）。
 - **左侧侧滑配置菜单**（DrawerLayout）：
   - **ADB 无线调试**：guest 内自动安装 adb（国内镜像 + 国内 DNS），填写配对码/端口后一键发送配对连接命令到终端，或复制命令、直接跳转无线调试设置。
-  - **API Key 配置**：随时查看/修改 DeepSeek API Key（写入 `~/.reasonix/.env`，保存后自动重启环境）。
+  - **API Key 配置**：随时查看/修改 DeepSeek API Key（写入 `~/.reasonix/.env`，保存后自动重启环境）。支持 **openai / anthropic / responses 三种协议**（下拉切换），可直接粘贴中转站给的**完整端点**（如 `https://host/v1/responses`）：面板自动识别协议、拆出 `base_url` 并写入精确 `request_url`；「测试连通性」按协议依次探测 `/models`、`/v1/messages`、`/responses` 三类端点。
   - **DS2API 网关（内置）**：应用启动时自动在 Linux 环境后台运行内置的 DS2API 服务（上游 [CJackHwang/ds2api](https://github.com/CJackHwang/ds2api) AGPL-3.0，v4.6.1），管理台 `http://127.0.0.1:5001/admin`（初始管理密钥 `rsxm-ds2api-admin`，首次保存配置后持久化到 `/root/ds2api/config.json`）；若旧版 DS2API App 已占用 5001 端口则内置服务不重复启动。
   - **快捷键**：侧滑栏「快捷键」弹出 reasonix 常用按键面板（Enter / Ctrl+A / Ctrl+E / Ctrl+W / Ctrl+U、↑↓、PgUp / PgDn、End、Tab / Shift+Tab、Esc、Ctrl+C、编辑门 y / n / u 等），点击条目即把对应按键序列发送到 reasonix 终端（不追加换行，面板保持打开可连续点按翻页）。
   - **MCP 服务器**：管理当前项目 `.mcp.json`（reasonix 按项目根 `.mcp.json` 的 `mcpServers` 发现 MCP 服务器）：列出已配置服务器（名称/类型/摘要），表单添加/编辑/删除——本地命令型选 stdio（command + args + env），远程选 http/sse（url + headers），支持 `auto_start` 开关（关闭则需在终端手动 `reasonix mcp start`）；`${VAR}` 环境变量按 CLI 原生规则展开；保存后重启环境生效。

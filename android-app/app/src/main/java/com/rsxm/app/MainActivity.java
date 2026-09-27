@@ -3103,8 +3103,9 @@ public class MainActivity extends Activity {
     /** Provider 配置信息（对应 config.toml 的一个 [[providers]] 块） */
     private static class ProviderInfo {
         String name;      // provider 名（default_model 引用）
-        String kind;      // anthropic | openai
+        String kind;      // anthropic | openai | responses
         String baseUrl;   // API 端点
+        String requestUrl;// 精确请求 URL（config.toml 的 request_url，完整端点时才有）
         String apiKeyEnv; // .env 中存储密钥的变量名
         String model;     // 默认模型（default / model 字段）
         List<String> models;   // models=[...] 列表（可选；为空时联网拉取或手工填）
@@ -3123,6 +3124,7 @@ public class MainActivity extends Activity {
         if (conf != null && conf.exists()) {
             try {
                 String name = null, kind = null, baseUrl = null, apiKeyEnv = null, model = null;
+                String requestUrl = null;
                 List<String> models = null;
                 for (String l : new String(java.nio.file.Files.readAllBytes(conf.toPath()),
                         StandardCharsets.UTF_8).split("\n")) {
@@ -3132,9 +3134,12 @@ public class MainActivity extends Activity {
                             // 中间块 flush 同样补 api_key_env 兜底（v2.0.25：旧只在末块兜底，
                             // 中间 provider 的 apiKeyEnv=null → .env 读写落空、删除误判失败）
                             String ae = (apiKeyEnv == null || apiKeyEnv.isEmpty()) ? "API_KEY" : apiKeyEnv;
-                            list.add(new ProviderInfo(name, kind, baseUrl, ae, model, models));
+                            ProviderInfo pi = new ProviderInfo(name, kind, baseUrl, ae, model, models);
+                            pi.requestUrl = requestUrl;
+                            list.add(pi);
                         }
-                        name = null; kind = null; baseUrl = null; apiKeyEnv = null; model = null; models = null;
+                        name = null; kind = null; baseUrl = null; apiKeyEnv = null; model = null;
+                        requestUrl = null; models = null;
                         continue;
                     }
                     if (t.startsWith("[")) continue;   // 其他 section 块跳过
@@ -3145,6 +3150,8 @@ public class MainActivity extends Activity {
                         kind = m.group(1);
                     } else if (baseUrl == null && (m = java.util.regex.Pattern.compile("^base_url\\s*=\\s*\"([^\"]+)\"").matcher(t)).find()) {
                         baseUrl = m.group(1);
+                    } else if (requestUrl == null && (m = java.util.regex.Pattern.compile("^request_url\\s*=\\s*\"([^\"]+)\"").matcher(t)).find()) {
+                        requestUrl = m.group(1);
                     } else if (apiKeyEnv == null && (m = java.util.regex.Pattern.compile("^api_key_env\\s*=\\s*\"([^\"]+)\"").matcher(t)).find()) {
                         apiKeyEnv = m.group(1);
                     } else if (model == null && (m = java.util.regex.Pattern.compile("^(?:default|model)\\s*=\\s*\"([^\"]+)\"").matcher(t)).find()) {
@@ -3164,7 +3171,9 @@ public class MainActivity extends Activity {
                 if (name != null) {
                     // api_key_env 缺失/为空时兜底 API_KEY，避免读写 .env 时落空
                     if (apiKeyEnv == null || apiKeyEnv.isEmpty()) apiKeyEnv = "API_KEY";
-                    list.add(new ProviderInfo(name, kind, baseUrl, apiKeyEnv, model, models));
+                    ProviderInfo pi = new ProviderInfo(name, kind, baseUrl, apiKeyEnv, model, models);
+                    pi.requestUrl = requestUrl;
+                    list.add(pi);
                 }
             } catch (Exception ignored) {}
         }
@@ -3324,56 +3333,79 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 改写 config.toml 中指定 provider 块的 base_url 行（手动修改 API URL），无则插入块尾；返回是否成功 */
-    private boolean setProviderBaseUrl(File conf, String providerName, String newUrl) {
+    /** 改写 config.toml 中指定 provider 块的 kind / base_url / request_url（手动修改 API URL 或协议），
+     *  返回是否成功。requestUrl 为空表示该 provider 不用精确端点，此时会删除块内已有的 request_url
+     *  （否则旧 request_url 会盖住新写入的 base_url，reasonix 仍打旧地址）。 */
+    private boolean setProviderEndpoint(File conf, String providerName, String newBaseUrl,
+                                        String requestUrl, String kind) {
         try {
-            if (conf == null || !conf.exists() || providerName == null || newUrl == null || newUrl.isEmpty()) return false;
+            if (conf == null || !conf.exists() || providerName == null
+                    || newBaseUrl == null || newBaseUrl.isEmpty()) return false;
             List<String> lines = new ArrayList<>(java.nio.file.Files.readAllLines(conf.toPath(), StandardCharsets.UTF_8));
-            boolean inTarget = false, found = false;
-            int insertAfter = -1;
-            for (int i = 0; i < lines.size(); i++) {
-                String t = lines.get(i).trim();
-                if (t.startsWith("[[providers]]")) {
-                    inTarget = false;
-                } else if (t.startsWith("[")) {
-                    inTarget = false;   // 遇其他 section：目标块已结束（防越块改写/插入）
-                    continue;
-                } else if (t.startsWith("name")) {
-                    java.util.regex.Matcher m = java.util.regex.Pattern
-                            .compile("^name\\s*=\\s*\"([^\"]+)\"").matcher(t);
-                    inTarget = m.find() && m.group(1).equals(providerName);
+            // 1) 定位目标 [[providers]] 块 [start, end)
+            int start = -1, end = -1;
+            for (int i = 0; i < lines.size() && start < 0; i++) {
+                if (!lines.get(i).trim().startsWith("[[providers]]")) continue;
+                int j = i + 1;
+                while (j < lines.size()) {
+                    String tj = lines.get(j).trim();
+                    if (tj.startsWith("[[providers]]") || tj.startsWith("[")) break;
+                    j++;
                 }
-                if (inTarget) {
-                    if (t.startsWith("base_url")) {
-                        lines.set(i, "base_url    = \"" + tomlEsc(newUrl) + "\"");
-                        found = true;
+                for (int k = i + 1; k < j; k++) {
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("^name\\s*=\\s*\"([^\"]+)\"").matcher(lines.get(k).trim());
+                    if (m.find()) {
+                        if (m.group(1).equals(providerName)) { start = i; end = j; }
                         break;
                     }
-                    insertAfter = i;
                 }
             }
-            if (!found && insertAfter >= 0) {
-                lines.add(insertAfter + 1, "base_url    = \"" + tomlEsc(newUrl) + "\"");
-                found = true;
+            if (start < 0) return false;
+            // 2) 重建该块：丢弃待改写的三个键行，紧随 name 行写回新值
+            List<String> rebuilt = new ArrayList<>();
+            boolean inserted = false;
+            for (int i = start; i < end; i++) {
+                String t = lines.get(i).trim();
+                if (t.startsWith("base_url") || t.startsWith("request_url") || t.startsWith("kind")) continue;
+                rebuilt.add(lines.get(i));
+                if (!inserted && t.startsWith("name")) {
+                    if (kind != null && !kind.isEmpty()) rebuilt.add("kind        = \"" + tomlEsc(kind) + "\"");
+                    rebuilt.add("base_url    = \"" + tomlEsc(newBaseUrl) + "\"");
+                    if (requestUrl != null && !requestUrl.isEmpty()) {
+                        rebuilt.add("request_url = \"" + tomlEsc(requestUrl) + "\"");
+                    }
+                    inserted = true;
+                }
             }
-            if (found) {
-                java.nio.file.Files.write(conf.toPath(), String.join("\n", lines).getBytes(StandardCharsets.UTF_8));
-                return true;
+            if (!inserted) {   // 结构异常（块内无 name 行）：插到块首
+                int at = 1;
+                if (kind != null && !kind.isEmpty()) rebuilt.add(at++, "kind        = \"" + tomlEsc(kind) + "\"");
+                rebuilt.add(at++, "base_url    = \"" + tomlEsc(newBaseUrl) + "\"");
+                if (requestUrl != null && !requestUrl.isEmpty()) {
+                    rebuilt.add(at, "request_url = \"" + tomlEsc(requestUrl) + "\"");
+                }
             }
-            return false;
+            List<String> out = new ArrayList<>();
+            out.addAll(lines.subList(0, start));
+            out.addAll(rebuilt);
+            out.addAll(lines.subList(end, lines.size()));
+            java.nio.file.Files.write(conf.toPath(), String.join("\n", out).getBytes(StandardCharsets.UTF_8));
+            return true;
         } catch (Exception e) {
-            Log.e(TAG, "set provider base url failed", e);
+            Log.e(TAG, "set provider endpoint failed", e);
             return false;
         }
     }
 
-    /** 联网拉取可选模型列表：优先 GET {base_url}/models（OpenAI 兼容，解析 data[].id）；
-     *  Anthropic 风格端点（kind=anthropic 或 URL 含 /anthropic）追加 GET {base_url}/v1/models
-     *  （x-api-key 鉴权）重试。失败返回 null（UI 保持空列表，可手动填模型名）。 */
+    /** 联网拉取可选模型列表：优先 GET {base}/models（OpenAI 兼容，解析 data[].id）；
+     *  Anthropic 风格端点（kind=anthropic 或 URL 含 /anthropic）追加 GET {base}/v1/models
+     *  （x-api-key 鉴权）重试。失败返回 null（UI 保持空列表，可手动填模型名）。
+     *  传入完整端点（…/v1/responses 等）时先回退到其 base，避免拿端点路径去拼 /models。 */
     private List<String> fetchModelsFromProvider(String baseUrl, String apiKey, String kind) {
         List<String> models = tryFetchModelsOpenAI(baseUrl, apiKey);
         if (models != null && !models.isEmpty()) return models;
-        String base = normalizeBaseUrl(baseUrl);
+        String base = probeBaseOf(baseUrl);
         if (base.isEmpty()) return null;
         boolean anthropicLike = (kind != null && kind.toLowerCase().contains("anthropic"))
                 || base.toLowerCase().contains("/anthropic");
@@ -3384,11 +3416,8 @@ public class MainActivity extends Activity {
         return (models != null && !models.isEmpty()) ? models : null;
     }
 
-    /** OpenAI 风格：GET {base}/models（Bearer 鉴权），解析 data[].id；失败返回 null */
-    private List<String> tryFetchModelsOpenAI(String baseUrl, String apiKey) {
-        String base = normalizeBaseUrl(baseUrl);
-        if (base.isEmpty()) return null;
-        String url = base.endsWith("/models") ? base : base + "/models";
+    /** 单次 GET 模型列表（Bearer 或 x-api-key 鉴权），解析 data[].id；失败返回 null */
+    private List<String> fetchModelsAt(String url, String apiKey, boolean anthropicStyle) {
         java.net.HttpURLConnection conn = null;
         try {
             conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
@@ -3396,8 +3425,10 @@ public class MainActivity extends Activity {
             conn.setReadTimeout(8000);
             conn.setRequestMethod("GET");
             if (apiKey != null && !apiKey.isEmpty()) {
+                if (anthropicStyle) conn.setRequestProperty("x-api-key", apiKey);
                 conn.setRequestProperty("Authorization", "Bearer " + apiKey);
             }
+            if (anthropicStyle) conn.setRequestProperty("anthropic-version", "2023-06-01");
             conn.setRequestProperty("Accept", "application/json");
             int code = conn.getResponseCode();
             if (code == 200) {
@@ -3406,42 +3437,37 @@ public class MainActivity extends Activity {
                 }
             }
         } catch (Exception e) {
-            Log.w(TAG, "fetch models (openai) failed: " + url, e);
+            Log.w(TAG, "fetch models failed: " + url, e);
         } finally {
-            if (conn != null) conn.disconnect();   // 防_keep-alive 连接泄漏
+            if (conn != null) conn.disconnect();   // 防 keep-alive 连接泄漏
         }
         return null;
     }
 
-    /** Anthropic 风格：GET {base}/v1/models（x-api-key + anthropic-version 鉴权），解析 data[].id；失败返回 null */
-    private List<String> tryFetchModelsAnthropic(String baseUrl, String apiKey) {
-        String base = normalizeBaseUrl(baseUrl);
+    /** OpenAI 风格：GET {base}/models（Bearer 鉴权），base 不含 /v1 时再补试 {base}/v1/models；
+     *  解析 data[].id；失败返回 null */
+    private List<String> tryFetchModelsOpenAI(String baseUrl, String apiKey) {
+        String base = probeBaseOf(baseUrl);
         if (base.isEmpty()) return null;
-        String url = base.endsWith("/v1/models") ? base : base + "/v1/models";
-        java.net.HttpURLConnection conn = null;
-        try {
-            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(8000);
-            conn.setRequestMethod("GET");
-            if (apiKey != null && !apiKey.isEmpty()) {
-                conn.setRequestProperty("x-api-key", apiKey);
-                conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+        String url = base.endsWith("/models") ? base : base + "/models";
+        List<String> r = fetchModelsAt(url, apiKey, false);
+        if (r != null && !r.isEmpty()) return r;
+        if (!base.endsWith("/v1")) {
+            String alt = base + "/v1/models";
+            if (!alt.equals(url)) {
+                List<String> r2 = fetchModelsAt(alt, apiKey, false);
+                if (r2 != null && !r2.isEmpty()) return r2;
             }
-            conn.setRequestProperty("anthropic-version", "2023-06-01");
-            conn.setRequestProperty("Accept", "application/json");
-            int code = conn.getResponseCode();
-            if (code == 200) {
-                try (java.io.InputStream in = conn.getInputStream()) {
-                    return parseModelIds(readAllStream(in));
-                }
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "fetch models (anthropic) failed: " + url, e);
-        } finally {
-            if (conn != null) conn.disconnect();
         }
-        return null;
+        return r;
+    }
+
+    /** Anthropic 风格：GET {base}/v1/models（x-api-key + anthropic-version 鉴权），
+     *  base 已含 /v1 时用 {base}/models；解析 data[].id；失败返回 null */
+    private List<String> tryFetchModelsAnthropic(String baseUrl, String apiKey) {
+        String base = probeBaseOf(baseUrl);
+        if (base.isEmpty()) return null;
+        return fetchModelsAt(deriveAnthropicModelsUrl(base), apiKey, true);
     }
 
     // ==================== 连通性测试 ====================
@@ -3454,6 +3480,111 @@ public class MainActivity extends Activity {
         String via;           // 命中的探测端点（/models 或 /v1/messages）
         String detail = "";   // 附加信息（异常摘要/服务端错误摘录）
         List<String> models;  // 探测得到的模型列表（可空）
+    }
+
+    /** 完整端点 URL 的解析结果（中转站/网关常直接给出 `…/v1/responses` 这类精确地址） */
+    private static class EndpointSpec {
+        String kind;        // openai | anthropic | responses
+        String baseUrl;     // 传给 reasonix 的 base_url（reasonix 据此自行补端点路径）
+        String requestUrl;  // 精确请求 URL，写 config.toml 的 request_url
+    }
+
+    /** kind 选项列表（面板下拉：三种协议全兼容，另加自动识别）
+     *  ——reasonix 支持的 provider kind：openai（/chat/completions）、
+     *  anthropic（/v1/messages）、responses（/responses）。 */
+    private static final String[] KIND_OPTIONS = {"auto", "openai", "anthropic", "responses"};
+
+    /** kind 值 → 下拉下标（0=auto；未知/空 → auto） */
+    private int kindIndexOf(String kind) {
+        if (kind != null) {
+            for (int i = 1; i < KIND_OPTIONS.length; i++) {
+                if (KIND_OPTIONS[i].equalsIgnoreCase(kind.trim())) return i;
+            }
+        }
+        return 0;
+    }
+
+    /** 下拉下标 → kind 值（0 → "auto"） */
+    private String kindAt(int pos) {
+        return (pos > 0 && pos < KIND_OPTIONS.length) ? KIND_OPTIONS[pos] : "auto";
+    }
+
+    /** 生效协议：手动选定优先；否则按完整端点识别；再否则沿用 provider 原 kind，最后兜底 openai */
+    private String effectiveKind(String selKind, EndpointSpec spec, String providerKind) {
+        if (selKind != null && !"auto".equals(selKind)) return selKind;
+        if (spec != null && spec.kind != null) return spec.kind;
+        if (providerKind != null && !providerKind.trim().isEmpty()) return providerKind.trim();
+        return "openai";
+    }
+
+    /** 识别「完整端点 URL」（如 https://host/v1/responses）：
+     *  命中则给出协议 kind、精确 request_url，以及去掉端点路径后能供 reasonix 自行拼接的 base_url；
+     *  不是完整端点（如 https://host/v1）时返回 null，保持原有 base_url 语义。
+     *  各协议端点路径前缀不同（Anthropic 由 reasonix 补 /v1/messages，OpenAI/Responses 只用给定前缀），
+     *  故 base_url 按 kind 分别回退，request_url 始终原样保留。 */
+    private EndpointSpec parseEndpointUrl(String rawUrl) {
+        String url = normalizeBaseUrl(rawUrl);
+        if (url.isEmpty()) return null;
+        String lower = url.toLowerCase();
+        EndpointSpec s = new EndpointSpec();
+        s.requestUrl = url;
+        if (lower.endsWith("/chat/completions")) {
+            s.kind = "openai";
+            s.baseUrl = url.substring(0, url.length() - "/chat/completions".length());
+        } else if (lower.endsWith("/responses")) {
+            s.kind = "responses";
+            s.baseUrl = url.substring(0, url.length() - "/responses".length());
+        } else if (lower.endsWith("/messages")) {
+            s.kind = "anthropic";
+            String base = url.substring(0, url.length() - "/messages".length());
+            // reasonix 的 anthropic provider 自己补 /v1/messages：base_url 去掉尾部 /v1，避免叠成 /v1/v1
+            if (base.toLowerCase().endsWith("/v1")) base = base.substring(0, base.length() - "/v1".length());
+            s.baseUrl = base;
+        } else {
+            return null;
+        }
+        if (s.baseUrl == null || s.baseUrl.isEmpty()) return null;   // 裸域名端点（无路径）不接受
+        return s;
+    }
+
+    /** 探测/拉模型用的 base：完整端点回退到其 base_url（…/v1/responses → …/v1），否则原样归一 */
+    private String probeBaseOf(String typedUrl) {
+        EndpointSpec s = parseEndpointUrl(typedUrl);
+        return (s != null) ? s.baseUrl : normalizeBaseUrl(typedUrl);
+    }
+
+    /** 由 base 推导 OpenAI 风格模型列表 URL：base 已含 /v1 时只补 /models */
+    private String deriveModelsUrl(String base) {
+        String b = normalizeBaseUrl(base);
+        if (b.isEmpty()) return "";
+        if (b.endsWith("/models")) return b;
+        return b.endsWith("/v1") ? b + "/models" : b + "/v1/models";
+    }
+
+    /** 由 base 推导 Anthropic 风格模型列表 URL：base 已含 /v1 时只补 /models */
+    private String deriveAnthropicModelsUrl(String base) {
+        String b = normalizeBaseUrl(base);
+        if (b.isEmpty()) return "";
+        if (b.endsWith("/v1/models")) return b;
+        if (b.endsWith("/models")) return b;
+        return b.endsWith("/v1") ? b + "/models" : b + "/v1/models";
+    }
+
+    /** 由 base 推导 Anthropic 消息端点：base 已含 /v1 时用 /messages，否则用 /v1/messages */
+    private String deriveMessagesUrl(String base) {
+        String b = normalizeBaseUrl(base);
+        if (b.isEmpty()) return "";
+        if (b.endsWith("/v1/messages")) return b;
+        if (b.endsWith("/messages")) return b;
+        return b.endsWith("/v1") ? b + "/messages" : b + "/v1/messages";
+    }
+
+    /** 由 base 推导 OpenAI Responses 端点：base 已含 /v1 时用 /responses，否则用 /v1/responses */
+    private String deriveResponsesUrl(String base) {
+        String b = normalizeBaseUrl(base);
+        if (b.isEmpty()) return "";
+        if (b.endsWith("/responses")) return b;
+        return b.endsWith("/v1") ? b + "/responses" : b + "/v1/responses";
     }
 
     /** 归一化 base_url：去首尾空白与尾部 /；无协议时默认补 https:// */
@@ -3477,43 +3608,53 @@ public class MainActivity extends Activity {
      *  耗时网络操作，必须在工作线程调用。 */
     private ProbeResult probeProvider(String baseUrl, String apiKey, String kind, String model) {
         ProbeResult r = new ProbeResult();
-        String base = normalizeBaseUrl(baseUrl);
+        String base = probeBaseOf(baseUrl);   // 完整端点（…/v1/responses 等）先回退到其 base
         if (base.isEmpty()) { r.detail = "API URL 为空"; return r; }
         boolean hasKey = apiKey != null && !apiKey.isEmpty();
-        // ---- 第 1 步：OpenAI 风格 GET /models ----
-        String modelsUrl = base.endsWith("/models") ? base : base + "/models";
-        java.net.HttpURLConnection c1 = null;
-        try {
-            c1 = (java.net.HttpURLConnection) new java.net.URL(modelsUrl).openConnection();
-            c1.setConnectTimeout(8000);
-            c1.setReadTimeout(8000);
-            c1.setRequestMethod("GET");
-            c1.setRequestProperty("Accept", "application/json");
-            if (hasKey) c1.setRequestProperty("Authorization", "Bearer " + apiKey);
-            int code = c1.getResponseCode();
-            r.code = code; r.via = "/models"; r.reachable = true;
-            if (code == 200) {
-                r.authOk = true;
-                try (java.io.InputStream in = c1.getInputStream()) {
-                    r.models = parseModelIds(readAllStream(in));
+        // ---- 第 1 步：OpenAI 风格 GET /models（base 未含 /v1 时再补 /v1/models 兜底）----
+        java.util.List<String> modelsCandidates = new ArrayList<>();
+        if (base.endsWith("/models")) {
+            modelsCandidates.add(base);
+        } else if (base.endsWith("/v1")) {
+            modelsCandidates.add(base + "/models");
+        } else {
+            modelsCandidates.add(base + "/models");
+            modelsCandidates.add(base + "/v1/models");   // 中转站/网关的模型列表多在 /v1 下
+        }
+        for (String modelsUrl : modelsCandidates) {
+            java.net.HttpURLConnection c1 = null;
+            try {
+                c1 = (java.net.HttpURLConnection) new java.net.URL(modelsUrl).openConnection();
+                c1.setConnectTimeout(8000);
+                c1.setReadTimeout(8000);
+                c1.setRequestMethod("GET");
+                c1.setRequestProperty("Accept", "application/json");
+                if (hasKey) c1.setRequestProperty("Authorization", "Bearer " + apiKey);
+                int code = c1.getResponseCode();
+                r.code = code; r.via = "/models"; r.reachable = true;
+                if (code == 200) {
+                    r.authOk = true;
+                    try (java.io.InputStream in = c1.getInputStream()) {
+                        r.models = parseModelIds(readAllStream(in));
+                    }
+                    r.detail = "GET /models 成功";
+                    return r;
                 }
-                r.detail = "GET /models 成功";
-                return r;
+                if (code == 401 || code == 403) {
+                    r.authOk = false;
+                    String err = excerptBody(c1.getErrorStream());
+                    r.detail = !err.isEmpty() ? err : "HTTP " + code;
+                    return r;   // 端点存在但鉴权失败：无需再探测
+                }
+                r.detail = "HTTP " + code;
+            } catch (Exception e) {
+                r.detail = e.getClass().getSimpleName() + ": " + e.getMessage();
+            } finally {
+                if (c1 != null) c1.disconnect();
             }
-            if (code == 401 || code == 403) {
-                r.authOk = false;
-                String err = excerptBody(c1.getErrorStream());
-                r.detail = !err.isEmpty() ? err : "HTTP " + code;
-                return r;   // 端点存在但鉴权失败：无需再探测
-            }
-            r.detail = "HTTP " + code;
-        } catch (Exception e) {
-            r.detail = e.getClass().getSimpleName() + ": " + e.getMessage();
-        } finally {
-            if (c1 != null) c1.disconnect();
         }
         // ---- 第 2 步：Anthropic 风格 POST /v1/messages（最小请求验证鉴权）----
-        String msgUrl = base.endsWith("/v1/messages") ? base : base + "/v1/messages";
+        String msgUrl = deriveMessagesUrl(base);
         java.net.HttpURLConnection c2 = null;
         try {
             c2 = (java.net.HttpURLConnection) new java.net.URL(msgUrl).openConnection();
@@ -3557,6 +3698,46 @@ public class MainActivity extends Activity {
         } finally {
             if (c2 != null) c2.disconnect();
         }
+        // ---- 第 3 步：前两步 404/405 时兜底试 Responses 端点 POST {base}/responses ----
+        if (!r.authOk && (r.code == 404 || r.code == 405)) {
+            java.net.HttpURLConnection c3 = null;
+            try {
+                String respUrl = deriveResponsesUrl(base);
+                c3 = (java.net.HttpURLConnection) new java.net.URL(respUrl).openConnection();
+                c3.setConnectTimeout(8000);
+                c3.setReadTimeout(15000);
+                c3.setRequestMethod("POST");
+                c3.setRequestProperty("Content-Type", "application/json");
+                c3.setDoOutput(true);
+                if (hasKey) c3.setRequestProperty("Authorization", "Bearer " + apiKey);
+                String reqModel = (model != null && !model.isEmpty()) ? model : "deepseek-chat";
+                String body = "{\"model\":\"" + reqModel + "\",\"input\":\"hi\",\"max_output_tokens\":16}";
+                c3.getOutputStream().write(body.getBytes(StandardCharsets.UTF_8));
+                c3.getOutputStream().close();
+                int code = c3.getResponseCode();
+                r.code = code; r.via = "/responses"; r.reachable = true;
+                if (code == 200 || code == 201) {
+                    r.authOk = true;
+                    r.detail = "responses 接口正常";
+                    r.models = new ArrayList<>();
+                    r.models.add(reqModel);
+                } else if (code == 400) {
+                    // 400 = 请求体/模型名问题：端点存在且鉴权通过
+                    r.authOk = true;
+                    String err = excerptBody(c3.getErrorStream());
+                    r.detail = !err.isEmpty() ? err : "HTTP 400（请检查默认模型名）";
+                } else {
+                    if (code == 401 || code == 403) r.authOk = false;
+                    String err = excerptBody(c3.getErrorStream());
+                    r.detail = "HTTP " + code + (!err.isEmpty() ? "：" + err : "");
+                }
+            } catch (Exception e) {
+                String msg = e.getClass().getSimpleName() + ": " + e.getMessage();
+                r.detail = (r.detail == null || r.detail.isEmpty()) ? msg : r.detail + "；" + msg;
+            } finally {
+                if (c3 != null) c3.disconnect();
+            }
+        }
         return r;
     }
 
@@ -3572,6 +3753,9 @@ public class MainActivity extends Activity {
         if (r.authOk && "/v1/messages".equals(r.via)) {
             return "✓ 连通正常，鉴权通过（messages 接口" + (r.code == 400 ? "，请核对默认模型名" : "正常") + "）";
         }
+        if (r.authOk && "/responses".equals(r.via)) {
+            return "✓ 连通正常，鉴权通过（responses 接口" + (r.code == 400 ? "，请核对默认模型名" : "正常") + "）";
+        }
         if (!r.authOk && (r.code == 429 || r.code >= 500)) {
             // v2.0.25：429/5xx 是服务端问题，不是鉴权失败——别让用户白排查 API Key
             return "△ 端点可达，但服务端返回 HTTP " + r.code + "（"
@@ -3581,8 +3765,9 @@ public class MainActivity extends Activity {
             return "✗ 端点可达但鉴权失败（HTTP " + r.code + "）：API Key 无效或未填写\n" + r.detail;
         }
         if (r.code == 404 || r.code == 405) {
-            return "△ 端点可达，但 /models 与 /v1/messages 均不可用（HTTP " + r.code + "）\n"
-                    + "请确认 URL 路径：OpenAI 兼容填 …/v1，Anthropic 兼容填 …/anthropic";
+            return "△ 端点可达，但 /models、/v1/messages 与 /responses 均不可用（HTTP " + r.code + "）\n"
+                    + "请确认 URL 路径：OpenAI 兼容填 …/v1，Anthropic 兼容填 …/anthropic，"
+                    + "或直接粘贴完整端点（如 …/v1/responses）由面板自动拆分";
         }
         return "△ 端点可达（HTTP " + r.code + "），但未通过标准接口验证\n" + r.detail;
     }
@@ -3658,6 +3843,10 @@ public class MainActivity extends Activity {
             sb.append("name        = \"").append(tomlEsc(p.name)).append("\"\n");
             sb.append("kind        = \"").append(tomlEsc(p.kind == null || p.kind.isEmpty() ? "openai" : p.kind)).append("\"\n");
             sb.append("base_url    = \"").append(tomlEsc(p.baseUrl == null ? "" : p.baseUrl)).append("\"\n");
+            // 完整端点（…/v1/responses 等）：精确请求 URL 交给 request_url，reasonix 不再补路径
+            if (p.requestUrl != null && !p.requestUrl.isEmpty()) {
+                sb.append("request_url = \"").append(tomlEsc(p.requestUrl)).append("\"\n");
+            }
             sb.append("model       = \"").append(tomlEsc(p.model)).append("\"\n");
             sb.append("api_key_env = \"").append(tomlEsc(p.apiKeyEnv)).append("\"\n");
             // 静态模型列表持久化（v2.0.25：否则重开面板 parse 后丢失，每次都要重新联网拉取）
@@ -3768,7 +3957,9 @@ public class MainActivity extends Activity {
         List<String> display = new ArrayList<>();
         for (int i = 0; i < providers.size(); i++) {
             ProviderInfo p = providers.get(i);
-            display.add(p.name + "（" + (p.baseUrl != null ? p.baseUrl : "") + "）");
+            String shown = (p.requestUrl != null && !p.requestUrl.isEmpty())
+                    ? p.requestUrl : (p.baseUrl != null ? p.baseUrl : "");
+            display.add(p.name + "（" + shown + "）");
             if (p.name.equals(curModel)) curIdx = i;
         }
         // API Key 输入框：随选中的 provider 切换 hint（api_key_env 变量名）与已存值
@@ -3778,7 +3969,8 @@ public class MainActivity extends Activity {
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), dp(12));
         panel.addView(createDarkTip("选择 AI Provider 并填写其 API Key，可直接修改 API URL 切换端点/代理（保存写回 config.toml）。"
-                + "支持 DeepSeek 及其他任意 OpenAI/Anthropic 兼容服务（Kimi、GLM、MiniMax、OpenRouter 等）。"
+                + "支持 DeepSeek 及其他任意 OpenAI/Anthropic/Responses 兼容服务（Kimi、GLM、MiniMax、OpenRouter、各类中转站等）。"
+                + "中转站给的完整端点可直接粘贴（如 https://host/v1/responses），面板会自动识别协议并写入精确 request_url。"
                 + "建议先「测试连通性」确认 URL 与 Key 可用，再保存重启生效。"));
         // Provider 选择
         panel.addView(createDarkSectionTitle("选择 Provider"));
@@ -3804,14 +3996,45 @@ public class MainActivity extends Activity {
         spinnerLp.topMargin = dp(6);
         panel.addView(providerSpinner, spinnerLp);
         // API URL（base_url）：手动编辑所选 provider 的端点，保存后写回 config.toml（换端点/代理无需重建）
-        panel.addView(createDarkSectionTitle("API URL（base_url）"));
-        final EditText urlInput = createDarkEditText("https://api.deepseek.com/anthropic 或 https://host/v1",
+        panel.addView(createDarkSectionTitle("API URL（base_url 或完整端点）"));
+        final EditText urlInput = createDarkEditText(
+                "https://host/v1 或完整端点如 https://host/v1/responses",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         {
             ProviderInfo p0 = providers.get(Math.max(0, Math.min(curIdx, providers.size() - 1)));
-            urlInput.setText(p0.baseUrl != null ? p0.baseUrl : "");
+            // 优先回显 request_url（精确端点），否则 base_url —— 不改动时保存即等价，不会误删已有 request_url
+            urlInput.setText(p0.requestUrl != null && !p0.requestUrl.isEmpty()
+                    ? p0.requestUrl
+                    : (p0.baseUrl != null ? p0.baseUrl : ""));
         }
         addV(panel, urlInput, 4);
+        // 协议（kind）：三协议全兼容下拉；默认「自动识别」按 URL 末尾路径推断
+        panel.addView(createDarkSectionTitle("协议（kind）"));
+        final Spinner kindSpinner = new Spinner(this);
+        final List<String> kindDisplay = new ArrayList<>();
+        kindDisplay.add("自动识别（按 URL 判断）");
+        kindDisplay.add("openai（/chat/completions）");
+        kindDisplay.add("anthropic（/v1/messages）");
+        kindDisplay.add("responses（/responses）");
+        ArrayAdapter<String> kindAdapter = new ArrayAdapter<String>(
+                this, android.R.layout.simple_spinner_item, kindDisplay) {
+            @Override
+            public android.view.View getView(int pos, android.view.View cv, ViewGroup parent) {
+                TextView tv = (TextView) super.getView(pos, cv, parent);
+                tv.setTextColor(0xFFFFFFFF);
+                tv.setTextSize(14);
+                tv.setPadding(dp(14), dp(10), dp(14), dp(10));
+                tv.setBackgroundColor(0xFF1A1A1A);
+                return tv;
+            }
+        };
+        kindAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        kindSpinner.setAdapter(kindAdapter);
+        kindSpinner.setSelection(kindIndexOf(providers.get(Math.max(0, Math.min(curIdx, providers.size() - 1))).kind));
+        LinearLayout.LayoutParams kindLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
+        kindLp.topMargin = dp(6);
+        panel.addView(kindSpinner, kindLp);
         // API Key：填写所选 provider 的密钥（api_key_env 变量），保存后写入 .env
         panel.addView(createDarkSectionTitle("API Key"));
         addV(panel, input, 6);
@@ -3864,13 +4087,16 @@ public class MainActivity extends Activity {
             int sel = providerSpinner.getSelectedItemPosition();
             if (sel < 0 || sel >= providers.size()) return;
             ProviderInfo p = providers.get(sel);
-            String url = normalizeBaseUrl(urlInput.getText().toString());
+            String typedUrl = urlInput.getText().toString();
+            String url = probeBaseOf(typedUrl);   // 完整端点回退到 base 后探测
             if (url.isEmpty()) {
                 probeStatus.setVisibility(View.VISIBLE);
                 probeStatus.setTextColor(0xFFFF6B6B);
                 probeStatus.setText("✗ 请先填写 API URL");
                 return;
             }
+            final String fKind = effectiveKind(kindAt(kindSpinner.getSelectedItemPosition()),
+                    parseEndpointUrl(typedUrl), p.kind);
             String key = input.getText().toString().trim();
             if (key.isEmpty()) key = readApiKeyFromEnv(env, p.apiKeyEnv);
             String manual = modelManualInput.getText().toString().trim();
@@ -3884,7 +4110,7 @@ public class MainActivity extends Activity {
             probeStatus.setText("… 正在测试 " + url);
             final int reqId = ++modelReqSeq;   // 发起时取号；过期回调不再覆盖下拉
             new Thread(() -> {
-                ProbeResult r = probeProvider(url, fKey, p.kind, fModel);
+                ProbeResult r = probeProvider(url, fKey, fKind, fModel);
                 runOnUiThread(() -> {
                     testBtn.setEnabled(true);
                     testBtn.setText("测试连通性");
@@ -3907,8 +4133,10 @@ public class MainActivity extends Activity {
             int sel = providerSpinner.getSelectedItemPosition();
             if (sel < 0 || sel >= providers.size()) return;
             ProviderInfo p = providers.get(sel);
-            ProviderInfo pe = new ProviderInfo(p.name, p.kind,
-                    normalizeBaseUrl(urlInput.getText().toString()), p.apiKeyEnv, p.model, null);
+            String typedUrl = urlInput.getText().toString();
+            ProviderInfo pe = new ProviderInfo(p.name,
+                    effectiveKind(kindAt(kindSpinner.getSelectedItemPosition()), parseEndpointUrl(typedUrl), p.kind),
+                    probeBaseOf(typedUrl), p.apiKeyEnv, p.model, null);
             String manual = modelManualInput.getText().toString().trim();
             final String hintModel = (!manual.isEmpty() && pe.model != null && !pe.model.isEmpty() && !manual.equals(pe.model))
                     ? manual : pe.model;
@@ -3947,8 +4175,11 @@ public class MainActivity extends Activity {
                     String saved = readApiKeyFromEnv(env, envName);
                     input.setText(saved);
                     input.setSelection(saved.length());
-                    // 同步回显该 provider 的 API URL（可手动修改后保存）
-                    urlInput.setText(p.baseUrl != null ? p.baseUrl : "");
+                    // 同步回显该 provider 的 API URL（可手动修改后保存）：完整端点优先回显 request_url
+                    urlInput.setText(p.requestUrl != null && !p.requestUrl.isEmpty()
+                            ? p.requestUrl
+                            : (p.baseUrl != null ? p.baseUrl : ""));
+                    kindSpinner.setSelection(kindIndexOf(p.kind));   // 协议下拉跟随该 provider
                     modelManualInput.setText("");   // 换 provider 后手动模型名清空，避免误写入
                     // 加载该 provider 的模型列表（静态 models 优先，否则联网拉取，失败兜底）
                     loadModelsForProvider(p, env, modelAdapter, modelSpinner);
@@ -3972,14 +4203,24 @@ public class MainActivity extends Activity {
             try {
                 // 写入 .env 对应变量（保留其他 provider 的 key）
                 upsertEnvVariable(env, envVar, key);
-                // 手动 URL：与 config.toml 不一致时写回（换端点/代理无需重建 provider）
+                // 端点/协议：识别完整端点后统一写回 base_url + request_url + kind
+                //（换端点/代理/中转站无需重建 provider；中转站给的 …/v1/responses 会自动拆成 base + 精确 request_url）
                 boolean urlOk = true;
-                String newUrl = normalizeBaseUrl(urlInput.getText().toString());
-                if (!newUrl.isEmpty() && !newUrl.equals(normalizeBaseUrl(p.baseUrl))) {
-                    urlOk = setProviderBaseUrl(conf, p.name, newUrl);
-                    p.baseUrl = newUrl;   // 同步内存，后续拉模型/展示即时生效
+                String typedUrl = urlInput.getText().toString();
+                EndpointSpec spec = parseEndpointUrl(typedUrl);
+                String effKind = effectiveKind(kindAt(kindSpinner.getSelectedItemPosition()), spec, p.kind);
+                String newBase = (spec != null) ? spec.baseUrl : normalizeBaseUrl(typedUrl);
+                String newReq = (spec != null) ? spec.requestUrl : "";
+                String oldReq = (p.requestUrl != null) ? p.requestUrl : "";
+                boolean changed = !newBase.isEmpty()
+                        && (!newBase.equals(normalizeBaseUrl(p.baseUrl))
+                            || !newReq.equals(oldReq)
+                            || !effKind.equalsIgnoreCase(p.kind == null ? "" : p.kind));
+                if (changed) {
+                    urlOk = setProviderEndpoint(conf, p.name, newBase, newReq, effKind);
+                    p.baseUrl = newBase; p.requestUrl = newReq; p.kind = effKind;   // 同步内存，后续展示即时生效
                     if (fSel < display.size()) {
-                        display.set(fSel, p.name + "（" + newUrl + "）");
+                        display.set(fSel, p.name + "（" + (newReq.isEmpty() ? newBase : newReq) + "）");
                         spinnerAdapter.notifyDataSetChanged();
                     }
                 }
@@ -4064,18 +4305,39 @@ public class MainActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(8), dp(16), dp(12));
-        panel.addView(createDarkTip("新增 AI Provider（OpenAI 或 Anthropic 兼容端点）。"
+        panel.addView(createDarkTip("新增 AI Provider（OpenAI / Anthropic / Responses 兼容端点）。"
+                + "base_url 处可直接粘贴中转站给的完整端点（如 https://host/v1/responses），"
+                + "保存时自动识别协议并拆成 base_url + 精确 request_url。"
                 + "填写后保存到 config.toml，随后在上一页选择该 Provider 填入 API Key。"));
         panel.addView(createDarkSectionTitle("Provider 名称"));
         final EditText nameInput = createDarkEditText("如 my-ai / kimi / glm（default_model 引用名）",
                 InputType.TYPE_CLASS_TEXT);
         addV(panel, nameInput, 4);
         panel.addView(createDarkSectionTitle("kind（协议）"));
-        final android.widget.EditText kindInput = createDarkEditText("anthropic 或 openai（默认 openai）",
-                InputType.TYPE_CLASS_TEXT);
-        addV(panel, kindInput, 4);
+        final Spinner kindSpinner = new Spinner(this);
+        ArrayAdapter<String> kindAdapter = new ArrayAdapter<String>(
+                this, android.R.layout.simple_spinner_item, new ArrayList<>(java.util.Arrays.asList(
+                "自动识别（按 URL 判断）", "openai（/chat/completions）",
+                "anthropic（/v1/messages）", "responses（/responses）"))) {
+            @Override
+            public android.view.View getView(int pos, android.view.View cv, ViewGroup parent) {
+                TextView tv = (TextView) super.getView(pos, cv, parent);
+                tv.setTextColor(0xFFFFFFFF);
+                tv.setTextSize(14);
+                tv.setPadding(dp(14), dp(10), dp(14), dp(10));
+                tv.setBackgroundColor(0xFF1A1A1A);
+                return tv;
+            }
+        };
+        kindAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        kindSpinner.setAdapter(kindAdapter);
+        LinearLayout.LayoutParams addKindLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
+        addKindLp.topMargin = dp(6);
+        panel.addView(kindSpinner, addKindLp);
         panel.addView(createDarkSectionTitle("base_url（API 端点）"));
-        final EditText urlInput = createDarkEditText("OpenAI 兼容如 https://api.moonshot.cn/v1；Anthropic 兼容如 https://api.deepseek.com/anthropic",
+        final EditText urlInput = createDarkEditText(
+                "https://api.moonshot.cn/v1；Anthropic 兼容 https://api.deepseek.com/anthropic；或完整端点 https://host/v1/responses",
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         addV(panel, urlInput, 4);
         panel.addView(createDarkSectionTitle("默认模型"));
@@ -4122,9 +4384,11 @@ public class MainActivity extends Activity {
         addV(panel, probeStatus, 6);
         // 「测试连通性」：用当前填写的 base_url + .env 已存 key（可能为空）探测端点与鉴权
         testBtn.setOnClickListener(v -> {
-            String baseUrl = normalizeBaseUrl(urlInput.getText().toString());
+            String typedUrl = urlInput.getText().toString();
+            String baseUrl = probeBaseOf(typedUrl);
             String envVar = envInput.getText().toString().trim();
-            String kind = kindInput.getText().toString().trim();
+            String kind = effectiveKind(kindAt(kindSpinner.getSelectedItemPosition()),
+                    parseEndpointUrl(typedUrl), null);
             if (baseUrl.isEmpty()) {
                 probeStatus.setVisibility(View.VISIBLE);
                 probeStatus.setTextColor(0xFFFF6B6B);
@@ -4159,9 +4423,11 @@ public class MainActivity extends Activity {
         });
         // 「拉取模型」：读 base_url + .env 中该 api_key_env 的 key（可为空→静态表兜底）联网列出可选模型
         pullBtn.setOnClickListener(v -> {
-            String baseUrl = normalizeBaseUrl(urlInput.getText().toString());   // 与 testBtn 一致（尾斜杠/空格归一）
+            String typedUrl = urlInput.getText().toString();
+            String baseUrl = probeBaseOf(typedUrl);   // 与 testBtn 一致（完整端点回退 + 尾斜杠/空格归一）
             String envVar = envInput.getText().toString().trim();
-            String kind = kindInput.getText().toString().trim();
+            String kind = effectiveKind(kindAt(kindSpinner.getSelectedItemPosition()),
+                    parseEndpointUrl(typedUrl), null);
             if (baseUrl.isEmpty() || envVar.isEmpty()) {
                 probeStatus.setVisibility(View.VISIBLE);
                 probeStatus.setTextColor(0xFFFFD166);
@@ -4198,9 +4464,13 @@ public class MainActivity extends Activity {
         Button okBtn = createDarkButton("保存 Provider");
         okBtn.setOnClickListener(v -> {
             String name = nameInput.getText().toString().trim();
-            String baseUrl = urlInput.getText().toString().trim();
+            String typedUrl = urlInput.getText().toString().trim();
             String envVar = envInput.getText().toString().trim();
-            String kind = kindInput.getText().toString().trim();
+            // 完整端点（…/v1/responses 等）：自动识别协议并拆成 base_url + 精确 request_url
+            EndpointSpec spec = parseEndpointUrl(typedUrl);
+            String kind = effectiveKind(kindAt(kindSpinner.getSelectedItemPosition()), spec, null);
+            String baseUrl = (spec != null) ? spec.baseUrl : normalizeBaseUrl(typedUrl);
+            String reqUrl = (spec != null) ? spec.requestUrl : "";
             // 默认模型：优先取 Spinner 选中项；未拉取时以 provider 名为默认（reasonix 以 provider 名解析）
             String model = modelSpinner.getSelectedItem() != null
                     ? modelSpinner.getSelectedItem().toString().trim() : "";
@@ -4215,6 +4485,7 @@ public class MainActivity extends Activity {
             }
             if (model.isEmpty()) model = name;
             ProviderInfo np = new ProviderInfo(name, kind, baseUrl, envVar, model);
+            np.requestUrl = reqUrl;
             // 把拉取到的模型列表一并写入 provider 块（主面板可直接选中，无需再联网）
             np.models = new ArrayList<>();
             for (int i = 0; i < modelAdapter.getCount(); i++) {
@@ -4224,7 +4495,8 @@ public class MainActivity extends Activity {
             if (addProviderToConfig(conf, np)) {
                 upsertEnvVariable(env, envVar, "");   // 预建空变量占位（用户回上一页填 key）
                 providers.add(np);
-                pushOutput("\r\n[Provider 已添加：" + name + "（" + baseUrl + "），回到上一页选择并填写 API Key]\r\n");
+                pushOutput("\r\n[Provider 已添加：" + name + "（" + (reqUrl.isEmpty() ? baseUrl : reqUrl)
+                        + "，kind=" + kind + "），回到上一页选择并填写 API Key]\r\n");
                 // 重开面板（选中新 provider）
                 showApiKeyConfigDialog();
             } else {

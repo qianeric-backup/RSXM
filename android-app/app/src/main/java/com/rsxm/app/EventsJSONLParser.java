@@ -136,20 +136,27 @@ public class EventsJSONLParser {
         }
     }
 
-    /** 解析一条事件补丁（type=append/replace/truncate）。解析异常返回 false 不中断整体。 */
+    /** 解析一条事件；兼容两种落盘格式：
+     *  旧：{"type":"append|replace|truncate","revision":N,"messages":[{role,content,...}]}
+     *  新（schema_version 2，见 v1.38+ 实际落盘）：{"type":"message","id":...,"msgs":[{...}]}
+     *  以及元事件（type:"log"/"writer"/"projection_ack" 等）→ 忽略。
+     *  解析异常返回 false 不中断整体。 */
     private boolean parseLine(String line) {
         try {
             JSONObject o = new JSONObject(line);
             String type = o.optString("type", "");
             long rev = o.optLong("revision", -1);
+            if (rev < 0) rev = o.optLong("sequence", o.optLong("seq", o.optLong("schema_version", -1)));
             if (rev >= 0) lastRevision = rev;
             if ("truncate".equals(type)) {
                 pendingText.setLength(0);
                 return true;
             }
-            if (!"append".equals(type) && !"replace".equals(type)) return false;
+            // messages（旧格式）/ msgs（新 schema v2：一条 message 事件携带该消息快照）
             JSONArray msgs = o.optJSONArray("messages");
+            if (msgs == null) msgs = o.optJSONArray("msgs");
             if (msgs == null) return false;
+            if (!"append".equals(type) && !"replace".equals(type) && !"message".equals(type)) return false;
             for (int i = 0; i < msgs.length(); i++) {
                 JSONObject m = msgs.optJSONObject(i);
                 if (m == null) continue;

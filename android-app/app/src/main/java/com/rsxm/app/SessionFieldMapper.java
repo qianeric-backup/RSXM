@@ -46,11 +46,27 @@ public class SessionFieldMapper {
     }
 
     private final File sessionFile;
+    private final File metaFile;              // <session>.jsonl.meta：会话级元信息（模型名等）
+    private String sessionModel = "";         // 会话模型引用（provider/model），来自 meta
     private long lastOffset = 0;              // 已解析到文件的字节偏移（增量续读）
     private final List<MappedMessage> messages = new ArrayList<>();
 
     public SessionFieldMapper(File sessionFile) {
         this.sessionFile = sessionFile;
+        this.metaFile = (sessionFile != null) ? new File(sessionFile.getPath() + ".meta") : null;
+        this.sessionModel = readSessionModel(metaFile);
+    }
+
+    /** 读 &lt;session&gt;.jsonl.meta 的 model 字段（形如 "provider/model"）。
+     *  v1.38+ 的 transcript 投影消息行只有 {role,id,content,...}，**不含 model**——
+     *  会话级模型名只写在这个 meta 里，GUI 的「AI · 模型」标签必须靠它回填。 */
+    private static String readSessionModel(File meta) {
+        if (meta == null || !meta.exists()) return "";
+        try {
+            String s = new String(java.nio.file.Files.readAllBytes(meta.toPath()), StandardCharsets.UTF_8);
+            return new JSONObject(s).optString("model", "");
+        } catch (Exception ignored) {}
+        return "";
     }
 
     /** 当前映射的 jsonl 路径 */
@@ -58,6 +74,10 @@ public class SessionFieldMapper {
 
     /** 是否已有内容 */
     public boolean hasMessages() { return !messages.isEmpty(); }
+
+    /** 会话模型引用（provider/model，如 packyapi/deepseek-v4-flash）；未取到返回空串。
+     *  渲染层用它回填「meta 在气泡渲染之后才写盘」的 assistant 消息。 */
+    public synchronized String sessionModel() { return sessionModel; }
 
     /** 已解析消息列表快照：v2.0.25 起 poll 可能在后台线程执行、all() 在主线程渲染，
      *  返回浅拷贝快照避免渲染期间后台追加导致 ConcurrentModificationException */
@@ -67,6 +87,9 @@ public class SessionFieldMapper {
      *  也避免字符/字节偏移混用导致的错位重复读）。无文件/无新增返回 false。 */
     public synchronized boolean poll() {
         if (sessionFile == null || !sessionFile.exists()) return false;
+        // meta 可能在会话进行中才写入 model（首轮时为空）：未取到就每轮补读一次，
+        // 一旦拿到会话模型名，后续 assistant 气泡即可显示「AI · provider/model」
+        if (sessionModel.isEmpty()) sessionModel = readSessionModel(metaFile);
         long size = sessionFile.length();
         if (size <= lastOffset) return false;
         try (RandomAccessFile raf = new RandomAccessFile(sessionFile, "r")) {
@@ -127,6 +150,9 @@ public class SessionFieldMapper {
             m.role = role;
             m.tsText = fmtTs(firstTs(root, o));
             m.model = firstOf(root, "model", "");
+            if (m.model.isEmpty()) m.model = firstOf(o, "model", "");
+            // 新版 transcript 投影不带 model：回退到 meta 的会话级模型（provider/model）
+            if (m.model.isEmpty() && "assistant".equals(role)) m.model = sessionModel;
             m.content = extractContent(root);
             m.usageText = extractUsage(root);
             if ("tool".equals(role)) {
@@ -164,7 +190,13 @@ public class SessionFieldMapper {
     }
 
     private static boolean hasAnyRole(JSONObject o) {
-        return o != null && (o.has("role") || o.has("kind"));
+        if (o == null) return false;
+        if (o.has("role")) return true;
+        // kind：仅当能归一为已知角色时才视为消息容器。新版事件流（turns.jsonl /
+        // events.jsonl schema v2）顶层也有 kind，但取值是 turn_status / turn_phase /
+        // stream_attempt 等事件类型——旧实现在这里直接放行，把事件顶层当消息对象，
+        // 于是所有行都被当垃圾丢弃（GUI 一条消息都出不来）。
+        return o.has("kind") && !normalizeRole(o.optString("kind", "")).isEmpty();
     }
 
     private static String normalizeRole(String role) {

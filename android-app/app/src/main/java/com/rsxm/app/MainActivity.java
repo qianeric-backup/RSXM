@@ -1248,9 +1248,13 @@ public class MainActivity extends Activity {
                         java.util.Arrays.sort(pds, java.util.Comparator.comparing(File::getName));
                         for (File pd : pds) {
                             File sessions = new File(pd, "sessions");
+                            // 只认 transcript 投影 <id>.jsonl：排除 events/turns/conflicts 等
+                            // 事件流——它们不含 role/content/model，且 lastModified 更新，
+                            // 一旦被选中就会挤掉真正的会话文件（GUI 无气泡、无模型名）
                             File[] files = sessions.listFiles((d, n) ->
                                     n.endsWith(".jsonl") && !n.startsWith(".")
                                             && !n.endsWith(".events.jsonl") && !n.endsWith(".conflicts.jsonl")
+                                            && !n.endsWith(".turns.jsonl")
                                             && !n.endsWith(".recovery.json") && !n.endsWith(".recovery")
                                             && !n.contains(".lease."));
                             if (files == null || files.length == 0) continue;
@@ -6539,6 +6543,9 @@ public class MainActivity extends Activity {
     private volatile SessionFieldMapper sessionMapper;
     /** 已渲染的消息数量（增量追加气泡） */
     private int nativeRenderedCount = 0;
+    /** 已针对哪个会话做过「模型名补绘」（<id>.jsonl.meta 后落盘时整表重绘一次）；
+     *  换会话（mapper 实例变化）自动失效，无需在切视图/新会话处手动重置 */
+    private SessionFieldMapper nativeModelRefilledFor = null;
     // ---- PTY 实时流（剥离 TUI 组件，只显示真实文本输出）----
     private final StringBuilder nativeLiveStream = new StringBuilder();
     private volatile boolean nativeLiveDirty = false;
@@ -6849,6 +6856,25 @@ public class MainActivity extends Activity {
         LinearLayout list = findViewById(R.id.native_output);
         if (list == null) return;
         java.util.List<SessionFieldMapper.MappedMessage> msgs = m.all();
+        // 会话模型名（<id>.jsonl.meta）可能在首轮气泡渲染之后才落盘：一旦取到就整表重绘一次，
+        // 把此前缺 model 的 AI 气泡补上「· provider/model」。用 mapper 实例做标记，换会话自动重置。
+        boolean modelRefilled = false;
+        String sm = m.sessionModel();
+        if (m != nativeModelRefilledFor && !sm.isEmpty()) {
+            nativeModelRefilledFor = m;
+            boolean anyMissing = false;
+            for (SessionFieldMapper.MappedMessage x : msgs) {
+                if (x.isAssistant() && x.model.isEmpty()) { anyMissing = true; break; }
+            }
+            if (anyMissing) {
+                for (SessionFieldMapper.MappedMessage x : msgs) {
+                    if (x.isAssistant() && x.model.isEmpty()) x.model = sm;
+                }
+                list.removeAllViews();
+                nativeRenderedCount = 0;
+                modelRefilled = true;
+            }
+        }
         if (msgs.size() <= nativeRenderedCount) return;
         // v2.0.25：只有「正文非空的新 assistant 消息」才算回复落地。
         // 旧实现在任意新消息（tool/reasoning/user）到达时就复位 genInFlight，
@@ -6856,10 +6882,13 @@ public class MainActivity extends Activity {
         boolean replyLanded = false;
         for (int i = nativeRenderedCount; i < msgs.size(); i++) {
             SessionFieldMapper.MappedMessage mm = msgs.get(i);
+            // 渲染前回填会话模型名：meta 可能在本条气泡解析之后才写盘（首轮取不到）
+            if (mm.isAssistant() && mm.model.isEmpty()) mm.model = sm;
             list.addView(renderMessageBubble(mm));
             if (mm.isAssistant() && !mm.content.isEmpty()) replyLanded = true;
         }
-        if (genInFlight && replyLanded) setGenInFlight(false);
+        // 整表重绘不代表有回复落地：不能借此复位 genInFlight（否则生成中「停止」按钮被弹回）
+        if (genInFlight && replyLanded && !modelRefilled) setGenInFlight(false);
         nativeRenderedCount = msgs.size();
         TextView cnt = findViewById(R.id.native_msg_count);
         if (cnt != null) cnt.setText(nativeRenderedCount + " 条");
@@ -7056,9 +7085,11 @@ public class MainActivity extends Activity {
             if (pds != null) {
                 for (File pd : pds) {
                     File sessions = new File(pd, "sessions");
+                    // 排除事件流（.turns.jsonl 等）：只保留 transcript 投影
                     File[] files = sessions.listFiles((d, n) ->
                             n.endsWith(".jsonl") && !n.startsWith(".")
                                     && !n.endsWith(".events.jsonl") && !n.endsWith(".conflicts.jsonl")
+                                    && !n.endsWith(".turns.jsonl")
                                     && !n.endsWith(".recovery.json") && !n.endsWith(".recovery")
                                     && !n.contains(".lease."));
                     if (files == null) continue;

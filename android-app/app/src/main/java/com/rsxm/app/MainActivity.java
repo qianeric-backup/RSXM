@@ -3235,6 +3235,10 @@ public class MainActivity extends Activity {
      *  的模型名经 setProviderDefaultModel 写进新 provider 块（config 写脏）。 */
     private volatile int modelReqSeq = 0;
 
+    /** 最近一次「拉取模型」的失败原因（URL + HTTP 状态码 + 服务端原文），
+     *  供 UI 直接展示——401/403 这类鉴权失败以前只显示「未能获取模型列表」，无从定位 */
+    private volatile String lastModelFetchError = "";
+
     private void loadModelsForProvider(final ProviderInfo p, final File env,
                                        final ArrayAdapter<String> modelAdapter, final Spinner modelSpinner) {
         if (p == null) return;
@@ -3436,11 +3440,15 @@ public class MainActivity extends Activity {
             conn.setRequestProperty("Accept", "application/json");
             int code = conn.getResponseCode();
             if (code == 200) {
+                lastModelFetchError = "";
                 try (java.io.InputStream in = conn.getInputStream()) {
                     return parseModelIds(readAllStream(in));
                 }
             }
+            String err = excerptBody(conn.getErrorStream());
+            lastModelFetchError = url + " → HTTP " + code + (err.isEmpty() ? "" : "：" + err);
         } catch (Exception e) {
+            lastModelFetchError = url + " → " + e.getClass().getSimpleName() + ": " + e.getMessage();
             Log.w(TAG, "fetch models failed: " + url, e);
         } finally {
             if (conn != null) conn.disconnect();   // 防 keep-alive 连接泄漏
@@ -4165,6 +4173,21 @@ public class MainActivity extends Activity {
                         }
                     }
                     modelSpinner.setSelection(idx);
+                    // 拉取失败给出原因（旧实现静默清空下拉，401 时用户完全不知道为何没有模型）
+                    if (finalList.isEmpty()) {
+                        String why = lastModelFetchError;
+                        probeStatus.setVisibility(View.VISIBLE);
+                        if (why.contains("HTTP 401") || why.contains("HTTP 403")) {
+                            probeStatus.setTextColor(0xFFFF6B6B);
+                            probeStatus.setText("✗ 该端点的模型列表需要鉴权：请在上方 API Key 框填写后重试\n" + why);
+                        } else if (why.isEmpty()) {
+                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setText("△ 未获取到模型列表（端点可能无 /models 接口），可用「模型名（手动输入）」");
+                        } else {
+                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setText("△ 未获取到模型列表：\n" + why);
+                        }
+                    }
                 });
             }, "rx-fetch-models").start();
         });
@@ -4312,6 +4335,7 @@ public class MainActivity extends Activity {
         panel.addView(createDarkTip("新增 AI Provider（OpenAI / Anthropic / Responses 兼容端点）。"
                 + "base_url 处可直接粘贴中转站给的完整端点（如 https://host/v1/responses），"
                 + "保存时自动识别协议并拆成 base_url + 精确 request_url。"
+                + "模型列表需要鉴权的端点（如 packyapi）请先填下方 API Key 再点「拉取模型」。"
                 + "填写后保存到 config.toml，随后在上一页选择该 Provider 填入 API Key。"));
         panel.addView(createDarkSectionTitle("Provider 名称"));
         final EditText nameInput = createDarkEditText("如 my-ai / kimi / glm（default_model 引用名）",
@@ -4368,6 +4392,12 @@ public class MainActivity extends Activity {
         final EditText envInput = createDarkEditText("如 KIMI_API_KEY（大写字母数字下划线）",
                 InputType.TYPE_CLASS_TEXT);
         addV(panel, envInput, 4);
+        // API Key：很多中转站/网关的模型列表与请求都要鉴权（packyapi 无 key 直接 401），
+        // 表单内先填才能「拉取模型」；保存 Provider 时一并写入 .env（留空则只登记变量名）
+        panel.addView(createDarkSectionTitle("API Key（保存时写入 .env）"));
+        final EditText keyInput = createDarkEditText("粘贴该端点的 API Key（拉取模型/连通性测试需要）",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        addV(panel, keyInput, 4);
         // 操作行：「拉取模型」+「测试连通性」并排；结果共用下方状态区
         LinearLayout probeRow = new LinearLayout(this);
         probeRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -4399,7 +4429,9 @@ public class MainActivity extends Activity {
                 probeStatus.setText("✗ 请先填写 base_url");
                 return;
             }
-            String key = readApiKeyFromEnv(env, envVar);
+            // 表单填了就用表单值，否则回退 .env 已存值（final：下方工作线程 lambda 要用）
+            String formKey = keyInput.getText().toString().trim();
+            final String key = !formKey.isEmpty() ? formKey : readApiKeyFromEnv(env, envVar);
             testBtn.setEnabled(false);
             testBtn.setText("测试中…");
             probeStatus.setVisibility(View.VISIBLE);
@@ -4425,11 +4457,12 @@ public class MainActivity extends Activity {
                 });
             }, "rx-probe-new").start();
         });
-        // 「拉取模型」：读 base_url + .env 中该 api_key_env 的 key（可为空→静态表兜底）联网列出可选模型
+        // 「拉取模型」：用 base_url + 表单里填的 API Key（未填则回退 .env 已存值）联网列出可选模型
         pullBtn.setOnClickListener(v -> {
             String typedUrl = urlInput.getText().toString();
             String baseUrl = probeBaseOf(typedUrl);   // 与 testBtn 一致（完整端点回退 + 尾斜杠/空格归一）
             String envVar = envInput.getText().toString().trim();
+            final String typedKey = keyInput.getText().toString().trim();   // View 只能在 UI 线程读
             String kind = effectiveKind(kindAt(kindSpinner.getSelectedItemPosition()),
                     parseEndpointUrl(typedUrl), null);
             if (baseUrl.isEmpty() || envVar.isEmpty()) {
@@ -4442,7 +4475,7 @@ public class MainActivity extends Activity {
             pullBtn.setText("拉取中…");
             final int reqId = ++modelReqSeq;   // 过期拉取结果不覆盖下拉
             new Thread(() -> {
-                String key = readApiKeyFromEnv(env, envVar);
+                String key = !typedKey.isEmpty() ? typedKey : readApiKeyFromEnv(env, envVar);
                 List<String> fetched = fetchModelsFromProvider(baseUrl, key, kind);
                 // 不要兜底：拉取失败/无 /models 时保持空列表（不显示任何模型）
                 final List<String> finalList = (fetched != null) ? fetched : new ArrayList<String>();
@@ -4456,8 +4489,18 @@ public class MainActivity extends Activity {
                     modelSpinner.setSelection(0);
                     probeStatus.setVisibility(View.VISIBLE);
                     if (finalList.isEmpty()) {
-                        probeStatus.setTextColor(0xFFFFD166);
-                        probeStatus.setText("△ 未能获取模型列表（端点可能无 /models 接口），可保存后用「手动输入模型名」");
+                        // 失败原因直接展示（旧实现只会说「未能获取模型列表」，401 无从定位）
+                        String why = lastModelFetchError;
+                        if (why.contains("HTTP 401") || why.contains("HTTP 403")) {
+                            probeStatus.setTextColor(0xFFFF6B6B);
+                            probeStatus.setText("✗ 该端点的模型列表需要鉴权：请在上方填写 API Key 后重试\n" + why);
+                        } else if (why.isEmpty()) {
+                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setText("△ 未能获取模型列表（端点可能无 /models 接口），可保存后用「手动输入模型名」");
+                        } else {
+                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setText("△ 未能获取模型列表：\n" + why + "\n可保存后用「手动输入模型名」");
+                        }
                     } else {
                         probeStatus.setTextColor(0xFF7CD97C);
                         probeStatus.setText("✓ 拉取成功，" + finalList.size() + " 个模型可选");
@@ -4497,7 +4540,8 @@ public class MainActivity extends Activity {
                 if (s != null && !s.isEmpty()) np.models.add(s);
             }
             if (addProviderToConfig(conf, np)) {
-                upsertEnvVariable(env, envVar, "");   // 预建空变量占位（用户回上一页填 key）
+                // 表单里填了 API Key 就直接写入 .env（留空则只登记变量名，回主面板再填）
+                upsertEnvVariable(env, envVar, keyInput.getText().toString().trim());
                 providers.add(np);
                 pushOutput("\r\n[Provider 已添加：" + name + "（" + (reqUrl.isEmpty() ? baseUrl : reqUrl)
                         + "，kind=" + kind + "），回到上一页选择并填写 API Key]\r\n");

@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- **一键进入 RSXM（GUI 默认）**：打开 APK → 自动解压 Alpine Linux → 启动 reasonix 交互会话，**默认进入原生 GUI 会话视图**（字段映射气泡 + 原生输入框）；快捷栏「视图」或返回键可切回 CLI 终端；退出 reasonix 后落到 Alpine shell。
+- **一键进入 RSXM（GUI 默认）**：打开 APK → 自动解压 Alpine Linux → 启动 reasonix 交互会话，**默认进入原生 GUI 会话视图**（serve 的 transcript 投影驱动 + 原生输入框）；快捷栏「视图」或返回键可切回 CLI 终端；退出 reasonix 后落到 Alpine shell。
 - **完整 proot 环境**：`proot -0` 免 root 运行 Alpine 3.20（arm64），可 `apk add` 安装任意工具。
 - **真实 TTY**：内置自编译 `pty-bridge`（静态 musl）创建 PTY，reasonix 的 TUI 完整可用（含鼠标滚轮滚动）。
 - **屏幕自适应**：终端按手机视口自动计算行列并实时同步 PTY（旋转/软键盘自动重排）。
@@ -14,7 +14,8 @@
 - **纯黑主题（顶边栏仅菜单）**：全局纯黑界面——顶部仅保留「☰ 菜单」入口（其余功能收进侧滑栏/高级设置）；GUI 输入框、新会话、回终端等控件均为黑底白字。
 - **顶边栏（仅菜单）**：顶部快捷栏仅保留「☰ 菜单」一个入口，所有功能经侧滑栏进入（ADB / API Key / GitHub / DS2API / 更新 / 项目 / 会话 / 视图切换 / 高级设置）。
 - **侧边栏精简 + 高级设置二级菜单**：侧滑栏仅保留高频项（ADB / API Key / GitHub / DS2API / 更新 / 项目 / 会话 / 高级设置）；ROOT、开发环境、SKILL、MCP、后台运行、YOLO 免审批、滑动速度、快捷键等收进「高级设置」二级面板（点按对应行进入功能页，返回箭头关闭）。
-- **双视图切换（终端 / GUI 对话）**：侧滑栏「视图切换」在 xterm.js 终端与原生会话视图间切换——原生视图以 **PTY 实时流**（剥离 ANSI 的终端输出气泡，保证回显不依赖会话文件）为主通道，同时把 reasonix 会话 jsonl（`role`/`content`/`model`/`usage` 等字段）映射为结构化气泡补充；- **破甲环境（Guardian 已禁用）**：内置 reasonix Guardian 高风险审查会 deny 破甲任务，v2.0.5 起在 `~/.reasonix/config.toml` 写入 `guardian_model = ""`（Guardian 因模型缺失自动禁用）：user 消息靠右蓝色气泡、assistant 靠左（带模型标签与 token 统计）、tool 灰色等宽体（含工具名），顶部信息条显示当前会话文件；配原生输入框（Enter/发送按钮，发送即映射为 user 气泡）。相比整屏文本渲染，字段映射按角色/时间/模型结构化展示，规避 WebView 黑屏与排版错乱；同时修复了环境输出按 8KB 块解码导致中文乱码的根因（CharsetDecoder 增量解码）。
+- **双视图切换（终端 / GUI 对话）**：侧滑栏「视图切换」在 xterm.js 终端与原生会话视图间切换。原生视图的内容**全部来自 reasonix serve 的 transcript 投影**（Transcript v2 协议，与官方桌面版 ChatSource、以及 TUI 渲染的是同一份上游内容——TUI 只是这份投影的一个渲染器，见 reasonix 内嵌文档 TRANSCRIPT_PROJECTION.md）：`GET /transcript/follow`（SSE 长连接：首帧 `snapshot.records` 为全量窗口，后续帧 `changes[].records / event / runtime` 为增量；断线自动重连并重取基线）、`GET /transcript/snapshot`（进入视图/新会话时拉一次基线）；发送/中断/新会话分别走 `POST /submit`、`/cancel`、`/new`。**不解析任何终端字节流或会话文件**：旧实现把 PTY 字节流剥离 ANSI 后拼接（无法区分整屏重绘与真实新增，边框/光标定位/状态行会混入回显——即看到的“混乱”），`/events` 逐 token 事件流与 `/history` 纯文本拼接同样已删除。气泡按 record 的 `role` / `content` / `toolCalls` / `execution` 结构化渲染：user 靠右蓝底、assistant 靠左（工具调用以 `▸ 工具名 参数` 跟在正文后）、tool 灰色等宽卡片（工具名 + 参数摘要 + 输出，非 0 退出码/失败标红）、notice 系统提示黄字；同一 record 流式更新时按 id 原地覆盖（不重复插入），服务端 user record 到达后自动替换本地即时回显；顶部状态行显示 serve / transcript 连接与生成状态。
+- **破甲环境（Guardian 已禁用）**：内置 reasonix Guardian 高风险审查会 deny 破甲任务，v2.0.5 起在 `~/.reasonix/config.toml` 写入 `guardian_model = ""`（Guardian 因模型缺失自动禁用）。
 - **手机操作逻辑优化**：视图模式记忆（重启恢复上次终端/对话视图）；返回键三级逻辑（先关面板 → 原生视图先收键盘再回终端 → 才退出）；原生视图头部「新会话 / 回终端」快捷按钮；输入发送后保持焦点（多轮连续输入）；软键盘弹出时原生消息列表自动滚到底部。
 - **GitHub 登录与自动打包**：主屏快捷栏与侧滑栏「GitHub」面板支持输入/保存 GitHub Personal Access Token（仅存本机 `SharedPreferences`，不写入 Linux 环境），`GET /user` 验证登录态并显示账户；一键触发仓库 [RSXM](https://github.com/qianeric-backup/RSXM) 的 `build-release.yml` workflow（`workflow_dispatch`，云端 `assembleRelease`），轮询构建状态，完成后下载构建产物 APK 并经系统安装器安装（token 需 `repo` + `actions` 权限）。
 - **左侧侧滑配置菜单**（DrawerLayout）：

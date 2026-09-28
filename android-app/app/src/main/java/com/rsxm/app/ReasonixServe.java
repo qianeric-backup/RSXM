@@ -1,6 +1,5 @@
 package com.rsxm.app;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -11,8 +10,6 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.SecureRandom;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * Reasonix Serve 无头引擎客户端（v2.1.0 新功能）。
@@ -194,7 +191,7 @@ public class ReasonixServe {
         return r.code == 200 ? r.body : null;
     }
 
-    /** GET /history 原始 JSON（[{role, content}...]） */
+    /** GET /history 原始 JSON（[{role, content}...]）；GUI 回显已改走 /transcript，保留作通用查询 */
     public String history() {
         Resp r = get("/history", 5000);
         return r.code == 200 ? r.body : null;
@@ -255,31 +252,5 @@ public class ReasonixServe {
         try { o.put("mode", mode); } catch (Exception ignored) {}
         int code = postJson("/tool-approval-mode", o.toString(), 4000).code;
         return code >= 200 && code < 300;
-    }
-
-    /**
-     * 渲染 /history 为气泡消息列表（过滤 system/tool 原生噪音，映射 role→方向）。
-     * 返回 MappedMessage 列表，直接复用主界面 renderMessageBubble。
-     */
-    public static List<SessionFieldMapper.MappedMessage> historyToMessages(String historyJson) {
-        List<SessionFieldMapper.MappedMessage> out = new ArrayList<>();
-        if (historyJson == null || historyJson.isEmpty()) return out;
-        try {
-            JSONArray arr = new JSONArray(historyJson);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject m = arr.optJSONObject(i);
-                if (m == null) continue;
-                String role = m.optString("role", "");
-                if ("system".equalsIgnoreCase(role)) continue;   // 系统 prompt 不渲染
-                String content = m.optString("content", "");
-                if (content == null) content = "";
-                SessionFieldMapper.MappedMessage mm = new SessionFieldMapper.MappedMessage();
-                mm.role = role.toLowerCase();
-                mm.content = content;
-                mm.model = m.optString("model", "");
-                out.add(mm);
-            }
-        } catch (Exception ignored) {}
-        return out;
     }
 }

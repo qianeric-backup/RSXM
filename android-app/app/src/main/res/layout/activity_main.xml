@@ -120,18 +120,18 @@
                 </LinearLayout>
 
                 <!-- 终端实时流（剥离 TUI 组件的纯文本，供 AI 工具输出/AI 思考滚动显示） -->
+                <!-- serve 状态行：显示事件流连接/生成状态（内容来自 serve 结构化事件，
+                     不再显示剥离后的 TUI 文本）。无状态时隐藏 -->
                 <TextView
                     android:id="@+id/native_live"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:background="#0A0A0A"
-                    android:fontFamily="monospace"
-                    android:maxLines="200"
+                    android:maxLines="2"
                     android:padding="6dp"
-                    android:scrollbars="vertical"
-                    android:textColor="#C9D1D9"
+                    android:textColor="#8B949E"
                     android:textSize="11sp"
-                    android:visibility="visible" />
+                    android:visibility="gone" />
 
                 <!-- 消息列表：字段映射气泡（user 右对齐 / assistant 左对齐 / tool 灰色） -->
                 <ScrollView

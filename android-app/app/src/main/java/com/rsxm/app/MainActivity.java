@@ -5509,6 +5509,58 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 内置 reasonix 的字节数（assets 流式读一次后缓存；用于判断 guest 内是否为内置版本） */
+    private long bundledReasonixBytes = -1;
+
+    private long bundledReasonixSize() {
+        if (bundledReasonixBytes > 0) return bundledReasonixBytes;
+        try (InputStream in = getAssets().open("usr/bin/reasonix")) {
+            long n = 0;
+            byte[] buf = new byte[65536];
+            int r;
+            while ((r = in.read(buf)) > 0) n += r;
+            bundledReasonixBytes = n;
+        } catch (Exception ignored) {}
+        return bundledReasonixBytes;
+    }
+
+    /**
+     * 启动 serve 前确保 guest 内就是内置版本的 reasonix：**纯宿主侧**按字节数比对
+     * （同一 APK 内内置文件不变，字节数即可判定），不一致就重新部署。
+     *
+     * <p>不执行任何 guest 命令来做版本判断 —— 老版本 reasonix 会把未知子命令当任务提示起会话而挂住。
+     */
+    private void ensureBundledReasonixDeployed(File rootfs) {
+        try {
+            File rx = new File(new File(rootfs, "usr/local/bin"), "reasonix");
+            long want = bundledReasonixSize();
+            if (want > 0 && rx.exists() && rx.length() == want) return;   // 已是内置版本
+            Log.w(TAG, "guest reasonix mismatch (have=" + (rx.exists() ? rx.length() : -1)
+                    + " want=" + want + "), redeploying");
+            deployBundledReasonix(rootfs);
+        } catch (Exception e) {
+            Log.w(TAG, "ensureBundledReasonixDeployed failed", e);
+        }
+    }
+
+    /** 内置 reasonix 部署状态摘要（宿主侧读文件；诊断卡片用，不执行 guest 命令） */
+    private String reasonixDeployInfo() {
+        File dir = new File(new File(getFilesDir(), "rootfs"), "usr/local/bin");
+        File rx = new File(dir, "reasonix");
+        File stamp = new File(dir, ".rsxm-reasonix-apk-ver");
+        String st = "";
+        try {
+            if (stamp.exists()) {
+                st = new String(java.nio.file.Files.readAllBytes(stamp.toPath()),
+                        StandardCharsets.UTF_8).trim();
+            }
+        } catch (Exception ignored) {}
+        return "guest reasonix：" + (rx.exists() ? rx.length() + " 字节" : "不存在")
+                + "（内置 " + bundledReasonixSize() + " 字节 = v" + BUNDLED_REASONIX_VERSION + "）\n"
+                + "部署标记：" + (st.isEmpty() ? "(无)" : st) + " / 当前 APK " + appVersionName() + "\n"
+                + (reasonixDeployError == null ? "" : "部署错误：" + reasonixDeployError + "\n");
+    }
+
     /** 用 root(su) 把暂存二进制复制进 guest —— chroot / root 属主场景下 app 自身写不进去 */
     private boolean deployReasonixViaRoot(File staged, File dest) {
         try {
@@ -6823,11 +6875,13 @@ public class MainActivity extends Activity {
             boolean up;
             try {
                 if (!client.isUp()) {
+                    // 先确保 guest 内是内置版本 reasonix（写死参数的前提），再启动
+                    ensureBundledReasonixDeployed(new File(getFilesDir(), "rootfs"));
                     String token = ReasonixServe.readToken(getFilesDir());
                     if (token.isEmpty()) token = ReasonixServe.generateToken();
                     // 宿主侧同步写一份 token（chroot 模式 root 属主时此步可能失败，靠 guest 侧兜底）
                     writeServeToken(token);
-                    diag = executeInGuest(serveLaunchCommand(token), 12);
+                    diag = executeInGuest(serveLaunchCommand(token), 20);
                     for (int i = 0; i < 20 && !client.isUp(); i++) {
                         try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
                     }
@@ -6898,38 +6952,29 @@ public class MainActivity extends Activity {
                 + "rm -f " + ReasonixServe.PORT_FILE_GUEST;
     }
 
-    /** guest 内启动 serve 的命令（GUI 自动启动与 Serve 面板「启动」按钮共用同一份） */
+    /**
+     * guest 内启动 serve 的命令（GUI 自动启动与 Serve 面板「启动」按钮共用同一份）。
+     *
+     * <p>参数**写死**，前提是启动前已由 {@link #ensureBundledReasonixDeployed} 确保 guest 内
+     * 就是内置版本（1.39.3，支持这一整套 flag）。这里**绝不做** version / `serve --help` 之类的探测：
+     * 老版本 reasonix 会把不认识的子命令当成任务提示直接起会话，命令替换会挂住 → 整条命令超时，
+     * 后续的 nohup 与日志重定向全都不执行（实测症状：`(执行超时)` + 无日志 + 无端口文件）。
+     */
     private String serveLaunchCommand(String token) {
         return "printf '%s\\n' '" + sq(token) + "' > " + ReasonixServe.TOKEN_FILE_GUEST
                 // serve 拒绝 group/world 可读的 token 文件（默认 umask 下是 644），必须先收紧
                 + "; chmod 600 " + ReasonixServe.TOKEN_FILE_GUEST
                 + "; " + serveStopCommand() + "; "
                 + "cd /root; "
-                // 路径：PATH 优先 /usr/local/bin（内置部署位置），再兜底 /usr/bin
                 + "RX=$(command -v reasonix 2>/dev/null || echo /usr/local/bin/reasonix); "
-                // 诊断：把实际路径与版本写进 .adb-out，诊断卡片里一眼能看到跑的是哪个 reasonix
+                // 纯变量展开，不执行外部命令（诊断卡片里能看到实际跑的是哪一份）
                 + "echo \"[rsxm] RX=$RX\"; "
-                + "echo \"[rsxm] version:$(\"$RX\" version 2>&1 | head -1)\"; "
-                // 按 serve --help 实测支持的 flag 拼参数：不同版本 flag 集不同（v1.31.x 没有 -addr，
-                // 硬写会直接 "unknown flag: --addr" 退出并在日志里留下看不出所以然的错）
-                + "H=$(\"$RX\" serve --help </dev/null 2>&1); A=''; "
-                + "case \"$H\" in *'-addr'*) A=\"$A --addr 127.0.0.1:8787\";; esac; "
-                + "case \"$H\" in *'-token-file'*) A=\"$A --auth token --token-file "
-                + ReasonixServe.TOKEN_FILE_GUEST + "\";; esac; "
-                + "case \"$H\" in *'-port-file'*) A=\"$A --port-file " + ReasonixServe.PORT_FILE_GUEST + "\";; esac; "
-                + "case \"$H\" in *'-pid-file'*) A=\"$A --pid-file " + ReasonixServe.PID_FILE_GUEST + "\";; esac; "
+                + "nohup \"$RX\" serve --addr 127.0.0.1:8787 --auth token "
+                + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
+                + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
+                + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "
                 // 无浏览器环境：不带 --no-open 时 serve 会尝试打开 Web UI（guest 内无 xdg-open）
-                + "case \"$H\" in *'-no-open'*) A=\"$A --no-open\";; esac; "
-                // help 探测完全拿不到 flag（老版本不认 --help，或输出被 TUI 序列污染）→
-                // 用内置 1.39.3 已知可用的参数集兜底，而不是退化成"裸 serve"（那会进 TUI 且不写端口文件）
-                + "case \"$A\" in '') A=\"--addr 127.0.0.1:8787 --port-file " + ReasonixServe.PORT_FILE_GUEST
-                + " --pid-file " + ReasonixServe.PID_FILE_GUEST + " --no-open --auth none\"; "
-                + "echo \"[rsxm] help detection failed, using bundled defaults\";; esac; "
-                // 没拿到 token-file 能力时退化为无认证（此时 app 带的 Bearer 头会被 serve 忽略）
-                + "case \"$A\" in *'--auth'*) ;; *) case \"$H\" in *'-auth'*) A=\"$A --auth none\";; esac;; esac; "
-                + "echo \"[rsxm] serve flags:$A\"; "
-                // stdin 接 /dev/null：后台服务不该继承 TUI 的 PTY
-                + "nohup \"$RX\" serve $A </dev/null >" + ReasonixServe.LOG_FILE_GUEST
+                + "--no-open </dev/null >" + ReasonixServe.LOG_FILE_GUEST
                 + " 2>&1 & echo SERVE_STARTED";
     }
 
@@ -7020,7 +7065,7 @@ public class MainActivity extends Activity {
     /** serve 未在线：把启动命令返回 + 端口/token + 日志尾部渲染成可复制的诊断卡片 */
     private void showServeFailureDiagnostics(String execOut) {
         appendDiagnosticCard("⚠ serve 引擎未在线（可复制下方诊断信息反馈）",
-                (reasonixDeployError == null ? "" : "内置 reasonix 部署失败：" + reasonixDeployError + "\n")
+                reasonixDeployInfo()
                         + "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
                         + "端口文件读值：" + ReasonixServe.readBoundPort(getFilesDir())
                         + "（-1 = 未写入 " + ReasonixServe.PORT_FILE_GUEST + "）\n"

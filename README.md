@@ -29,6 +29,7 @@
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。
 - **破甲环境（内置）**：应用启动时自动把 infinite-gen-3 v0.5.0 破甲系统提示词注入 reasonix 的 `~/.reasonix/config.toml`（`system_prompt` 键，幂等标记 `rsxm-break-armor-v0.5.0`），并同步为全局 skill `rsxm-break-armor`（`~/.reasonix/skills/`）与全局指令（`AGENTS.md` 追加说明）——任何项目/任何会话下 AI 都携带该行为框架（来源 `assets/break-armor-prompt.md`，每次启动自动刷新）。
+- **破甲内核（内置插件）**：应用启动时把 `dsh-infinite-gen-4` v0.4.1（`assets/dsh-infinite-gen-4.tar`，贡献 4 个 prompt）部署到 guest 的 `~/.reasonix/plugins/dsh-infinite-gen-4`，并在 `~/.reasonix/plugin-packages.json` 登记为 `enabled` —— 等价于桌面端的「本地目录安装」（目录 + `reasonix-plugin.json` 清单 + 登记项），随 APK 升级自动覆盖刷新（幂等标记 `~/.reasonix/.rsxm-plugin-dsh-infinite-gen-4.ver` = 插件版本@APK 版本）。**chroot 模式 / rootfs 内 `.reasonix` 属主为 root 时 app 写不进去**：解压、登记、标记三步都回退到 `su`（root 不可用时，serve 诊断卡片显示失败原因）。
 - **手机 Root 权限**：检测 KernelSU/Magisk，侧滑菜单可查看/测试授权状态；reasonix（AI）内直接执行 `root <命令>` 即通过 app 以 su 获取手机 root 权限（如 `root id`、`root 'pm list packages'`）。
 
 ## 架构
@@ -59,6 +60,8 @@
 | `assets/ds2api/ds2api-bundle.tgz` | 内置 DS2API 网关（上游 [CJackHwang/ds2api](https://github.com/CJackHwang/ds2api) v4.6.1，AGPL-3.0：静态 arm64 二进制 + WebUI 管理台 + LICENSE/README），随环境启动自动后台运行（127.0.0.1:5001） |
 | `assets/usr/bin/pty-bridge` | 自编译静态 musl PIE，guest 内创建 PTY（`posix_openpt`+`fork`） |
 | `assets/usr/bin/reasonix` | 静态链接 Go 二进制（来自官方 npm 平台包 `@reasonix/cli-linux-arm64`，可在应用内一键更新） |
+| `assets/dsh-infinite-gen-4.tar` | 内置 reasonix 插件「无限四代」v0.4.1（破甲内核）：随环境启动部署到 guest 的 `~/.reasonix/plugins/` 并登记 `plugin-packages.json`（`enabled`），apk 写不进时由 `su` 回退 |
+| `assets/break-armor-prompt.md` | infinite-gen-3 v0.5.0 破甲系统提示词（entry.sh 注入 `config.toml` / 全局 skill / `AGENTS.md`） |
 | `assets/web/*` | xterm.js 5.3.0 + fit addon（离线终端渲染） |
 
 ## 构建

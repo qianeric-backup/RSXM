@@ -5561,6 +5561,165 @@ public class MainActivity extends Activity {
                 + (reasonixDeployError == null ? "" : "部署错误：" + reasonixDeployError + "\n");
     }
 
+    /** 内置 reasonix 插件（破甲内核）名称/版本 —— 必须与 assets/dsh-infinite-gen-4.tar 一致 */
+    private static final String BUNDLED_PLUGIN_NAME = "dsh-infinite-gen-4";
+    private static final String BUNDLED_PLUGIN_VERSION = "0.4.1";
+    /** 最近一次内置插件部署失败原因（null = 成功/未尝试；诊断卡片会显示） */
+    private volatile String pluginDeployError = null;
+
+    /**
+     * 部署内置 reasonix 插件到 guest 的 {@code ~/.reasonix/plugins/<name>}，并在
+     * {@code ~/.reasonix/plugin-packages.json} 里登记 —— 等价于桌面端的"本地目录安装"
+     * （目录 + reasonix-plugin.json 清单 + 登记项 enabled=true）。
+     *
+     * <p>先删旧目录再解压：归档顶层就是 {@code dsh-infinite-gen-4/}，覆盖安装得到的就是内置
+     * （硬化）版本，与该插件自身 repair_escape_clauses.mjs 的意图一致。
+     */
+    private boolean deployBundledPlugin(File rootfs) {
+        try {
+            File reasonixDir = new File(new File(rootfs, "root"), ".reasonix");
+            File pluginsDir = new File(reasonixDir, "plugins");
+            File tar = new File(getFilesDir(), BUNDLED_PLUGIN_NAME + ".tar");
+            extractAsset(BUNDLED_PLUGIN_NAME + ".tar", tar);
+            File dest = new File(pluginsDir, BUNDLED_PLUGIN_NAME);
+            File manifest = new File(dest, "reasonix-plugin.json");
+            boolean ok = false;
+            try {
+                pluginsDir.mkdirs();
+                deleteRecursive(dest);
+                runCmd("/system/bin/tar", "-xzf", tar.getAbsolutePath(), "-C", pluginsDir.getAbsolutePath());
+                ok = manifest.exists();
+            } catch (Exception e) {
+                Log.w(TAG, "deploy plugin: 直接解压失败（" + e + "），改用 root 重试");
+            }
+            if (!ok) {
+                // chroot 模式 / rootfs 内 .reasonix 属主为 root 时 app 写不进去：交给 root(su) 解压
+                String out = execRootCommand("mkdir -p '" + pluginsDir + "' && rm -rf '" + dest
+                        + "' && tar -xzf '" + tar + "' -C '" + pluginsDir + "' && test -f '"
+                        + manifest + "' && echo PLG_OK", 60);
+                ok = out != null && out.contains("PLG_OK");
+            }
+            if (!ok) {
+                pluginDeployError = "插件解压失败：" + dest;
+                // 清掉半成品，别让 reasonix 去加载坏插件；app 删不掉（root 属主）时同样交给 root
+                if (!deleteRecursive(dest)) execRootCommand("rm -rf '" + dest + "'", 20);
+                Log.e(TAG, "deploy plugin failed: " + pluginDeployError);
+                return false;
+            }
+            tar.delete();
+            if (!registerPluginInPackages(reasonixDir)) {
+                // 目录解压成功但没登记 → reasonix 不会加载它，按部署失败报给诊断卡片
+                pluginDeployError = "插件登记失败（写不进 "
+                        + new File(reasonixDir, "plugin-packages.json") + "，且 root 不可用）";
+                Log.e(TAG, "deploy plugin failed: " + pluginDeployError);
+                return false;
+            }
+            pluginDeployError = null;
+            Log.d(TAG, "bundled plugin deployed: " + BUNDLED_PLUGIN_NAME + " " + BUNDLED_PLUGIN_VERSION);
+            return true;
+        } catch (Exception e) {
+            pluginDeployError = String.valueOf(e);
+            Log.e(TAG, "deploy bundled plugin failed", e);
+            return false;
+        }
+    }
+
+    /** 在 plugin-packages.json 里登记/更新内置插件（保留文件中原有的其它插件）；
+     *  chroot/root 属主场景下 app 写不进 .reasonix，落盘交给 root(su) 回退，失败返回 false */
+    private boolean registerPluginInPackages(File reasonixDir) throws org.json.JSONException {
+        File f = new File(reasonixDir, "plugin-packages.json");
+        org.json.JSONObject root = new org.json.JSONObject();
+        if (f.exists()) {
+            try {
+                root = new org.json.JSONObject(new String(
+                        java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
+            } catch (Exception e) {
+                Log.w(TAG, "plugin-packages.json 解析失败，将重建：" + e);
+                root = new org.json.JSONObject();
+            }
+        }
+        if (!root.has("version")) root.put("version", 1);
+        org.json.JSONArray arr = root.optJSONArray("plugins");
+        if (arr == null) {
+            arr = new org.json.JSONArray();
+            root.put("plugins", arr);
+        }
+        org.json.JSONObject entry = null;
+        for (int i = 0; i < arr.length(); i++) {
+            org.json.JSONObject p = arr.optJSONObject(i);
+            if (p != null && BUNDLED_PLUGIN_NAME.equals(p.optString("name"))) {
+                entry = p;
+                break;
+            }
+        }
+        if (entry == null) {
+            entry = new org.json.JSONObject();
+            arr.put(entry);
+        }
+        entry.put("name", BUNDLED_PLUGIN_NAME);
+        entry.put("source", "bundled:apk");
+        entry.put("root", "plugins/" + BUNDLED_PLUGIN_NAME);
+        entry.put("version", BUNDLED_PLUGIN_VERSION);
+        entry.put("description", "无限四代 v" + BUNDLED_PLUGIN_VERSION + "（随 APK 内置安装）");
+        entry.put("manifestKind", "reasonix");
+        entry.put("enabled", true);
+        return writeGuestText(f, root.toString(2) + "\n");
+    }
+
+    /**
+     * 写 guest 内的文本文件：先试 app 直写（快路径、无需 root），失败（chroot 模式曾以 root 运行过，
+     * rootfs 内 .reasonix 属主是 root，app 无写权限）→ 落到 app 私有目录再由 root(su) 复制过去。
+     */
+    private boolean writeGuestText(File dest, String content) {
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+        try {
+            dest.getParentFile().mkdirs();
+            java.nio.file.Files.write(dest.toPath(), bytes);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "写 " + dest + " 失败（" + e + "），改用 root(su)");
+        }
+        File staged = new File(getFilesDir(), dest.getName() + ".staged");
+        try {
+            java.nio.file.Files.write(staged.toPath(), bytes);
+            staged.setReadable(true, false);     // root 回退时 su 进程需要能读它
+            String out = execRootCommand("mkdir -p '" + dest.getParentFile() + "' && cp -f '"
+                    + staged + "' '" + dest + "' && echo RXW_OK", 20);
+            boolean ok = out != null && out.contains("RXW_OK");
+            if (!ok) Log.w(TAG, "写 " + dest + " 的 root 回退失败：out=" + out);
+            return ok;
+        } catch (Exception e) {
+            Log.w(TAG, "写 " + dest + " 的 root 回退异常", e);
+            return false;
+        } finally {
+            staged.delete();
+        }
+    }
+
+    /** 按版本标记决定是否需要（重新）部署内置插件：APK 升级或首次安装时生效，同一 APK 内不重复解压 */
+    private void ensureBundledPluginDeployed(File rootfs) {
+        try {
+            File reasonixDir = new File(new File(rootfs, "root"), ".reasonix");
+            File dest = new File(new File(reasonixDir, "plugins"), BUNDLED_PLUGIN_NAME);
+            File stamp = new File(reasonixDir, ".rsxm-plugin-" + BUNDLED_PLUGIN_NAME + ".ver");
+            String want = BUNDLED_PLUGIN_VERSION + "@" + appVersionName();
+            String have = "";
+            try {
+                if (stamp.exists()) {
+                    have = new String(java.nio.file.Files.readAllBytes(stamp.toPath()),
+                            StandardCharsets.UTF_8).trim();
+                }
+            } catch (Exception ignored) {}
+            if (new File(dest, "reasonix-plugin.json").exists() && want.equals(have)) return;
+            if (deployBundledPlugin(rootfs)) {
+                // 标记写不进（root 属主）时也走 su 回退：否则每次启动都要重解压一遍插件
+                writeGuestText(stamp, want + "\n");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "ensureBundledPluginDeployed failed", e);
+        }
+    }
+
     /** 用 root(su) 把暂存二进制复制进 guest —— chroot / root 属主场景下 app 自身写不进去 */
     private boolean deployReasonixViaRoot(File staged, File dest) {
         try {
@@ -6301,6 +6460,7 @@ public class MainActivity extends Activity {
         } else {
             Log.d(TAG, "reasonix already deployed for this apk version, keep current");
         }
+        ensureBundledPluginDeployed(rootfs);   // 内置插件随 APK 版本刷新
         // pty-bridge：先删除再写入（旧环境进程可能仍 exec 着该文件，
         // 直接覆盖(O_TRUNC)报 ETXTBSY；unlink 正在执行的 inode 合法）
         File bridge = new File(rootfs, "usr/bin/pty-bridge");
@@ -6397,6 +6557,7 @@ public class MainActivity extends Activity {
         if (!deployBundledReasonix(rootfs)) {
             throw new IOException("内置 reasonix 部署失败：" + reasonixDeployError);
         }
+        ensureBundledPluginDeployed(rootfs);   // 内置插件（破甲内核）：首次安装即就位（带版本标记，后续启动不重解压）
         File bridge = new File(rootfs, "usr/bin/pty-bridge");
         bridge.delete();   // 防残留 exec 导致 ETXTBSY（unlink 正在执行的 inode 合法）
         extractAsset("usr/bin/pty-bridge", bridge);
@@ -7066,6 +7227,7 @@ public class MainActivity extends Activity {
     private void showServeFailureDiagnostics(String execOut) {
         appendDiagnosticCard("⚠ serve 引擎未在线（可复制下方诊断信息反馈）",
                 reasonixDeployInfo()
+                        + (pluginDeployError == null ? "" : "内置插件部署失败：" + pluginDeployError + "\n")
                         + "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
                         + "端口文件读值：" + ReasonixServe.readBoundPort(getFilesDir())
                         + "（-1 = 未写入 " + ReasonixServe.PORT_FILE_GUEST + "）\n"

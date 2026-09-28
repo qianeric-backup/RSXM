@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.2.1 — serve 引擎启动加固 + 失败诊断可见）
-        versionCode 63
-        versionName "2.2.1"
+        // 版本随 GitHub Release 同步更新（当前 v2.2.2 — serve 启动两个真因：pkill 自杀 + token 权限）
+        versionCode 64
+        versionName "2.2.2"
     }
 
     buildTypes {

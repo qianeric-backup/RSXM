@@ -4879,8 +4879,7 @@ public class MainActivity extends Activity {
         startBtn.setOnClickListener(v -> serveStart());
         Button stopBtn = createDarkButton("停止");
         stopBtn.setOnClickListener(v -> {
-            new Thread(() -> executeInGuest(
-                    "pkill -f 'reasonix.*[s]erve' 2>/dev/null; echo OK", 6), "serve-stop").start();
+            new Thread(() -> executeInGuest(serveStopCommand() + "; echo OK", 6), "serve-stop").start();
             showToast("已发送停止指令");
         });
         LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -5008,11 +5007,7 @@ public class MainActivity extends Activity {
             String token = ReasonixServe.readToken(getFilesDir());
             if (token.isEmpty()) token = ReasonixServe.generateToken();
             // 宿主侧同步写一份（proot 模式 app uid 可写；chroot 模式 root 属主时此步失败靠 guest 落盘兜底读取）
-            try {
-                java.nio.file.Files.write(
-                        new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath(),
-                        (token + "\n").getBytes(StandardCharsets.UTF_8));
-            } catch (Exception ignored) {}
+            writeServeToken(token);
             String out = executeInGuest(serveLaunchCommand(token), 12);
             boolean spawned = out != null && out.contains("SERVE_STARTED");
             ReasonixServe client = serveClient();
@@ -6746,11 +6741,7 @@ public class MainActivity extends Activity {
                     String token = ReasonixServe.readToken(getFilesDir());
                     if (token.isEmpty()) token = ReasonixServe.generateToken();
                     // 宿主侧同步写一份 token（chroot 模式 root 属主时此步可能失败，靠 guest 侧兜底）
-                    try {
-                        java.nio.file.Files.write(
-                                new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath(),
-                                (token + "\n").getBytes(StandardCharsets.UTF_8));
-                    } catch (Exception ignored) {}
+                    writeServeToken(token);
                     diag = executeInGuest(serveLaunchCommand(token), 12);
                     for (int i = 0; i < 20 && !client.isUp(); i++) {
                         try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
@@ -6784,11 +6775,47 @@ public class MainActivity extends Activity {
         }, "serve-ensure").start();
     }
 
+    /**
+     * 写 serve token 的宿主侧副本。
+     *
+     * <p>权限必须收成 {@code 600}：serve 会拒绝 group/world 可读的 token 文件并直接退出
+     * （实测报错 {@code token file ... must not be group/world accessible (chmod 600)}），
+     * 而 {@code printf > file} / {@code Files.write} 在默认 umask 下是 644。
+     * guest 侧启动命令里另有一道 {@code chmod 600} 兜底（proot 下两边是同一个文件）。
+     */
+    private void writeServeToken(String token) {
+        try {
+            java.nio.file.Path tp =
+                    new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath();
+            java.nio.file.Files.write(tp, (token + "\n").getBytes(StandardCharsets.UTF_8));
+            try {
+                java.nio.file.Files.setPosixFilePermissions(tp,
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+            } catch (Exception ignored) {}   // 文件系统不支持 POSIX 权限时忽略（guest 侧还有 chmod）
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * 停止 serve 的 guest 命令：只按 serve 自己写的 pid 文件精准 kill。
+     *
+     * <p>**不要**改回 {@code pkill -f 'reasonix.*[s]erve'}：本方法产出的启动命令里同时含有
+     * {@code command -v reasonix} 与字面 {@code "$RX" serve}，于是 {@code pkill -f} 的
+     * 整条命令行匹配会命中**它自己所在的 sh 进程**（{@code [s]erve} 那个防自匹配技巧只在
+     * 命令行里没有别的 "serve" 文本时才成立），命令会把自己 TERM 掉 —— 表现就是
+     * 「token 写入了、但没有日志、没有端口文件、命令无输出」，v2.2.1 及以前从未启动成功过。
+     */
+    private String serveStopCommand() {
+        return "if [ -s " + ReasonixServe.PID_FILE_GUEST + " ]; then kill \"$(cat "
+                + ReasonixServe.PID_FILE_GUEST + ")\" 2>/dev/null; sleep 0.5; fi; "
+                + "rm -f " + ReasonixServe.PORT_FILE_GUEST;
+    }
+
     /** guest 内启动 serve 的命令（GUI 自动启动与 Serve 面板「启动」按钮共用同一份） */
     private String serveLaunchCommand(String token) {
         return "printf '%s\\n' '" + sq(token) + "' > " + ReasonixServe.TOKEN_FILE_GUEST
-                + "; rm -f " + ReasonixServe.PORT_FILE_GUEST + " " + ReasonixServe.PID_FILE_GUEST + "; "
-                + "pkill -f 'reasonix.*[s]erve' 2>/dev/null; sleep 0.5; "
+                // serve 拒绝 group/world 可读的 token 文件（默认 umask 下是 644），必须先收紧
+                + "; chmod 600 " + ReasonixServe.TOKEN_FILE_GUEST
+                + "; " + serveStopCommand() + "; "
                 + "cd /root; "
                 // 绝对路径兜底：guest 的 .adb-cmd 执行服务与交互 shell 的 PATH 可能不同
                 + "RX=$(command -v reasonix 2>/dev/null || echo /usr/bin/reasonix); "
@@ -6806,8 +6833,7 @@ public class MainActivity extends Activity {
         showToast("正在重启 serve 引擎…");
         stopTranscriptFollow();
         new Thread(() -> {
-            executeInGuest("pkill -f 'reasonix.*[s]erve' 2>/dev/null; rm -f "
-                    + ReasonixServe.PORT_FILE_GUEST + " " + ReasonixServe.PID_FILE_GUEST + "; echo KILLED", 8);
+            executeInGuest(serveStopCommand() + "; echo KILLED", 8);
             ui.post(this::ensureServeStarted);
         }, "serve-restart").start();
     }

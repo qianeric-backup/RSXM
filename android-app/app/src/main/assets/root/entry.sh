@@ -65,12 +65,23 @@ https://mirrors.aliyun.com/alpine/v$VER/main
 https://mirrors.aliyun.com/alpine/v$VER/community
 EOF
     (
+        # 环境重启时上一实例的 apk 可能孤儿化仍在跑，apk 数据库锁被占用就会报
+        # "Unable to lock database: temporary error (try again later)"——该提示本身
+        # 就是让稍后重试。这里对 update/add 各重试 3 次（仅锁类错误才重试）。
+        try_apk() {
+            for _i in 1 2 3; do
+                if "$@" > /tmp/apk.log 2>&1; then return 0; fi
+                grep -q "temporary error" /tmp/apk.log 2>/dev/null || break
+                sleep 3
+            done
+            return 1
+        }
         echo "[adb] apk update ..."
-        apk update 2>&1 | tail -2
+        try_apk apk update || tail -2 /tmp/apk.log
         echo "[adb] apk add android-tools ..."
         # v2.0.25 修复：旧写法 `apk add ... | tail -5` 的 if 取的是 tail 退出码（恒 0），
         # 安装失败也谎报"已安装"。改为落地日志文件再按真实退出码分流。
-        if apk add --no-cache android-tools > /tmp/apk.log 2>&1; then
+        if try_apk apk add --no-cache android-tools; then
             tail -5 /tmp/apk.log
             echo "[adb 已安装] $(adb version 2>/dev/null | head -1)"
         else

@@ -4272,7 +4272,9 @@ public class MainActivity extends Activity {
                 String msg = "\r\n[" + p.name + " API Key 已更新"
                         + (urlOk ? "" : "，URL 写入失败")
                         + (modelOk ? "，已切换默认模型 " + (chosenModel != null ? chosenModel : p.name)
-                        : "，但默认模型写入失败（config.toml 未生成？）")
+                        : (conf.exists()
+                            ? "，但默认模型写入失败（config.toml 写入异常）"
+                            : "（config.toml 尚未生成，key 已写入 .env；重启后 reasonix 按内置默认读取）"))
                         + "，正在重启环境...]\r\n";
                 pushOutput(msg);
                 restartEnvironment();
@@ -5657,8 +5659,11 @@ public class MainActivity extends Activity {
                 sProcIn = null;
             }
             // 1) 先杀 app 同 uid 的进程（proot 模式；按进程名精确匹配，不会误伤其他应用）
+            //    含 apk：entry.sh 里 android-tools 安装是后台子 shell，入口脚本被 kill -9 后
+            //    apk 会孤儿化继续跑并持着 /lib/apk/db 的锁，导致新环境的 apk 报
+            //    "Unable to lock database: temporary error"（日志里 adb 装不上就是这个）
             Process p = new ProcessBuilder("sh", "-c",
-                    "for pid in $(ps -A -o PID,ARGS 2>/dev/null | grep -E 'proot.so|pty-bridge|reasonix|entry.sh' | awk '{print $1}'); " +
+                    "for pid in $(ps -A -o PID,ARGS 2>/dev/null | grep -E 'proot.so|pty-bridge|reasonix|entry.sh|/sbin/apk|apk (add|update)' | awk '{print $1}'); " +
                     "do kill -9 $pid 2>/dev/null; done")
                     .redirectErrorStream(true).start();
             if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroy();
@@ -5829,12 +5834,74 @@ public class MainActivity extends Activity {
         if (cfg.exists() && env.exists()) {
             Log.d(TAG, "reasonix config already present, skipping dialog");
             safeStartProot();
+            promptMissingApiKeyIfNeeded(rootfs);   // 配置在但没 key 时也要引导（否则 reasonix 只报 missing env）
             return;
         }
-        // 全新安装不再弹出 API Key 配置页面：直接启动环境。
-        // 用户可随时通过侧滑菜单「API Key 配置」面板填写 Key。
+        // 全新安装不再强制弹对话框：直接启动环境，随后按需自动引导配置 Key。
         Log.d(TAG, "reasonix config missing, starting without API key dialog");
         safeStartProot();
+        promptMissingApiKeyIfNeeded(rootfs);
+    }
+
+    /** 本次进程是否已自动弹过「缺 API Key」面板（用户没填时不反复打扰，下次启动再引导） */
+    private boolean autoKeyPromptDone = false;
+
+    /**
+     * 环境里一个 provider 的 API Key 都没配时，自动打开「API Key 配置」面板。
+     * 全新安装下 reasonix 只会打印 "provider xxx: missing env XXX_API_KEY"，
+     * 用户无从下手；这里直接把人引导到面板（保存后环境自动重启生效）。
+     */
+    private void promptMissingApiKeyIfNeeded(File rootfs) {
+        try {
+            if (autoKeyPromptDone) return;
+            String missingEnv = missingDefaultProviderKey(rootfs);
+            if (missingEnv == null) return;
+            autoKeyPromptDone = true;
+            pushOutput("\r\n[未配置 API Key：" + missingEnv + "，正在打开「API Key 配置」面板]\r\n"
+                    + "[选择 Provider 并粘贴 API Key 后点「保存」，环境会自动重启生效]\r\n");
+            runOnUiThread(() -> new android.os.Handler(getMainLooper()).postDelayed(() -> {
+                try {
+                    if (!isFinishing() && !isDestroyed()) showApiKeyConfigDialog();
+                } catch (Exception ignored) {}
+            }, 1500));   // 略延迟：让环境/首屏初始化先完成，避免面板被后置初始化覆盖
+        } catch (Exception e) {
+            Log.w(TAG, "missing api key prompt failed", e);
+        }
+    }
+
+    /** 环境里没有任何 API Key 时返回默认 provider 的 .env 变量名（用于提示），否则 null */
+    private String missingDefaultProviderKey(File rootfs) {
+        File home = new File(rootfs, "root/.reasonix");
+        File env = new File(home, ".env");
+        // 只要配过任意一个 provider 的 key 就不再自动弹面板（避免打扰已配置用户）
+        if (firstNonEmptyEnvVar(env) != null) return null;
+        File conf = new File(home, "config.toml");
+        String provider = parseDefaultModel(conf);   // config 不存在时返回内置默认 deepseek-flash
+        String envVar = "DEEPSEEK_API_KEY";          // 内置默认 provider 的变量名
+        for (ProviderInfo p : parseProviderInfos(conf)) {
+            if (p.name != null && p.name.equals(provider)
+                    && p.apiKeyEnv != null && !p.apiKeyEnv.isEmpty()) {
+                envVar = p.apiKeyEnv;
+                break;
+            }
+        }
+        return envVar;
+    }
+
+    /** .env 中第一个非空变量的名（无文件/全空返回 null） */
+    private String firstNonEmptyEnvVar(File env) {
+        if (env == null || !env.exists()) return null;
+        try {
+            for (String line : new String(java.nio.file.Files.readAllBytes(env.toPath()),
+                    StandardCharsets.UTF_8).split("\n")) {
+                String t = line.trim();
+                if (t.isEmpty() || t.startsWith("#")) continue;
+                int eq = t.indexOf('=');
+                if (eq <= 0) continue;
+                if (!t.substring(eq + 1).trim().isEmpty()) return t.substring(0, eq).trim();
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     /** 破甲环境注入标记（infinite-gen-3 v0.5.0）：config.toml 中以此判断是否已注入，幂等 */

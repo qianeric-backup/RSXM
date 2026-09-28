@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.2.6 — 去掉会挂住的 guest 探测，改用宿主侧字节数校验）
-        versionCode 68
-        versionName "2.2.6"
+        // 版本随 GitHub Release 同步更新（当前 v2.2.7 — 区分 transcript 正常收尾与真断开）
+        versionCode 69
+        versionName "2.2.7"
     }
 
     buildTypes {

@@ -7110,7 +7110,10 @@ public class MainActivity extends Activity {
                     @Override
                     public void onConnection(boolean connected, String detail) {
                         serveOnline = connected;
-                        ui.post(() -> setNativeStatus(connected ? "" : "transcript 流已断开，正在重连…"));
+                        ui.post(() -> setNativeStatus(connected ? ""
+                                : "transcript 流中断"
+                                        + ((detail == null || detail.isEmpty()) ? "" : "（" + detail + "）")
+                                        + "，正在重连…"));
                     }
                 });
         transcript = c;
@@ -7222,6 +7225,7 @@ public class MainActivity extends Activity {
             upsertRecordView(list, r, earlier ? prependCursor++ : -1);
         }
         setBubbleCount(list.getChildCount());
+        updateSessionInfoCount(list.getChildCount());
         if (sameSession) {
             autoScrollBottom(false);
         } else {
@@ -7454,6 +7458,14 @@ public class MainActivity extends Activity {
             }
         } catch (Exception ignored) {}
         return args.length() > 200 ? args.substring(0, 200) + "…" : args;
+    }
+
+    /** 会话信息行：serve 在线时显示当前渲染的记录数（让"有没有数据"一眼可见） */
+    private void updateSessionInfoCount(int n) {
+        TextView info = findViewById(R.id.native_session_info);
+        if (info != null && serveOnline) {
+            info.setText("会话：serve 引擎 · " + n + " 条");
+        }
     }
 
     private void setBubbleCount(int n) {

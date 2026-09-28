@@ -135,11 +135,13 @@ public class TranscriptClient {
         while (running) {
             HttpURLConnection c = null;
             boolean connected = false;
+            boolean broken = false;      // 真断开（读取异常 / 端点不可用），区别于"服务端正常收尾"
             try {
                 c = open("/transcript/follow", 0);   // 0 = 无限等待（SSE 长连接）
                 conn = c;
                 int code = c.getResponseCode();
                 if (code != 200) {
+                    broken = true;
                     sleepQuiet(backoff);
                     backoff = Math.min(backoff * 2, 15000);
                     continue;
@@ -169,13 +171,16 @@ public class TranscriptClient {
                     }
                 }
             } catch (Exception e) {
-                // 断开/服务端未就绪/主动 stop：走退避重连
+                // 读取中断：只有非主动 stop 才算"断开"
+                if (running) broken = true;
             } finally {
                 conn = null;
                 if (c != null) {
                     try { c.disconnect(); } catch (Exception ignored) {}
                 }
-                if (connected) listener.onConnection(false, "");
+                // 服务端在"无新变化"时会读完首帧就收尾（长轮询节奏），这不等于断线：
+                // 只有真正读取异常/端点不可用才通知断开，否则状态行每 1.2s 闪一次"已断开，正在重连"。
+                if (broken) listener.onConnection(false, "读取中断");
             }
             // 连接成功但被服务端立即收尾时按最小间隔重连（相当于轮询）；失败走退避
             if (running) sleepQuiet(connected ? MIN_RECONNECT_MS : backoff);

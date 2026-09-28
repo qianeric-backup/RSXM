@@ -5668,11 +5668,13 @@ public class MainActivity extends Activity {
                 String su = findSuPath();
                 if (su != null) {
                     Process k = new ProcessBuilder(su, "-c",
-                            "pkill -9 -f 'reasonix.bin' 2>/dev/null; "
-                                    + "pkill -9 -f 'pty-bridge' 2>/dev/null; "
-                                    + "pkill -9 -f 'entry.sh' 2>/dev/null; "
-                                    + "pkill -9 -f 'chroot /data/user' 2>/dev/null; "
-                                    + "pkill -9 -f 'proot.so' 2>/dev/null; true")
+                            // 模式一律写成 '[x]xxx'：整条命令本身会作为 su -c/sh -c 的 argv 存在，
+                            // 不加方括号时 pkill -f 会匹配到执行本命令的 shell（链首自杀 → 后面几条全不执行）
+                            "pkill -9 -f '[r]easonix.bin' 2>/dev/null; "
+                                    + "pkill -9 -f '[p]ty-bridge' 2>/dev/null; "
+                                    + "pkill -9 -f '[e]ntry.sh' 2>/dev/null; "
+                                    + "pkill -9 -f '[c]hroot /data/user' 2>/dev/null; "
+                                    + "pkill -9 -f '[p]root.so' 2>/dev/null; true")
                             .redirectErrorStream(true).start();
                     if (!k.waitFor(3, TimeUnit.SECONDS)) k.destroy();
                 }
@@ -6334,10 +6336,11 @@ public class MainActivity extends Activity {
             String su = findSuPath();
             if (su != null) {
                 Process p = new ProcessBuilder(su, "-c",
-                        "pkill -9 -f 'entry.sh' 2>/dev/null; "
-                                + "pkill -9 -f 'pty-bridge' 2>/dev/null; "
-                                + "pkill -9 -f 'proot.so' 2>/dev/null; "
-                                + "pkill -9 -f 'reasonix.bin' 2>/dev/null; true")
+                        // 同上一处：方括号防止 pkill -f 匹配到执行本命令的 shell 自身
+                        "pkill -9 -f '[e]ntry.sh' 2>/dev/null; "
+                                + "pkill -9 -f '[p]ty-bridge' 2>/dev/null; "
+                                + "pkill -9 -f '[p]root.so' 2>/dev/null; "
+                                + "pkill -9 -f '[r]easonix.bin' 2>/dev/null; true")
                         .redirectErrorStream(true).start();
                 if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroy();
             }

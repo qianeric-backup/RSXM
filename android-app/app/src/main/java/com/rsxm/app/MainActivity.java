@@ -5013,16 +5013,7 @@ public class MainActivity extends Activity {
                         new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath(),
                         (token + "\n").getBytes(StandardCharsets.UTF_8));
             } catch (Exception ignored) {}
-            String out = executeInGuest(
-                    "printf '%s\\n' '" + sq(token) + "' > " + ReasonixServe.TOKEN_FILE_GUEST
-                            + "; rm -f " + ReasonixServe.PORT_FILE_GUEST + " " + ReasonixServe.PID_FILE_GUEST + "; "
-                            + "pkill -f 'reasonix.*[s]erve' 2>/dev/null; sleep 0.5; "
-                            + "cd /root; "
-                            + "nohup reasonix serve --addr 127.0.0.1:8787 --auth token "
-                            + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
-                            + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
-                            + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "
-                            + ">" + ReasonixServe.LOG_FILE_GUEST + " 2>&1 & echo SERVE_STARTED", 10);
+            String out = executeInGuest(serveLaunchCommand(token), 12);
             boolean spawned = out != null && out.contains("SERVE_STARTED");
             ReasonixServe client = serveClient();
             for (int i = 0; i < 15 && spawned && !client.isUp(); i++) {
@@ -6738,47 +6729,165 @@ public class MainActivity extends Activity {
 
     // ---------------- serve 接入（启动 / transcript 跟随 / 快照） ----------------
 
+    /** serve 引擎启动/探测进行中（防「重启」并发启动多个实例） */
+    private volatile boolean serveStarting = false;
+
     /** 确保 serve 引擎在线并接上 transcript 跟随流（环境就绪后调用；幂等） */
     private void ensureServeStarted() {
         if (transcript != null && transcript.isRunning()) return;
+        if (serveStarting) return;
+        serveStarting = true;
         new Thread(() -> {
             ReasonixServe client = serveClient();
-            if (!client.isUp()) {
-                String token = ReasonixServe.readToken(getFilesDir());
-                if (token.isEmpty()) token = ReasonixServe.generateToken();
-                // 宿主侧同步写一份 token（chroot 模式 root 属主时此步可能失败，靠 guest 侧兜底）
-                try {
-                    java.nio.file.Files.write(
-                            new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath(),
-                            (token + "\n").getBytes(StandardCharsets.UTF_8));
-                } catch (Exception ignored) {}
-                executeInGuest(
-                        "printf '%s\\n' '" + sq(token) + "' > " + ReasonixServe.TOKEN_FILE_GUEST
-                                + "; rm -f " + ReasonixServe.PORT_FILE_GUEST + " " + ReasonixServe.PID_FILE_GUEST + "; "
-                                + "pkill -f 'reasonix.*[s]erve' 2>/dev/null; sleep 0.5; "
-                                + "cd /root; "
-                                + "nohup reasonix serve --addr 127.0.0.1:8787 --auth token "
-                                + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
-                                + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
-                                + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "
-                                + ">" + ReasonixServe.LOG_FILE_GUEST + " 2>&1 & echo SERVE_STARTED", 10);
-                for (int i = 0; i < 20 && !client.isUp(); i++) {
-                    try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+            String diag = "";
+            boolean up;
+            try {
+                if (!client.isUp()) {
+                    String token = ReasonixServe.readToken(getFilesDir());
+                    if (token.isEmpty()) token = ReasonixServe.generateToken();
+                    // 宿主侧同步写一份 token（chroot 模式 root 属主时此步可能失败，靠 guest 侧兜底）
+                    try {
+                        java.nio.file.Files.write(
+                                new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath(),
+                                (token + "\n").getBytes(StandardCharsets.UTF_8));
+                    } catch (Exception ignored) {}
+                    diag = executeInGuest(serveLaunchCommand(token), 12);
+                    for (int i = 0; i < 20 && !client.isUp(); i++) {
+                        try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                    }
                 }
+                up = client.isUp();
+                if (up) serveModelRef = parseServeModel(client.status());
+            } catch (Exception e) {
+                up = false;
+                diag = "启动异常：" + e;
             }
-            boolean up = client.isUp();
+            serveStarting = false;
             serveOnline = up;
-            if (up) serveModelRef = parseServeModel(client.status());
+            final boolean fUp = up;
+            final String fDiag = diag;
             ui.post(() -> {
                 TextView info = findViewById(R.id.native_session_info);
-                if (info != null) info.setText(up ? "会话：reasonix serve 引擎" : "会话：serve 引擎未在线");
-                setNativeStatus(up ? "" : "serve 引擎未启动（请在终端确认 reasonix 可用、已配置 API Key）");
+                if (info != null) {
+                    info.setText(fUp ? "会话：reasonix serve 引擎" : "会话：serve 未在线（点此重启）");
+                    info.setOnClickListener(fUp ? null : v -> restartServeEngine());
+                }
+                if (fUp) {
+                    setNativeStatus("");
+                    startTranscriptFollow();
+                    loadTranscriptSnapshot();
+                } else {
+                    setNativeStatus("serve 未启动：诊断见下方（点顶部「会话」可重启）");
+                    showServeFailureDiagnostics(fDiag);
+                }
             });
-            if (up) {
-                startTranscriptFollow();
-                loadTranscriptSnapshot();
-            }
         }, "serve-ensure").start();
+    }
+
+    /** guest 内启动 serve 的命令（GUI 自动启动与 Serve 面板「启动」按钮共用同一份） */
+    private String serveLaunchCommand(String token) {
+        return "printf '%s\\n' '" + sq(token) + "' > " + ReasonixServe.TOKEN_FILE_GUEST
+                + "; rm -f " + ReasonixServe.PORT_FILE_GUEST + " " + ReasonixServe.PID_FILE_GUEST + "; "
+                + "pkill -f 'reasonix.*[s]erve' 2>/dev/null; sleep 0.5; "
+                + "cd /root; "
+                // 绝对路径兜底：guest 的 .adb-cmd 执行服务与交互 shell 的 PATH 可能不同
+                + "RX=$(command -v reasonix 2>/dev/null || echo /usr/bin/reasonix); "
+                + "nohup \"$RX\" serve --addr 127.0.0.1:8787 --auth token "
+                + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
+                + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
+                + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "
+                // 无浏览器环境：不带 --no-open 时 serve 会尝试打开 Web UI（guest 内无 xdg-open）
+                + "--no-open "
+                + ">" + ReasonixServe.LOG_FILE_GUEST + " 2>&1 & echo SERVE_STARTED";
+    }
+
+    /** 点顶部「会话」：强制重启 serve 引擎（停旧实例 → 重新探测/启动 → 重接 transcript） */
+    private void restartServeEngine() {
+        showToast("正在重启 serve 引擎…");
+        stopTranscriptFollow();
+        new Thread(() -> {
+            executeInGuest("pkill -f 'reasonix.*[s]erve' 2>/dev/null; rm -f "
+                    + ReasonixServe.PORT_FILE_GUEST + " " + ReasonixServe.PID_FILE_GUEST + "; echo KILLED", 8);
+            ui.post(this::ensureServeStarted);
+        }, "serve-restart").start();
+    }
+
+    /** 读 guest 内 serve 日志尾部（proot 模式 /root 映射到宿主 rootfs/root） */
+    private String readGuestServeLogTail(int maxLines) {
+        File f = new File(new File(new File(getFilesDir(), "rootfs"), "root"), ".rsxm-serve.log");
+        if (!f.exists()) {
+            return "(日志文件不存在：guest 内 " + ReasonixServe.LOG_FILE_GUEST + " 未生成 —— "
+                    + "多半是启动命令没被执行，检查 .adb-cmd 执行服务是否在运行)";
+        }
+        try {
+            String all = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            String[] lines = all.split("\n", -1);
+            int from = Math.max(0, lines.length - maxLines);
+            StringBuilder sb = new StringBuilder();
+            for (int i = from; i < lines.length; i++) {
+                String ln = lines[i];
+                if (ln.length() > 300) ln = ln.substring(0, 300) + "…";
+                sb.append(ln).append('\n');
+            }
+            String s = sb.toString().trim();
+            return s.isEmpty() ? "(日志为空)" : s;
+        } catch (Exception e) {
+            return "(读日志失败：" + e + ")";
+        }
+    }
+
+    /** serve 未在线：把启动命令返回 + 端口/token + 日志尾部渲染成可复制的诊断卡片 */
+    private void showServeFailureDiagnostics(String execOut) {
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        final String body = "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
+                + "端口文件读值：" + ReasonixServe.readBoundPort(getFilesDir())
+                + "（-1 = 未写入 " + ReasonixServe.PORT_FILE_GUEST + "）\n"
+                + "token：" + (ReasonixServe.readToken(getFilesDir()).isEmpty() ? "(空)" : "(已写入)") + "\n"
+                + "── " + ReasonixServe.LOG_FILE_GUEST + "（尾部）──\n" + readGuestServeLogTail(25);
+        Log.w(TAG, "serve 未在线诊断:\n" + body);
+
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.topMargin = dp(6);
+        wrap.setLayoutParams(wlp);
+
+        TextView title = new TextView(this);
+        title.setText("⚠ serve 引擎未在线（可复制下方诊断信息反馈）");
+        title.setTextColor(0xFFFFB86C);
+        title.setTextSize(12);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        wrap.addView(title);
+
+        TextView bodyView = new TextView(this);
+        bodyView.setText(body);
+        bodyView.setTextColor(0xFF8B949E);
+        bodyView.setTextSize(11);
+        bodyView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        bodyView.setBackgroundColor(0xFF11161C);
+        bodyView.setPadding(dp(8), dp(6), dp(8), dp(6));
+        wrap.addView(bodyView);
+
+        Button copyBtn = createDarkButton("复制诊断");
+        copyBtn.setTextSize(12);
+        copyBtn.setOnClickListener(v -> {
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        getSystemService(CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("serve-diag", body));
+                    showToast("诊断信息已复制");
+                }
+            } catch (Exception e) {
+                showToast("复制失败：" + e);
+            }
+        });
+        wrap.addView(copyBtn);
+
+        list.addView(wrap, 0);
+        autoScrollBottom(true);
     }
 
     /** 建立 transcript 跟随流（幂等：重复调用先停旧的；断线由客户端自行重连并重取基线） */
@@ -7375,7 +7484,7 @@ public class MainActivity extends Activity {
                     appendUserBubble(txt);
                 } else {
                     setGenInFlight(false);
-                    setNativeStatus("发送失败：serve 引擎未在线（请检查 API Key / 在终端确认 reasonix 可用）");
+                    setNativeStatus("发送失败：serve 未在线（见顶部诊断卡片，可点「会话」重启 serve）");
                 }
             });
         }, "serve-submit").start();

@@ -28,6 +28,17 @@ public class BackgroundService extends Service {
     private static final String CHANNEL_ID = "rsxm_bg_mode";
     private static final int NOTIFICATION_ID = 1;
 
+    /**
+     * 「后台运行模式」默认值 —— <b>默认开启</b>：
+     * 用户实测"切到其他 app（微信/浏览器）后 serve 立刻停、回来也起不来"，根因之一就是
+     * 默认不开保活时本 app 进程属 cached 进程，很容易被系统回收/冻结，proot 环境与 serve
+     * 一起没了。默认开启后本服务以前台服务形式常驻，进程优先级高于 cached，
+     * 切到其他 app 期间环境与 serve 继续运行；用户可在「高级设置 → 后台运行」关闭。
+     *
+     * <p>此常量被 MainActivity 复用（`background_mode` 偏好只有这一个默认值来源）。
+     */
+    public static final boolean BG_MODE_DEFAULT = true;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -39,7 +50,7 @@ public class BackgroundService extends Service {
         // 防御：系统按 START_STICKY 重建服务（intent == null）时校验开关状态，
         // 若用户已关闭后台运行模式则立即退出，避免服务无界常驻。
         if (intent == null && !getSharedPreferences("prefs", MODE_PRIVATE)
-                .getBoolean("background_mode", false)) {
+                .getBoolean("background_mode", BG_MODE_DEFAULT)) {
             stopSelf();
             return START_NOT_STICKY;
         }

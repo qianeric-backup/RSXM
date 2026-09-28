@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.2.8 — 内置插件部署的 su 回退）
-        versionCode 70
-        versionName "2.2.8"
+        // 版本随 GitHub Release 同步更新（当前 v2.2.9 — 后台保活默认开启 + serve 看门狗自愈）
+        versionCode 71
+        versionName "2.2.9"
     }
 
     buildTypes {

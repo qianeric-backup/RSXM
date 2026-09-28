@@ -140,12 +140,12 @@ public class MainActivity extends Activity {
         // 避免双环境并存的 PTY 竞争导致 reasonix CLI 排版错乱。
         // 例外：后台运行模式下旧环境仍在运行 → 直接复用（进程/流静态持有，与 Activity
         // 解耦，终端 I/O 无缝续接），不清理不重启，避免 AI 会话在后台中断。
-        boolean bgMode = getSharedPreferences("prefs", MODE_PRIVATE)
-                .getBoolean("background_mode", false);
+        boolean bgMode = bgModeOn();
         if (bgMode && sProotProcess != null && sProotProcess.isAlive()) {
             environmentStarted = true;
             reuseEnv = true;      // 复用环境：新 WebView 空白，需强制 reasonix 重绘 TUI
             startRootPolling();   // 复用环境：恢复 root 命令桥轮询（onDestroy 已停）
+            startServeWatchdog(); // 复用环境：看门狗继续守着 serve（切到其他 app 期间掉了也能自愈）
             Log.d(TAG, "background mode: reusing running proot environment");
         } else {
             killProotTree();
@@ -289,10 +289,19 @@ public class MainActivity extends Activity {
 
         requestStoragePermission();
 
-        // 后台运行模式恢复：上次开启过（app 被系统回收后重新打开）→ 重新拉起保活服务，
-        // 使进程不被系统回收，proot/reasonix 环境得以在后台继续运行。
-        if (getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("background_mode", false)) {
-            startBackgroundService(false);
+        // 后台运行模式恢复：**默认开启**（保活服务让进程不会退化成 cached 进程，
+        // 切到其他 app / Activity 被回收重开后环境与 serve 都继续运行）；
+        // 只有用户显式关闭过才不拉起。
+        if (bgModeOn()) {
+            // Android 13+ 的通知权限只自动请求一次：没权限时前台服务照常运行，
+            // 只是常驻通知不可见（用户容易误以为没在保活）→ 首次自动开启时请求一次。
+            boolean askNotif = Build.VERSION.SDK_INT >= 33
+                    && !getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("notif_asked", false);
+            if (askNotif) {
+                getSharedPreferences("prefs", MODE_PRIVATE).edit()
+                        .putBoolean("notif_asked", true).apply();
+            }
+            startBackgroundService(askNotif);
         }
 
         // 视图恢复：无历史偏好 → 默认进入原生 GUI 会话视图（V2.0 起 GUI 为默认界面）；
@@ -670,7 +679,7 @@ public class MainActivity extends Activity {
     private void updateBgModeLabel() {
         TextView tv = advancedBgLabel;
         if (tv != null) {
-            boolean on = getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("background_mode", false);
+            boolean on = bgModeOn();
             tv.setText(on ? "后台运行：开" : "后台运行：关");
             tv.setTextColor(on ? 0xFF4CAF50 : 0xFFFFFFFF);
         }
@@ -732,6 +741,18 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Log.w(TAG, "sync yolo mark failed", e);
         }
+    }
+
+    /**
+     * 后台运行（保活）模式开关 —— 默认开启（{@link BackgroundService#BG_MODE_DEFAULT}）。
+     *
+     * <p>统一入口：偏好 `background_mode` 的默认值只在
+     * {@link BackgroundService#BG_MODE_DEFAULT} 里定义一次，避免各处默认值不一致出现
+     * "服务在跑但判定为关"这类分裂状态。
+     */
+    private boolean bgModeOn() {
+        return getSharedPreferences("prefs", MODE_PRIVATE)
+                .getBoolean("background_mode", BackgroundService.BG_MODE_DEFAULT);
     }
 
     /**
@@ -2494,7 +2515,7 @@ public class MainActivity extends Activity {
         addV(panel, createDarkSectionTitle("运行模式"), 12);
         final LinearLayout bgRow = createDarkMenuRow("后台运行", "app 后台保活，AI 会话不中断", null, () -> {
             SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
-            boolean on = !sp.getBoolean("background_mode", false);
+            boolean on = !sp.getBoolean("background_mode", BackgroundService.BG_MODE_DEFAULT);
             sp.edit().putBoolean("background_mode", on).apply();
             if (on) startBackgroundService(true); else stopBackgroundService();
             updateBgModeLabel();
@@ -5848,11 +5869,16 @@ public class MainActivity extends Activity {
         super.onResume();
         flushPendingOutput();   // 前台恢复：冲刷后台期间缓存的终端输出
         SharedPreferences prefs = getSharedPreferences("prefs", MODE_PRIVATE);
-        // 后台运行模式：冻结一切自动前台操作（弹窗/重启），避免抢占其他应用前台
-        // （adb-open-moments-summary.md 坑 4：守护界面抢回前台导致 UI 自动化窗口期过短）
-        if (prefs.getBoolean("background_mode", false)) {
-            return;
+        // 回到前台的自愈：切到其他 app 期间环境被杀/冻结、或 serve 掉了 → 立刻探测并重启引擎，
+        // 不等看门狗的下一个周期（Activity 重建后是新实例，看门狗也要在这里续上）。
+        if (environmentStarted) {
+            startServeWatchdog();
+            probeServeAlive();
         }
+        // 后台保活模式（默认开启）只冻结"抢前台"的面板弹窗 —— adb-open-moments-summary.md 坑 4：
+        // 守护界面抢回前台会让 UI 自动化窗口期过短。但存储授权检测/生效后的环境重启与 serve 自愈
+        // 必须照常执行，否则默认保活下这两件事永远不会发生（授权了也不生效）。
+        final boolean bgMode = bgModeOn();
 
         // API 30+ 的"所有文件访问"（MANAGE_EXTERNAL_STORAGE）：让 reasonix 能读写
         // /sdcard 任意位置（文档、下载、非媒体等）。首次启动引导授权；检测到授权状态
@@ -5864,7 +5890,7 @@ public class MainActivity extends Activity {
             if (managed && !wasManaged) {
                 pushOutput("\r\n[存储权限已生效，正在重启 Linux 环境...]\r\n");
                 restartEnvironment();
-            } else if (!managed && !prefs.getBoolean("storage_guided", false)) {
+            } else if (!managed && !prefs.getBoolean("storage_guided", false) && !bgMode) {
                 prefs.edit().putBoolean("storage_guided", true).apply();
                 // 全屏面板引导（取代系统弹窗，避免遮挡控件）
                 LinearLayout panel = new LinearLayout(this);
@@ -6070,10 +6096,12 @@ public class MainActivity extends Activity {
             }
             writeAdbIpFile(rootfs);
             ensureReasonixConfig(rootfs);
-            // 环境（重新）就绪后：GUI 视图在用的话，确保 serve 引擎与事件流接回
-            // （serve 是 guest 内进程，proot 重启会一并消失）。延迟几秒等 guest 内的
-            // 命令执行服务（.adb-cmd watcher）就绪，否则启动命令会落空。
-            if (nativeViewOn) ui.postDelayed(this::ensureServeStarted, 6000);
+            // 环境（重新）就绪后：确保 serve 引擎与事件流接回（serve 是 guest 内进程，proot 重启
+            // 会一并消失）。延迟几秒等 guest 内的命令执行服务（.adb-cmd watcher）就绪，
+            // 否则启动命令会落空（ensureServeStarted 内部还有退避重试，不再是一次定生死）。
+            // 注意：这里不再判断 nativeViewOn —— serve 是"常驻引擎"，切到终端视图/其他 app 都该活着。
+            ui.postDelayed(this::ensureServeStarted, 6000);
+            startServeWatchdog();   // 之后每 20 秒确认一次：掉线自动重启（切到其他 app 回来也在）
         } catch (Exception e) {
             Log.e(TAG, "startEnvironment failed", e);
             pushOutput("\r\n[初始化失败] " + e + "\r\n");
@@ -7025,6 +7053,78 @@ public class MainActivity extends Activity {
     /** serve 引擎启动/探测进行中（防「重启」并发启动多个实例） */
     private volatile boolean serveStarting = false;
 
+    // ------------------------------------------------------------------
+    // serve 看门狗：切到其他 app（或被系统回收/冻结）后，服务掉了也能自己回来
+    // ------------------------------------------------------------------
+
+    /** 看门狗探测间隔：环境在跑时每 20 秒确认一次 serve 在线（一次 GET /status，开销极小） */
+    private static final long SERVE_WATCHDOG_MS = 20000;
+    /** 看门狗两次自动重启的最小间隔：serve 自身起不来时不要每 20 秒密集重启 */
+    private static final long SERVE_RESTART_MIN_GAP_MS = 15000;
+    /** 单次自动启动的尝试次数：环境刚重启时 guest 内 .adb-cmd 执行服务可能还没就绪，命令会落空 */
+    private static final int SERVE_START_ATTEMPTS = 2;
+    private boolean watchdogOn = false;
+    private volatile long serveRestartAt = 0;
+    /** 看门狗的连续失败次数（掉线重启仍在掉 → 指数拉长重启间隔，避免刷诊断卡片与反复重启 guest 命令） */
+    private int serveRestartFails = 0;
+
+    private final Runnable serveWatchdogTask = new Runnable() {
+        @Override public void run() {
+            if (!watchdogOn) return;
+            try {
+                probeServeAlive();
+            } catch (Exception e) {
+                Log.w(TAG, "serve watchdog failed", e);
+            }
+            if (watchdogOn) ui.postDelayed(this, SERVE_WATCHDOG_MS);
+        }
+    };
+
+    /** 启动 serve 看门狗（幂等）：环境就绪 / Activity 复用环境时调用 */
+    private void startServeWatchdog() {
+        if (watchdogOn) return;
+        watchdogOn = true;
+        ui.postDelayed(serveWatchdogTask, SERVE_WATCHDOG_MS);
+        Log.d(TAG, "serve watchdog started");
+    }
+
+    private void stopServeWatchdog() {
+        watchdogOn = false;
+        ui.removeCallbacks(serveWatchdogTask);
+    }
+
+    /**
+     * serve 健康检查（宿主侧 GET /status，3 秒超时）：不在线就拆掉旧的 transcript 客户端并
+     * 重新拉起引擎 —— 这是"切到其他 app 再回来 serve 还在"的兜底。
+     *
+     * <p>首次启动仍由 {@link #ensureServeStarted()} 负责（带启动重试与诊断卡片）；
+     * 这里只做周期探测 + 掉线重启，并用最小重启间隔防抖动。
+     */
+    private void probeServeAlive() {
+        if (!environmentStarted || !watchdogOn || serveStarting) return;
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            if (client.isUp()) {
+                serveOnline = true;
+                serveRestartFails = 0;      // 恢复正常：退避窗口复位
+                return;
+            }
+            // 连续掉线时把重启间隔指数拉长（15s → 30s → 60s → 120s 封顶）：
+            // serve 自身起不来（如缺 API Key）时不要每 20 秒重启一次、每 20 秒刷一张诊断卡片。
+            long gap = Math.min(SERVE_RESTART_MIN_GAP_MS << Math.min(serveRestartFails, 3), 120_000L);
+            long now = System.currentTimeMillis();
+            if (now - serveRestartAt < gap) return;
+            serveRestartAt = now;
+            serveRestartFails = Math.min(serveRestartFails + 1, 4);
+            Log.w(TAG, "serve watchdog: /status 不可达（连续 " + serveRestartFails
+                    + " 次），自动重启引擎；下次最早 "
+                    + Math.min(SERVE_RESTART_MIN_GAP_MS << Math.min(serveRestartFails, 3), 120_000L) / 1000
+                    + " 秒后");
+            stopTranscriptFollow();     // 旧客户端还在重连，先拆掉；ensureServeStarted 会重新接上
+            ui.post(this::ensureServeStarted);
+        }, "serve-probe").start();
+    }
+
     /** 确保 serve 引擎在线并接上 transcript 跟随流（环境就绪后调用；幂等） */
     private void ensureServeStarted() {
         if (transcript != null && transcript.isRunning()) return;
@@ -7042,9 +7142,16 @@ public class MainActivity extends Activity {
                     if (token.isEmpty()) token = ReasonixServe.generateToken();
                     // 宿主侧同步写一份 token（chroot 模式 root 属主时此步可能失败，靠 guest 侧兜底）
                     writeServeToken(token);
-                    diag = executeInGuest(serveLaunchCommand(token), 20);
-                    for (int i = 0; i < 20 && !client.isUp(); i++) {
-                        try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                    // 退避重试：环境刚（重）启动时 guest 内的 .adb-cmd 执行服务往往还没就绪，
+                    // 启动命令会落空 —— 只尝试一次的话就是"打开了但 serve 不在线、只能手动点重启"。
+                    for (int attempt = 0; attempt < SERVE_START_ATTEMPTS && !client.isUp(); attempt++) {
+                        if (attempt > 0) {
+                            try { Thread.sleep(3000L * attempt); } catch (InterruptedException e) { break; }
+                        }
+                        diag = executeInGuest(serveLaunchCommand(token), 15);
+                        for (int i = 0; i < 15 && !client.isUp(); i++) {
+                            try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                        }
                     }
                 }
                 up = client.isUp();
@@ -7055,6 +7162,7 @@ public class MainActivity extends Activity {
             }
             serveStarting = false;
             serveOnline = up;
+            if (up) serveRestartFails = 0;   // 起来了：看门狗的退避窗口复位
             final boolean fUp = up;
             final String fDiag = diag;
             ui.post(() -> {
@@ -7963,11 +8071,11 @@ public class MainActivity extends Activity {
         if (sCurrent == this) sCurrent = null;
         stopRootPolling();
         stopTranscriptFollow();   // 停 transcript 跟随流
+        stopServeWatchdog();      // 看门狗随 Activity 停；重新打开时 onCreate/onResume 会续上
         // 后台运行模式：环境与 Activity 生命周期解耦，退出 Activity 不杀 proot
         // （由前台服务保活继续后台运行，重新打开时 onCreate 复用环境与终端 I/O）；
         // 关闭模式时照旧清理。
-        boolean bgMode = getSharedPreferences("prefs", MODE_PRIVATE)
-                .getBoolean("background_mode", false);
+        boolean bgMode = bgModeOn();
         if (!bgMode && sProotProcess != null) {
             sProotProcess.destroy();     // pty-bridge 收到 SIGTERM 后会 kill 整个 guest 进程组
             sProotProcess = null;

@@ -5470,24 +5470,67 @@ public class MainActivity extends Activity {
      * <p>先 {@code delete()} 再写：旧环境进程可能仍 exec 着该文件，直接覆盖(O_TRUNC)会报 ETXTBSY，
      * unlink 正在执行的 inode 是合法的。
      */
-    private void deployBundledReasonix(File rootfs) throws IOException {
+    private boolean deployBundledReasonix(File rootfs) {
         File rx = new File(new File(rootfs, "usr/local/bin"), "reasonix");
-        rx.getParentFile().mkdirs();
-        rx.delete();
-        extractAsset("usr/bin/reasonix", rx);
-        rx.setExecutable(true, false);
-        writeNpmVersion(BUNDLED_REASONIX_VERSION);
         try {
-            java.nio.file.Files.write(new File(rx.getParentFile(), ".rsxm-reasonix-apk-ver").toPath(),
-                    (appVersionName() + "\n").getBytes(StandardCharsets.UTF_8));
-        } catch (Exception ignored) {}
+            // 1) 先解到 app 私有目录（必然可写）：既是复制的源，也让 root 回退路径有源文件可用
+            File staged = new File(getFilesDir(), "reasonix.staged");
+            extractAsset("usr/bin/reasonix", staged);
+            staged.setReadable(true, false);      // root 回退时 su 进程需要能读它
+            boolean ok = false;
+            try {
+                rx.getParentFile().mkdirs();
+                rx.delete();
+                java.nio.file.Files.copy(staged.toPath(), rx.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                ok = true;
+            } catch (Exception e) {
+                // chroot 模式（曾以 root 运行过）下 rootfs 内文件属主是 root、app 无写权限
+                Log.w(TAG, "deploy reasonix: direct write failed (" + e + "), retry via root");
+            }
+            if (!ok) ok = deployReasonixViaRoot(staged, rx);
+            if (!ok) {
+                reasonixDeployError = "无法写入 " + rx + "（app 无写权限且 root 不可用）";
+                Log.e(TAG, "deploy reasonix failed: " + reasonixDeployError);
+                return false;
+            }
+            rx.setExecutable(true, false);
+            writeNpmVersion(BUNDLED_REASONIX_VERSION);
+            try {
+                java.nio.file.Files.write(new File(rx.getParentFile(), ".rsxm-reasonix-apk-ver").toPath(),
+                        (appVersionName() + "\n").getBytes(StandardCharsets.UTF_8));
+            } catch (Exception ignored) {}
+            reasonixDeployError = null;
+            return true;
+        } catch (Exception e) {
+            reasonixDeployError = String.valueOf(e);
+            Log.e(TAG, "deploy reasonix failed", e);
+            return false;
+        }
+    }
+
+    /** 用 root(su) 把暂存二进制复制进 guest —— chroot / root 属主场景下 app 自身写不进去 */
+    private boolean deployReasonixViaRoot(File staged, File dest) {
+        try {
+            String out = execRootCommand("mkdir -p '" + dest.getParent() + "'; cp -f '" + staged
+                    + "' '" + dest + "' && chmod 755 '" + dest + "' && echo RXM_OK", 30);
+            boolean ok = out != null && out.contains("RXM_OK");
+            if (!ok) Log.w(TAG, "deploy reasonix via root failed, out=" + out);
+            return ok;
+        } catch (Exception e) {
+            Log.w(TAG, "deploy reasonix via root failed", e);
+            return false;
+        }
     }
 
     /** 从 APK assets 恢复内置 reasonix */
     private void restoreBundledResonix() {
         try {
             File rootfs = new File(getFilesDir(), "rootfs");
-            deployBundledReasonix(rootfs);
+            if (!deployBundledReasonix(rootfs)) {
+                pushOutput("\r\n[恢复内置 reasonix 失败] " + reasonixDeployError + "\r\n");
+                return;
+            }
             Log.d(TAG, "reasonix restored from bundle");
             pushOutput("\r\n[已恢复内置 reasonix，正在重启环境...]\r\n");
             restartEnvironment();
@@ -6299,7 +6342,9 @@ public class MainActivity extends Activity {
         // 2. rootfs 解压完成（proot 与依赖库打包在 APK native libs 中，无需解压）
 
         // 3. reasonix、pty-bridge 部署进 rootfs（/usr/local/bin 与 /usr/bin）
-        deployBundledReasonix(rootfs);
+        if (!deployBundledReasonix(rootfs)) {
+            throw new IOException("内置 reasonix 部署失败：" + reasonixDeployError);
+        }
         File bridge = new File(rootfs, "usr/bin/pty-bridge");
         bridge.delete();   // 防残留 exec 导致 ETXTBSY（unlink 正在执行的 inode 合法）
         extractAsset("usr/bin/pty-bridge", bridge);
@@ -6724,6 +6769,8 @@ public class MainActivity extends Activity {
     private String transcriptWindowSig = "";
     /** 是否已提示过"reasonix 版本过旧、无 /transcript 契约"（避免重复插卡片） */
     private volatile boolean transcriptUnavailableNoted = false;
+    /** 最近一次内置 reasonix 部署失败原因（null = 成功/未尝试；诊断卡片会显示） */
+    private volatile String reasonixDeployError = null;
     /** 本地即时回显的 user 气泡（服务端 user record 到达后移除，避免重复） */
     private volatile BubbleView pendingUserBubble;
     private volatile String pendingUserText = "";
@@ -6845,6 +6892,9 @@ public class MainActivity extends Activity {
     private String serveStopCommand() {
         return "if [ -s " + ReasonixServe.PID_FILE_GUEST + " ]; then kill \"$(cat "
                 + ReasonixServe.PID_FILE_GUEST + ")\" 2>/dev/null; sleep 0.5; fi; "
+                // 兜底：没有 pid 文件时（旧版、异常退出、进过 TUI 的残留）按可执行文件名清理，
+                // 否则残留进程占着 8787 会让新实例绑定失败。方括号避免匹配到本命令自身。
+                + "pkill -f '[r]easonix serve' 2>/dev/null; "
                 + "rm -f " + ReasonixServe.PORT_FILE_GUEST;
     }
 
@@ -6857,9 +6907,12 @@ public class MainActivity extends Activity {
                 + "cd /root; "
                 // 路径：PATH 优先 /usr/local/bin（内置部署位置），再兜底 /usr/bin
                 + "RX=$(command -v reasonix 2>/dev/null || echo /usr/local/bin/reasonix); "
+                // 诊断：把实际路径与版本写进 .adb-out，诊断卡片里一眼能看到跑的是哪个 reasonix
+                + "echo \"[rsxm] RX=$RX\"; "
+                + "echo \"[rsxm] version:$(\"$RX\" version 2>&1 | head -1)\"; "
                 // 按 serve --help 实测支持的 flag 拼参数：不同版本 flag 集不同（v1.31.x 没有 -addr，
                 // 硬写会直接 "unknown flag: --addr" 退出并在日志里留下看不出所以然的错）
-                + "H=$(\"$RX\" serve --help 2>&1); A=''; "
+                + "H=$(\"$RX\" serve --help </dev/null 2>&1); A=''; "
                 + "case \"$H\" in *'-addr'*) A=\"$A --addr 127.0.0.1:8787\";; esac; "
                 + "case \"$H\" in *'-token-file'*) A=\"$A --auth token --token-file "
                 + ReasonixServe.TOKEN_FILE_GUEST + "\";; esac; "
@@ -6867,10 +6920,17 @@ public class MainActivity extends Activity {
                 + "case \"$H\" in *'-pid-file'*) A=\"$A --pid-file " + ReasonixServe.PID_FILE_GUEST + "\";; esac; "
                 // 无浏览器环境：不带 --no-open 时 serve 会尝试打开 Web UI（guest 内无 xdg-open）
                 + "case \"$H\" in *'-no-open'*) A=\"$A --no-open\";; esac; "
+                // help 探测完全拿不到 flag（老版本不认 --help，或输出被 TUI 序列污染）→
+                // 用内置 1.39.3 已知可用的参数集兜底，而不是退化成"裸 serve"（那会进 TUI 且不写端口文件）
+                + "case \"$A\" in '') A=\"--addr 127.0.0.1:8787 --port-file " + ReasonixServe.PORT_FILE_GUEST
+                + " --pid-file " + ReasonixServe.PID_FILE_GUEST + " --no-open --auth none\"; "
+                + "echo \"[rsxm] help detection failed, using bundled defaults\";; esac; "
                 // 没拿到 token-file 能力时退化为无认证（此时 app 带的 Bearer 头会被 serve 忽略）
                 + "case \"$A\" in *'--auth'*) ;; *) case \"$H\" in *'-auth'*) A=\"$A --auth none\";; esac;; esac; "
                 + "echo \"[rsxm] serve flags:$A\"; "
-                + "nohup \"$RX\" serve $A >" + ReasonixServe.LOG_FILE_GUEST + " 2>&1 & echo SERVE_STARTED";
+                // stdin 接 /dev/null：后台服务不该继承 TUI 的 PTY
+                + "nohup \"$RX\" serve $A </dev/null >" + ReasonixServe.LOG_FILE_GUEST
+                + " 2>&1 & echo SERVE_STARTED";
     }
 
     /** 点顶部「会话」：强制重启 serve 引擎（停旧实例 → 重新探测/启动 → 重接 transcript） */
@@ -6960,7 +7020,8 @@ public class MainActivity extends Activity {
     /** serve 未在线：把启动命令返回 + 端口/token + 日志尾部渲染成可复制的诊断卡片 */
     private void showServeFailureDiagnostics(String execOut) {
         appendDiagnosticCard("⚠ serve 引擎未在线（可复制下方诊断信息反馈）",
-                "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
+                (reasonixDeployError == null ? "" : "内置 reasonix 部署失败：" + reasonixDeployError + "\n")
+                        + "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
                         + "端口文件读值：" + ReasonixServe.readBoundPort(getFilesDir())
                         + "（-1 = 未写入 " + ReasonixServe.PORT_FILE_GUEST + "）\n"
                         + "token：" + (ReasonixServe.readToken(getFilesDir()).isEmpty() ? "(空)" : "(已写入)") + "\n"

@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.2.4 — 内置 reasonix 升到 1.39.3，serve 参数按能力探测）
-        versionCode 66
-        versionName "2.2.4"
+        // 版本随 GitHub Release 同步更新（当前 v2.2.5 — reasonix 部署加固（chroot/root 属主）+ serve 探测兜底）
+        versionCode 67
+        versionName "2.2.5"
     }
 
     buildTypes {

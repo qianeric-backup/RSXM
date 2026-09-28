@@ -5451,16 +5451,43 @@ public class MainActivity extends Activity {
         return true;
     }
 
+    /** 内置 reasonix 版本（必须与 assets/usr/bin/reasonix 一致；UI 显示与部署记录都用它） */
+    private static final String BUNDLED_REASONIX_VERSION = "1.39.3";
+
+    /** 当前 APK 的 versionName（作为"内置资源已部署"的标记值） */
+    private String appVersionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * 部署内置 reasonix 到 guest（{@code /usr/local/bin/reasonix}），并写下两份标记：
+     * {@code .reasonix/.npm-version}（UI 显示版本）与 {@code .rsxm-reasonix-apk-ver}（部署时的 APK 版本）。
+     *
+     * <p>先 {@code delete()} 再写：旧环境进程可能仍 exec 着该文件，直接覆盖(O_TRUNC)会报 ETXTBSY，
+     * unlink 正在执行的 inode 是合法的。
+     */
+    private void deployBundledReasonix(File rootfs) throws IOException {
+        File rx = new File(new File(rootfs, "usr/local/bin"), "reasonix");
+        rx.getParentFile().mkdirs();
+        rx.delete();
+        extractAsset("usr/bin/reasonix", rx);
+        rx.setExecutable(true, false);
+        writeNpmVersion(BUNDLED_REASONIX_VERSION);
+        try {
+            java.nio.file.Files.write(new File(rx.getParentFile(), ".rsxm-reasonix-apk-ver").toPath(),
+                    (appVersionName() + "\n").getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {}
+    }
+
     /** 从 APK assets 恢复内置 reasonix */
     private void restoreBundledResonix() {
         try {
             File rootfs = new File(getFilesDir(), "rootfs");
-            File rx = new File(new File(rootfs, "usr/local/bin"), "reasonix");
-            rx.getParentFile().mkdirs();
-            extractAsset("usr/bin/reasonix", rx);
-            rx.setExecutable(true, false);
-            // 重置版本标记为内置版（避免 UI 仍显示之前网络更新过的旧版本号）
-            writeNpmVersion("1.31.4");
+            deployBundledReasonix(rootfs);
             Log.d(TAG, "reasonix restored from bundle");
             pushOutput("\r\n[已恢复内置 reasonix，正在重启环境...]\r\n");
             restartEnvironment();
@@ -6158,15 +6185,26 @@ public class MainActivity extends Activity {
 
     /** 覆盖安装后刷新可更新的 assets（entry.sh/reasonix/pty-bridge 随 APK 版本更新） */
     private void refreshAssets(File files, File rootfs) throws IOException {
-        // reasonix：仅在不存在时复制（保留用户通过网络/文件更新过的版本，不被内置版覆盖）
+        // reasonix：APK 升级后重新部署内置版本。
+        // 旧逻辑"仅在文件不存在时部署"会让存量设备永久停留在旧版 —— 例如 v1.31.4 既不认 serve 的
+        // -addr，也没有 GUI 回显所需的 transcript 投影，导致 serve 起不来、GUI 空。
+        // 这里以"部署时的 APK versionName"作标记：APK 升级 → 标记不符 → 覆盖为内置版本；
+        // 同一 APK 内重复启动不重复写入（49MB 二进制）。
         File rx = new File(rootfs, "usr/local/bin/reasonix");
-        if (!rx.exists()) {
-            rx.getParentFile().mkdirs();
-            extractAsset("usr/bin/reasonix", rx);
-            rx.setExecutable(true, false);
-            Log.d(TAG, "reasonix deployed from bundle (first time)");
+        File rxStamp = new File(new File(rootfs, "usr/local/bin"), ".rsxm-reasonix-apk-ver");
+        String stamp = "";
+        try {
+            if (rxStamp.exists()) {
+                stamp = new String(java.nio.file.Files.readAllBytes(rxStamp.toPath()),
+                        StandardCharsets.UTF_8).trim();
+            }
+        } catch (Exception ignored) {}
+        if (!rx.exists() || !appVersionName().equals(stamp)) {
+            deployBundledReasonix(rootfs);
+            Log.d(TAG, "reasonix deployed from bundle (apk=" + appVersionName()
+                    + " bundled=" + BUNDLED_REASONIX_VERSION + ")");
         } else {
-            Log.d(TAG, "reasonix exists, keep current version");
+            Log.d(TAG, "reasonix already deployed for this apk version, keep current");
         }
         // pty-bridge：先删除再写入（旧环境进程可能仍 exec 着该文件，
         // 直接覆盖(O_TRUNC)报 ETXTBSY；unlink 正在执行的 inode 合法）
@@ -6261,12 +6299,7 @@ public class MainActivity extends Activity {
         // 2. rootfs 解压完成（proot 与依赖库打包在 APK native libs 中，无需解压）
 
         // 3. reasonix、pty-bridge 部署进 rootfs（/usr/local/bin 与 /usr/bin）
-        File rx = new File(rootfs, "usr/local/bin/reasonix");
-        rx.getParentFile().mkdirs();
-        extractAsset("usr/bin/reasonix", rx);
-        rx.setExecutable(true, false);
-        // 记录内置版本号（新装环境 UI「更新 Reasonix」面板显示内置 1.31.4）
-        writeNpmVersion("1.31.4");
+        deployBundledReasonix(rootfs);
         File bridge = new File(rootfs, "usr/bin/pty-bridge");
         bridge.delete();   // 防残留 exec 导致 ETXTBSY（unlink 正在执行的 inode 合法）
         extractAsset("usr/bin/pty-bridge", bridge);
@@ -6689,6 +6722,8 @@ public class MainActivity extends Activity {
     private volatile boolean transcriptRunning = false;
     /** 最近一次渲染的窗口内容签名（基线重复到达时跳过整表 setText，避免空转卡顿） */
     private String transcriptWindowSig = "";
+    /** 是否已提示过"reasonix 版本过旧、无 /transcript 契约"（避免重复插卡片） */
+    private volatile boolean transcriptUnavailableNoted = false;
     /** 本地即时回显的 user 气泡（服务端 user record 到达后移除，避免重复） */
     private volatile BubbleView pendingUserBubble;
     private volatile String pendingUserText = "";
@@ -6820,15 +6855,22 @@ public class MainActivity extends Activity {
                 + "; chmod 600 " + ReasonixServe.TOKEN_FILE_GUEST
                 + "; " + serveStopCommand() + "; "
                 + "cd /root; "
-                // 绝对路径兜底：guest 的 .adb-cmd 执行服务与交互 shell 的 PATH 可能不同
-                + "RX=$(command -v reasonix 2>/dev/null || echo /usr/bin/reasonix); "
-                + "nohup \"$RX\" serve --addr 127.0.0.1:8787 --auth token "
-                + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
-                + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
-                + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "
+                // 路径：PATH 优先 /usr/local/bin（内置部署位置），再兜底 /usr/bin
+                + "RX=$(command -v reasonix 2>/dev/null || echo /usr/local/bin/reasonix); "
+                // 按 serve --help 实测支持的 flag 拼参数：不同版本 flag 集不同（v1.31.x 没有 -addr，
+                // 硬写会直接 "unknown flag: --addr" 退出并在日志里留下看不出所以然的错）
+                + "H=$(\"$RX\" serve --help 2>&1); A=''; "
+                + "case \"$H\" in *'-addr'*) A=\"$A --addr 127.0.0.1:8787\";; esac; "
+                + "case \"$H\" in *'-token-file'*) A=\"$A --auth token --token-file "
+                + ReasonixServe.TOKEN_FILE_GUEST + "\";; esac; "
+                + "case \"$H\" in *'-port-file'*) A=\"$A --port-file " + ReasonixServe.PORT_FILE_GUEST + "\";; esac; "
+                + "case \"$H\" in *'-pid-file'*) A=\"$A --pid-file " + ReasonixServe.PID_FILE_GUEST + "\";; esac; "
                 // 无浏览器环境：不带 --no-open 时 serve 会尝试打开 Web UI（guest 内无 xdg-open）
-                + "--no-open "
-                + ">" + ReasonixServe.LOG_FILE_GUEST + " 2>&1 & echo SERVE_STARTED";
+                + "case \"$H\" in *'-no-open'*) A=\"$A --no-open\";; esac; "
+                // 没拿到 token-file 能力时退化为无认证（此时 app 带的 Bearer 头会被 serve 忽略）
+                + "case \"$A\" in *'--auth'*) ;; *) case \"$H\" in *'-auth'*) A=\"$A --auth none\";; esac;; esac; "
+                + "echo \"[rsxm] serve flags:$A\"; "
+                + "nohup \"$RX\" serve $A >" + ReasonixServe.LOG_FILE_GUEST + " 2>&1 & echo SERVE_STARTED";
     }
 
     /** 点顶部「会话」：强制重启 serve 引擎（停旧实例 → 重新探测/启动 → 重接 transcript） */
@@ -6865,16 +6907,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** serve 未在线：把启动命令返回 + 端口/token + 日志尾部渲染成可复制的诊断卡片 */
-    private void showServeFailureDiagnostics(String execOut) {
+    /** 在会话列表顶部插一张可复制的诊断卡片（标题 + 等宽正文 + 复制按钮） */
+    private void appendDiagnosticCard(String titleText, String body) {
         LinearLayout list = findViewById(R.id.native_output);
         if (list == null) return;
-        final String body = "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
-                + "端口文件读值：" + ReasonixServe.readBoundPort(getFilesDir())
-                + "（-1 = 未写入 " + ReasonixServe.PORT_FILE_GUEST + "）\n"
-                + "token：" + (ReasonixServe.readToken(getFilesDir()).isEmpty() ? "(空)" : "(已写入)") + "\n"
-                + "── " + ReasonixServe.LOG_FILE_GUEST + "（尾部）──\n" + readGuestServeLogTail(25);
-        Log.w(TAG, "serve 未在线诊断:\n" + body);
+        Log.w(TAG, titleText + "\n" + body);
+        final String text = titleText + "\n" + body;
 
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
@@ -6884,7 +6922,7 @@ public class MainActivity extends Activity {
         wrap.setLayoutParams(wlp);
 
         TextView title = new TextView(this);
-        title.setText("⚠ serve 引擎未在线（可复制下方诊断信息反馈）");
+        title.setText(titleText);
         title.setTextColor(0xFFFFB86C);
         title.setTextSize(12);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
@@ -6906,7 +6944,7 @@ public class MainActivity extends Activity {
                 android.content.ClipboardManager cm = (android.content.ClipboardManager)
                         getSystemService(CLIPBOARD_SERVICE);
                 if (cm != null) {
-                    cm.setPrimaryClip(android.content.ClipData.newPlainText("serve-diag", body));
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("serve-diag", text));
                     showToast("诊断信息已复制");
                 }
             } catch (Exception e) {
@@ -6917,6 +6955,32 @@ public class MainActivity extends Activity {
 
         list.addView(wrap, 0);
         autoScrollBottom(true);
+    }
+
+    /** serve 未在线：把启动命令返回 + 端口/token + 日志尾部渲染成可复制的诊断卡片 */
+    private void showServeFailureDiagnostics(String execOut) {
+        appendDiagnosticCard("⚠ serve 引擎未在线（可复制下方诊断信息反馈）",
+                "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
+                        + "端口文件读值：" + ReasonixServe.readBoundPort(getFilesDir())
+                        + "（-1 = 未写入 " + ReasonixServe.PORT_FILE_GUEST + "）\n"
+                        + "token：" + (ReasonixServe.readToken(getFilesDir()).isEmpty() ? "(空)" : "(已写入)") + "\n"
+                        + "── " + ReasonixServe.LOG_FILE_GUEST + "（尾部）──\n" + readGuestServeLogTail(25));
+    }
+
+    /**
+     * serve 在线、但拿不到 /transcript 快照：说明设备上的 reasonix 版本过旧（该契约 v1.39 才有），
+     * GUI 回显无从取数。给出明确原因与解决办法，避免"引擎在线却空白"这种无解释状态。
+     */
+    private void noteTranscriptUnavailable() {
+        if (!serveOnline || transcriptUnavailableNoted) return;
+        transcriptUnavailableNoted = true;
+        setNativeStatus("serve 在线，但无 /transcript 契约（reasonix 版本过旧）");
+        appendDiagnosticCard("⚠ serve 在线，但取不到 /transcript 数据（reasonix 版本过旧）",
+                "原因：设备上 guest 内的 reasonix 版本过旧，不提供服务端 transcript 投影\n"
+                        + "（该契约 v1.39 起才有；v1.31/v1.38 只有 /events + /history）。\n"
+                        + "本版 APK 已内置 reasonix " + BUNDLED_REASONIX_VERSION + "：升级安装本 APK 后会自动覆盖部署，\n"
+                        + "重启环境（侧滑栏 ADB 面板或重开 app）即可生效。\n"
+                        + "也可以在侧滑栏「更新 resonix」里联网更新到最新版。");
     }
 
     /** 建立 transcript 跟随流（幂等：重复调用先停旧的；断线由客户端自行重连并重取基线） */
@@ -6982,7 +7046,10 @@ public class MainActivity extends Activity {
             TranscriptClient c = new TranscriptClient("http://127.0.0.1:" + port,
                     ReasonixServe.readToken(getFilesDir()), null);
             final org.json.JSONObject snap = c.fetchSnapshot(8000);
-            if (snap == null) return;
+            if (snap == null) {
+                ui.post(this::noteTranscriptUnavailable);   // serve 在线却取不到 → 版本过旧，给出解释
+                return;
+            }
             org.json.JSONObject frame = new org.json.JSONObject();
             try {
                 frame.put("protocolVersion", snap.optInt("protocolVersion", 2));

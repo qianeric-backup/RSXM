@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.3.0 — 融合 dsh-purge v1.1.35 清洗台/演练台 UI）
-        versionCode 72
-        versionName "2.3.0"
+        // 版本随 GitHub Release 同步更新（当前 v2.3.1 — 破甲内核升级 v0.4.0-hardened + 锚点自愈）
+        versionCode 73
+        versionName "2.3.1"
     }
 
     buildTypes {

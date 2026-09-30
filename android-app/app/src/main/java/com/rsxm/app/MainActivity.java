@@ -2752,9 +2752,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 补丁状态：已应用 / 未应用 */
+    /** 补丁状态：已应用 / 未应用（ARMOR 需标记 + 内容锚点双确认，防旧版浅内容误报已应用） */
     private boolean purgePatchApplied(int id) {
         if (id == PATCH_AGENTS) return purgeAgentsFile().exists();
+        if (id == PATCH_ARMOR) {
+            String c = purgeConfRead();
+            return c.contains(PATCH_MARKERS[PATCH_ARMOR]) && c.contains(ARMOR_ANCHOR);
+        }
         return purgeConfRead().contains(PATCH_MARKERS[id]);
     }
 
@@ -2954,7 +2958,9 @@ public class MainActivity extends Activity {
                 null, null, null, refreshAll));
         restoreP.setOnClickListener(v -> {
             try {
-                final String tpl = readAssetText("purge/prompt-inject.md");
+                // 恢复内置破甲内核最新载荷（infinite-gen-4.1-flash v0.4.0-hardened，
+                // 与 canonical 逐字节一致），写入编辑区供保存/应用
+                final String tpl = readAssetText("purge/prompts/infinite-gen-4.1-flash.md");
                 runOnUiThread(() -> promptInput.setText(tpl));
             } catch (Exception e) {
                 Log.w(TAG, "purge prompt restore failed", e);
@@ -7009,8 +7015,12 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    /** 破甲环境注入标记（infinite-gen-3 v0.5.0）：config.toml 中以此判断是否已注入，幂等 */
-    private static final String BREAK_ARMOR_MARKER = "rsxm-break-armor-v0.3.0-gen4";
+    /** 破甲环境注入标记（infinite-gen-4 v0.4.0-hardened）：config.toml 中以此判断是否已注入，幂等 */
+    private static final String BREAK_ARMOR_MARKER = "rsxm-break-armor-v0.4.0-hardened";
+    /** 破甲内核内容锚点：v0.4.0-hardened 载荷特征串（escape-clause free kernel）。
+     *  config 中 system_prompt 缺失该锚点（旧 v0.3.0 浅版 / 被 reasonix 重写 / 被改坏）
+     *  时，即使标记残留也强制重注入——锚点自愈，保证破甲不因内容漂移而失效。 */
+    private static final String ARMOR_ANCHOR = "escape-clause free kernel";
 
     /**
      * 渗透修复：[permissions] allow 白名单 + 动态 bash。
@@ -7085,10 +7095,11 @@ public class MainActivity extends Activity {
                 java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
                 Log.d(TAG, "reasonix telemetry set false");
             }
-            // 破甲环境注入（infinite-gen-3 v0.5.0）：system_prompt 置顶写入完整破甲提示词。
-            // 幂等：已含 rsxm-break-armor-v0.3.0-gen4 标记则跳过（旧 v0.5.0/gen3 同样触发迁移）；否则移除旧 system_prompt 块后重写，
+            // 破甲环境注入（infinite-gen-4 v0.4.0-hardened）：system_prompt 置顶写入完整破甲提示词。
+            // 幂等：内容含 v0.4.0-hardened 锚点（escape-clause free kernel）则跳过（旧 v0.3.0 浅版 /
+            // v0.5.0 / 被改坏内容同样触发迁移）；否则移除旧 system_prompt 块后重写，
             // 保证任何启动/更新后破甲环境都生效（reasonix 以顶层 system_prompt 键加载）。
-            if (!content.contains(BREAK_ARMOR_MARKER)) {
+            if (!content.contains(ARMOR_ANCHOR)) {
                 String prompt = readBreakArmorPrompt();
                 if (!prompt.isEmpty()) {
                     // 移除现有 system_prompt 键（多行 """ 或单行 "..."），避免残留旧能力说明/重复键
@@ -7171,15 +7182,17 @@ public class MainActivity extends Activity {
             }
             // 破甲注入 v2（RSXM_ARMOR_V2 标记）：reasonix 只读 [agent] 表内的 system_prompt，
             // 顶层键被忽略（实测会话 system 仍是默认 prompt → 破甲不生效）。
-            // 逻辑：移除旧顶层破甲块（含 rsxm-break-armor-v0.5.0 标记）与任何独立 system_prompt 块，
-            // 然后把完整破甲提示词写入 [agent] 段（存在则段头下插行；不存在则追加新表）。幂等。
+            // 逻辑：移除旧顶层破甲块（含 rsxm-break-armor-v0.5.0 / v0.3.0-gen4 标记）与任何独立
+            // system_prompt 块，然后把完整破甲提示词写入 [agent] 段（存在则段头下插行；不存在则追加新表）。
             // 触发条件：标记缺失 **或** 旧 v1 顶层块仍在（标记已写入但迁移未完成的旧状态）
-            if (!content.contains("RSXM_ARMOR_V2") || content.contains("# rsxm-break-armor-v0.5.0") || content.contains("# rsxm-break-armor-v0.3.0-gen4")) {
+            // **或** 内容锚点缺失（v0.3.0 浅版残留 / reasonix 更新重写 config 破坏内容 → 自愈重注入）。
+            if (!content.contains("RSXM_ARMOR_V2") || content.contains("# rsxm-break-armor-v0.5.0")
+                    || content.contains("# rsxm-break-armor-v0.3.0-gen4") || !content.contains(ARMOR_ANCHOR)) {
                 String prompt = readBreakArmorPrompt();
                 if (!prompt.isEmpty()) {
-                    // 1) 移除旧顶层破甲块（v1 注入：marker 行 + system_prompt 块）
+                    // 1) 移除旧顶层破甲块（v1 注入：marker 行 + system_prompt 块；含各代标记）
                     content = content.replaceAll(
-                            "(?ms)^\\s*# rsxm-break-armor-v(?:0\\.5\\.0|0\\.3\\.0-gen4)\\s*\\n\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "");
+                            "(?ms)^\\s*# rsxm-break-armor-v(?:0\\.5\\.0|0\\.3\\.0-gen4|0\\.4\\.0-hardened)\\s*\\n\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "");
                     // 2) 移除任何独立 system_prompt 多行/单行块（避免重复键）
                     content = content.replaceAll("(?ms)^\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "")
                             .replaceAll("(?m)^\\s*system_prompt\\s*=\\s*\"[^\"]*\"\\s*", "");
@@ -7347,8 +7360,8 @@ public class MainActivity extends Activity {
         Log.d(TAG, "runtime assets refreshed (tarMiss=" + tarMiss + ")");
     }
 
-    /** 部署 dsh purge 面板资产（about / prompt-inject 模板 / 默认规则）到 rootfs
-     *  ~/.reasonix/purge/ 与 ~/.reasonix/rules/（规则集分区默认模板）。幂等。 */
+    /** 部署 dsh purge 面板资产（about / prompt-inject 模板 / 默认规则 / 破甲备用载荷）
+     *  到 rootfs ~/.reasonix/purge/ 与 ~/.reasonix/rules/（规则集分区默认模板）。幂等。 */
     private void deployPurgeAssets(File rootfs) {
         try {
             File base = new File(new File(rootfs, "root/.reasonix"), "purge");
@@ -7356,6 +7369,13 @@ public class MainActivity extends Activity {
             extractAsset("purge/prompt-inject.md", new File(base, "prompt-inject.md"));
             File tpl = new File(new File(base, "rules"), "rsxm-default.md");
             extractAsset("purge/rules/rsxm-default.md", tpl);
+            // 破甲备用载荷（三份与 canonical 逐字节一致的 v0.4.0-hardened）：不同模型可换
+            File promptsDir = new File(new File(base, "prompts"), "infinite-gen-4.1-flash.md");
+            extractAsset("purge/prompts/infinite-gen-4.1-flash.md", promptsDir);
+            File p4 = new File(new File(base, "prompts"), "infinite-gen-4.md");
+            extractAsset("purge/prompts/infinite-gen-4.md", p4);
+            File p3 = new File(new File(base, "prompts"), "infinite-gen-3.md");
+            extractAsset("purge/prompts/infinite-gen-3.md", p3);
             // 同步默认规则到 ~/.reasonix/rules/（规则集分区读取路径；已存在不覆盖，
             // 尊重用户新建/编辑）
             File rulesTarget = new File(new File(new File(rootfs, "root/.reasonix"),

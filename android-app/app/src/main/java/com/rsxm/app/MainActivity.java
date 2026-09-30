@@ -226,6 +226,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.menu_github).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showGitHubDialog(); });
         findViewById(R.id.menu_ds2api).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showDs2ApiDialog(); });
         findViewById(R.id.menu_update).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showUpdateResonixDialog(); });
+        findViewById(R.id.menu_purge).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showPurgeDialog(); });
         findViewById(R.id.menu_project).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showProjectDialog(); });
         findViewById(R.id.menu_sessions).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSessionsDialog(); });
         findViewById(R.id.menu_advanced).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdvancedDialog(); });
@@ -2487,6 +2488,800 @@ public class MainActivity extends Activity {
                     ? "已登录：@" + r.login + (r.name.isEmpty() ? "" : "（" + r.name + "）")
                     : (gh.hasToken() ? "Token 无效：" + r.error : "未登录：请在下方输入 GitHub access token。")));
         }, "gh-user").start();
+    }
+
+    /* ==================== dsh purge（宿主清洗台 + 演练台，融合 dsh-purge v1.1.35 侧栏 UI） ==================== */
+
+    /** purge 面板版本与偏好键 */
+    private static final String PURGE_VER = "v1.1.35";
+    private static final String PURGE_THEME_KEY = "purge_theme_light";   // true=白纸主题, false=墨色主题(默认)
+    private static final String PURGE_DRILL_OK = "purge_drill_ok";       // 演练台已授权
+
+    /** 清洗页补丁定义：RSXM 宿主策略补丁（映射 dsh-purge「清洗 → 补丁」）。
+     *  0 破甲 system_prompt / 1 权限白名单 / 2 Guardian 禁用 / 3 YOLO 审批 / 4 全局指令 */
+    private static final int PATCH_ARMOR = 0, PATCH_PERM = 1, PATCH_GUARDIAN = 2,
+            PATCH_YOLO = 3, PATCH_AGENTS = 4;
+    private static final String[] PATCH_MARKERS = {
+            "RSXM_ARMOR_V2", "RSXM_PERM_ALLOW", "RSXM_GUARDIAN_OFF", "RSXM_DESK_YOLO", null
+    };
+    private static final String[] PATCH_NAMES = {
+            "破甲 system_prompt", "权限白名单", "Guardian 禁用", "YOLO 审批", "全局指令 AGENTS.md"
+    };
+    private static final String[] PATCH_DESCS = {
+            "破甲内核注入 [agent] system_prompt（标记 RSXM_ARMOR_V2）",
+            "[permissions] allow 白名单覆盖渗透/侦查/运维命令（标记 RSXM_PERM_ALLOW）",
+            "guardian_model=\"\" 禁用高风险审查（标记 RSXM_GUARDIAN_OFF）",
+            "[desktop] default_tool_approval_mode=\"yolo\" 免审批（标记 RSXM_DESK_YOLO）",
+            "全局指令 ~/.reasonix/AGENTS.md（与规则集联动，应用=启用规则）"
+    };
+
+    /** purge 面板当前内容容器（页签切换/操作刷新用） */
+    private LinearLayout purgeContentBox;
+
+    /** config.toml 宿主侧路径（rootfs/root/.reasonix/config.toml） */
+    private File purgeConfFile() {
+        return new File(new File(new File(getFilesDir(), "rootfs"), "root/.reasonix"), "config.toml");
+    }
+
+    private String purgeConfRead() {
+        try {
+            File f = purgeConfFile();
+            return f.exists() ? new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                    StandardCharsets.UTF_8) : "";
+        } catch (Exception e) {
+            Log.w(TAG, "purge conf read failed", e);
+            return "";
+        }
+    }
+
+    private void purgeConfWrite(String content) {
+        try {
+            File f = purgeConfFile();
+            f.getParentFile().mkdirs();
+            java.nio.file.Files.write(f.toPath(), content.getBytes(StandardCharsets.UTF_8));
+            Log.d(TAG, "purge conf written");
+        } catch (Exception e) {
+            Log.w(TAG, "purge conf write failed", e);
+        }
+    }
+
+    /** 破甲提示词源：优先 rootfs 内用户编辑版（~/.reasonix/break-armor-prompt.md），
+     *  其次 APK 内置资产（面板「保存」「恢复内置模板」就是写/覆盖这个文件） */
+    private String readArmorPromptSource() {
+        try {
+            File f = new File(new File(new File(getFilesDir(), "rootfs"), "root/.reasonix"),
+                    "break-armor-prompt.md");
+            if (f.exists()) {
+                String s = new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                        StandardCharsets.UTF_8).trim();
+                if (!s.isEmpty()) return s;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "read rootfs armor prompt failed", e);
+        }
+        return readBreakArmorPrompt();
+    }
+
+    /** 补丁 0 应用：破甲提示词注入 [agent] system_prompt（与 ensureSandboxDisabled 的 v2 迁移一致） */
+    private String injectArmorIntoAgent(String content) {
+        String prompt = readArmorPromptSource();
+        if (prompt.isEmpty()) return content;
+        // 移除旧顶层破甲块与任何独立 system_prompt 块（避免重复键）
+        content = content.replaceAll(
+                "(?ms)^\\s*# rsxm-break-armor-v(?:0\\.5\\.0|0\\.3\\.0-gen4)\\s*\\n\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "");
+        content = content.replaceAll("(?ms)^\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "")
+                .replaceAll("(?m)^\\s*system_prompt\\s*=\\s*\"[^\"]*\"\\s*", "");
+        String block = "system_prompt = \"\"\"\n" + prompt
+                + "\n\n--- 环境能力说明（RSXM 应用附加，按需使用，不要编造）：---\n"
+                + "1. 本应用内置 adb 无线调试：可直接执行 adb 命令（先 adb devices 查看连接状态，已连接时可用 adb shell / adb install 等）。\n"
+                + "2. 本应用内置手机 root 权限桥：执行 `root <命令>` 以 root 权限运行宿主手机命令（如 root id、root 'pm list packages'）。\n"
+                + "\"\"\"\n";
+        if (java.util.regex.Pattern.compile("(?m)^\\s*\\[agent\\]\\s*$").matcher(content).find()) {
+            content = content.replaceFirst("(?m)^\\s*\\[agent\\]\\s*$",
+                    java.util.regex.Matcher.quoteReplacement("[agent]\n" + block + "\n"));
+        } else {
+            content += "\n[agent]\n" + block + "\n";
+        }
+        content += "# RSXM_ARMOR_V2 (rsxm-break-armor in [agent])\n";
+        return content;
+    }
+
+    /** 补丁 0 还原：移除 [agent] system_prompt 块与标记（段内无其它键时连段头删除） */
+    private String stripArmorFromAgent(String content) {
+        content = content.replaceAll("(?ms)^\\s*system_prompt\\s*=\\s*\"\"\".*?\"\"\"\\s*", "")
+                .replaceAll("(?m)^\\s*system_prompt\\s*=\\s*\"[^\"]*\"\\s*", "");
+        content = content.replaceAll("(?m)^\\s*# RSXM_ARMOR_V2.*$\\n?", "");
+        content = content.replaceAll("(?ms)^\\s*\\[agent\\]\\s*\\n(?=\\s*\\[|\\s*$)", "");
+        return content;
+    }
+
+    /** 补丁 1 应用：权限白名单注入（无 [permissions] 段时追加完整块） */
+    private String injectPermBlock(String content) {
+        boolean hasHead = java.util.regex.Pattern.compile("(?m)^\\s*\\[permissions\\]\\s*$")
+                .matcher(content).find();
+        if (!hasHead) {
+            content += PERMISSIONS_RSXM_BLOCK;
+        } else if (!content.contains("allow_dynamic_bash")) {
+            content = content.replaceFirst("(?m)^\\s*\\[permissions\\]\\s*$",
+                    "[permissions]\nallow_dynamic_bash = true\n");
+        } else {
+            content += "\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass) user-allow kept\n";
+        }
+        content += "\n# RSXM_PERM_ALLOW (rsxm-pentest-bypass)\n";
+        return content;
+    }
+
+    /** 补丁 1 还原：移除 [permissions] 段与标记（含用户自定义 allow，操作前有提示） */
+    private String stripPermBlock(String content) {
+        content = content.replaceAll("(?m)^\\s*# RSXM_PERM_ALLOW.*$\\n?", "");
+        content = content.replaceAll("(?ms)^\\s*\\[permissions\\]\\s*\\n(?:.*?\\n)*?(?=\\s*\\[|\\s*$)", "");
+        return content;
+    }
+
+    /** 补丁 2 应用：guardian_model=\"\" 插到第一个表头前 */
+    private String injectGuardianOff(String content) {
+        content = content.replaceAll("(?m)^\\s*guardian_model\\s*=.*$\\s*", "");
+        java.util.regex.Matcher tm = java.util.regex.Pattern
+                .compile("(?m)^(\\s*\\[[a-zA-Z_][^\\]]*\\]\\s*$)").matcher(content);
+        if (tm.find()) {
+            content = content.substring(0, tm.start())
+                    + "# RSXM_GUARDIAN_OFF\nguardian_model = \"\"\n"
+                    + content.substring(tm.start());
+        } else {
+            content += "\nguardian_model = \"\"\n";
+        }
+        content += "\n# RSXM_GUARDIAN_OFF\n";
+        return content;
+    }
+
+    /** 补丁 2 还原：移除 guardian_model 键与标记 */
+    private String stripGuardianOff(String content) {
+        content = content.replaceAll("(?m)^\\s*guardian_model\\s*=.*$\\s*", "");
+        content = content.replaceAll("(?m)^\\s*# RSXM_GUARDIAN_OFF.*$\\n?", "");
+        return content;
+    }
+
+    /** 补丁 3 应用：desktop 默认审批 yolo */
+    private String injectYolo(String content) {
+        if (java.util.regex.Pattern.compile("(?m)^\\s*\\[desktop\\]\\s*$").matcher(content).find()) {
+            content = content.replaceFirst("(?m)^\\s*\\[desktop\\]\\s*$",
+                    "[desktop]\ndefault_tool_approval_mode = \"yolo\"");
+        } else {
+            content += "\n[desktop]\ndefault_tool_approval_mode = \"yolo\"\n";
+        }
+        content += "\n# RSXM_DESK_YOLO\n";
+        return content;
+    }
+
+    /** 补丁 3 还原：移除 yolo 键与标记（段空则删段头，保留 telemetry 等其它键） */
+    private String stripYolo(String content) {
+        content = content.replaceAll("(?m)^\\s*default_tool_approval_mode\\s*=.*$\\s*", "");
+        content = content.replaceAll("(?m)^\\s*# RSXM_DESK_YOLO.*$\\n?", "");
+        content = content.replaceAll("(?ms)^\\s*\\[desktop\\]\\s*\\n(?=\\s*\\[|\\s*$)", "");
+        return content;
+    }
+
+    /** 全局指令文件（~/.reasonix/AGENTS.md）宿主侧路径 */
+    private File purgeAgentsFile() {
+        return new File(new File(new File(getFilesDir(), "rootfs"), "root/.reasonix"), "AGENTS.md");
+    }
+
+    /** 当前启用规则正文（无启用规则时用内置 rsxm-default 模板） */
+    private String purgeActiveRuleText() {
+        File rulesDir = new File(new File(new File(getFilesDir(), "rootfs"), "root/.reasonix"), "rules");
+        File[] files = rulesDir.exists() ? rulesDir.listFiles() : null;
+        if (files != null) {
+            for (File f : files) {
+                if (!f.isFile()) continue;
+                String n = f.getName();
+                if (n.endsWith(".json") || n.equals("state.json")) continue;
+                if (n.endsWith(".md")) {
+                    try {
+                        String body = new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                                StandardCharsets.UTF_8);
+                        if (!body.trim().isEmpty()) return body;
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        // 回退内置模板（assets/purge/rules/rsxm-default.md，由 setup/refresh 部署到 rootfs）
+        File tpl = new File(rulesDir, "rsxm-default.md");
+        try {
+            if (tpl.exists()) {
+                return new String(java.nio.file.Files.readAllBytes(tpl.toPath()),
+                        StandardCharsets.UTF_8);
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
+    /** 补丁操作统一入口：应用 / 还原（宿主侧读写，不依赖 guest 内工具） */
+    private String purgePatchApply(int id) {
+        String conf = purgeConfRead();
+        switch (id) {
+            case PATCH_ARMOR:
+                purgeConfWrite(injectArmorIntoAgent(conf));
+                return "破甲 system_prompt 已写入 [agent]（重启环境后生效）";
+            case PATCH_PERM:
+                purgeConfWrite(injectPermBlock(conf));
+                return "[permissions] 白名单已注入（重启环境后生效）";
+            case PATCH_GUARDIAN:
+                purgeConfWrite(injectGuardianOff(conf));
+                return "guardian_model 已禁用（重启环境后生效）";
+            case PATCH_YOLO:
+                purgeConfWrite(injectYolo(conf));
+                return "desktop YOLO 审批已写入（重启环境后生效）";
+            case PATCH_AGENTS: {
+                String text = purgeActiveRuleText();
+                if (text.isEmpty()) return "无可用规则正文（先在规则集新建或恢复内置模板）";
+                try {
+                    File f = purgeAgentsFile();
+                    f.getParentFile().mkdirs();
+                    java.nio.file.Files.write(f.toPath(), text.getBytes(StandardCharsets.UTF_8));
+                    return "全局指令已写入 ~/.reasonix/AGENTS.md";
+                } catch (Exception e) {
+                    return "写入失败：" + e.getMessage();
+                }
+            }
+            default:
+                return "未知补丁";
+        }
+    }
+
+    private String purgePatchRevert(int id) {
+        switch (id) {
+            case PATCH_ARMOR:
+                purgeConfWrite(stripArmorFromAgent(purgeConfRead()));
+                return "破甲 system_prompt 已移除（重启环境后生效）";
+            case PATCH_PERM:
+                purgeConfWrite(stripPermBlock(purgeConfRead()));
+                return "[permissions] 段与白名单已移除（含自定义 allow，重启生效）";
+            case PATCH_GUARDIAN:
+                purgeConfWrite(stripGuardianOff(purgeConfRead()));
+                return "guardian_model 键已移除（重启环境后生效）";
+            case PATCH_YOLO:
+                purgeConfWrite(stripYolo(purgeConfRead()));
+                return "desktop YOLO 键已移除（重启环境后生效）";
+            case PATCH_AGENTS: {
+                File f = purgeAgentsFile();
+                if (f.exists() && !f.delete()) return "AGENTS.md 删除失败";
+                return "全局指令已移除";
+            }
+            default:
+                return "未知补丁";
+        }
+    }
+
+    /** 补丁状态：已应用 / 未应用 */
+    private boolean purgePatchApplied(int id) {
+        if (id == PATCH_AGENTS) return purgeAgentsFile().exists();
+        return purgeConfRead().contains(PATCH_MARKERS[id]);
+    }
+
+    /* ---------- purge 主题控件（白 / 墨） ---------- */
+
+    private boolean purgeLight() {
+        return getSharedPreferences("prefs", MODE_PRIVATE).getBoolean(PURGE_THEME_KEY, false);
+    }
+
+    private int purgeFg()    { return purgeLight() ? 0xFF1C1B18 : 0xFFFFFFFF; }
+    private int purgeMute()  { return purgeLight() ? 0xFF5A554C : 0xFFAAAAAA; }
+    private int purgeBg()    { return purgeLight() ? 0xFFFAFAF7 : 0xFF0D0D0D; }
+    private int purgeRowBg() { return purgeLight() ? 0xFFECEBE5 : 0xFF141414; }
+    private int purgeBtnBg() { return purgeLight() ? 0xFFDCDBD4 : 0xFF262626; }
+
+    private TextView purgeTip(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(purgeMute());
+        tv.setTextSize(12);
+        tv.setLineSpacing(0, 1.3f);
+        return tv;
+    }
+
+    private TextView purgeSection(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(purgeFg());
+        tv.setTextSize(14);
+        tv.setTypeface(null, android.graphics.Typeface.BOLD);
+        tv.setPadding(0, dp(6), 0, dp(2));
+        return tv;
+    }
+
+    private Button purgeButton(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextColor(purgeFg());
+        b.setTextSize(13);
+        b.setAllCaps(false);
+        b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(purgeBtnBg()));
+        b.setMinHeight(dp(38));
+        b.setMinimumHeight(dp(38));
+        b.setPadding(dp(12), 0, dp(12), 0);
+        return b;
+    }
+
+    /** 页签按钮（选中=品牌色下划线风格：着色文字+边框底） */
+    private Button purgeTabButton(String text, boolean on) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextSize(14);
+        b.setAllCaps(false);
+        b.setMinHeight(dp(40));
+        b.setMinimumHeight(dp(40));
+        b.setPadding(dp(18), 0, dp(18), 0);
+        b.setBackgroundColor(0x00000000);
+        b.setTextColor(on ? 0xFF6DBF8C : purgeMute());
+        b.setTypeface(null, on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+        return b;
+    }
+
+    /** 状态徽标：小圆点 + 文案 */
+    private TextView purgeBadge(String text, boolean ok) {
+        TextView tv = new TextView(this);
+        tv.setText((ok ? "● " : "○ ") + text);
+        tv.setTextColor(ok ? 0xFF4CAF50 : 0xFFFFB74D);
+        tv.setTextSize(12);
+        tv.setTypeface(null, android.graphics.Typeface.BOLD);
+        return tv;
+    }
+
+    /** 补丁行：名称 + 状态 + 描述 + 应用/还原按钮 */
+    private LinearLayout purgePatchRow(final int id, final Runnable after) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setBackgroundColor(purgeRowBg());
+        row.setPadding(dp(12), dp(8), dp(12), dp(8));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rp.topMargin = dp(6);
+        row.setLayoutParams(rp);
+        TextView t = new TextView(this);
+        t.setText(PATCH_NAMES[id]);
+        t.setTextColor(purgeFg());
+        t.setTextSize(14);
+        t.setTypeface(null, android.graphics.Typeface.BOLD);
+        row.addView(t);
+        final TextView badge = purgeBadge(purgePatchApplied(id) ? "已应用" : "未应用", purgePatchApplied(id));
+        row.addView(badge);
+        TextView d = new TextView(this);
+        d.setText(PATCH_DESCS[id]);
+        d.setTextColor(purgeMute());
+        d.setTextSize(11);
+        row.addView(d);
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        Button apply = purgeButton("应用");
+        Button revert = purgeButton("还原");
+        btns.addView(apply, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        btns.addView(revert, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        apply.setOnClickListener(v -> {
+            apply.setEnabled(false);
+            runPurgeOp(() -> purgePatchApply(id), badge, apply, revert, after);
+        });
+        revert.setOnClickListener(v -> {
+            revert.setEnabled(false);
+            runPurgeOp(() -> purgePatchRevert(id), badge, apply, revert, after);
+        });
+        row.addView(btns);
+        return row;
+    }
+
+    /** 统一跑补丁操作：后台执行 → 主线程更新徽标/状态/重建列表 */
+    private void runPurgeOp(final java.util.function.Supplier<String> op, final TextView badge,
+                            final Button apply, final Button revert, final Runnable after) {
+        new Thread(() -> {
+            final String msg = op.get();
+            runOnUiThread(() -> {
+                if (badge != null) {
+                    boolean on = purgePatchApplied(badge.getTag() instanceof Integer
+                            ? (Integer) badge.getTag() : PATCH_ARMOR);
+                    badge.setText((on ? "● " : "○ ") + (on ? "已应用" : "未应用"));
+                    badge.setTextColor(on ? 0xFF4CAF50 : 0xFFFFB74D);
+                }
+                if (apply != null) apply.setEnabled(true);
+                if (revert != null) revert.setEnabled(true);
+                if (after != null) after.run();
+                pushOutput("\r\n[dsh purge] " + msg + "\r\n");
+            });
+        }, "purge-op").start();
+    }
+
+    /** 清洗页：补丁分组 + 提示词 + 规则集 + Skill（映射 dsh-purge 清洗页四分区） */
+    private void buildPurgeClean(LinearLayout box) {
+        box.removeAllViews();
+        // 补丁分组
+        box.addView(purgeSection("补丁"));
+        box.addView(purgeTip("RSXM 宿主策略补丁。应用后需重启环境才完全生效（与上游 dsh-purge「应用后必须重启」一致）。"));
+        Runnable refreshAll = () -> rebuildPurgeClean();
+        for (int i = 0; i < PATCH_NAMES.length; i++) {
+            LinearLayout row = purgePatchRow(i, refreshAll);
+            TextView badge = (TextView) row.getChildAt(1);
+            badge.setTag(i);
+            box.addView(row);
+        }
+        // 提示词
+        box.addView(purgeSection("提示词"));
+        box.addView(purgeTip("编辑 ~/.reasonix/break-armor-prompt.md（会话覆盖段）。「应用为 system_prompt」将其与破甲内核一起注入 [agent]。"));
+        final EditText promptInput = new EditText(this);
+        promptInput.setHint("break-armor-prompt.md 内容（导入/粘贴，含破甲内核）");
+        promptInput.setTextColor(purgeFg());
+        promptInput.setHintTextColor(purgeMute());
+        promptInput.setTextSize(12);
+        promptInput.setGravity(android.view.Gravity.TOP);
+        promptInput.setSingleLine(false);
+        promptInput.setMaxLines(Integer.MAX_VALUE);
+        promptInput.setVerticalScrollBarEnabled(true);
+        promptInput.setMovementMethod(new android.text.method.ScrollingMovementMethod());
+        promptInput.setBackgroundColor(purgeRowBg());
+        promptInput.setPadding(dp(10), dp(10), dp(10), dp(10));
+        LinearLayout.LayoutParams promptLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(150));
+        promptLp.topMargin = dp(6);
+        box.addView(promptInput, promptLp);
+        new Thread(() -> {
+            final String body = readArmorPromptSource();
+            runOnUiThread(() -> promptInput.setText(body));
+        }, "purge-prompt-load").start();
+        LinearLayout pbtns = new LinearLayout(this);
+        pbtns.setOrientation(LinearLayout.HORIZONTAL);
+        Button saveP = purgeButton("保存到文件");
+        Button injectP = purgeButton("应用为 system_prompt");
+        Button restoreP = purgeButton("恢复内置模板");
+        pbtns.addView(saveP, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        pbtns.addView(injectP, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams pbLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        pbLp.topMargin = dp(8);
+        box.addView(pbtns, pbLp);
+        addV(box, restoreP, 6);
+        saveP.setOnClickListener(v -> {
+            new Thread(() -> {
+                try {
+                    File f = new File(new File(new File(getFilesDir(), "rootfs"),
+                            "root/.reasonix"), "break-armor-prompt.md");
+                    f.getParentFile().mkdirs();
+                    final String body = promptInput.getText().toString();
+                    java.nio.file.Files.write(f.toPath(), body.getBytes(StandardCharsets.UTF_8));
+                    runOnUiThread(() -> pushOutput("\r\n[dsh purge] 提示词已保存到 ~/.reasonix/break-armor-prompt.md\r\n"));
+                } catch (Exception e) {
+                    Log.w(TAG, "purge prompt save failed", e);
+                }
+            }, "purge-prompt-save").start();
+        });
+        injectP.setOnClickListener(v -> runPurgeOp(() -> purgePatchApply(PATCH_ARMOR),
+                null, null, null, refreshAll));
+        restoreP.setOnClickListener(v -> {
+            try {
+                final String tpl = readAssetText("purge/prompt-inject.md");
+                runOnUiThread(() -> promptInput.setText(tpl));
+            } catch (Exception e) {
+                Log.w(TAG, "purge prompt restore failed", e);
+            }
+        });
+        // 规则集
+        box.addView(purgeSection("规则集"));
+        box.addView(purgeTip("多套 AGENTS.md / CLAUDE.md 存放于 ~/.reasonix/rules/。启用即写入全局指令（对应上方「全局指令」补丁），删除从列表去掉。内置模板 rsxm-default 由 ~/.reasonix/purge/rules/ 提供副本，删除后仍可作为全局指令内容。"));
+        final LinearLayout rulesBox = new LinearLayout(this);
+        rulesBox.setOrientation(LinearLayout.VERTICAL);
+        box.addView(rulesBox);
+        refreshPurgeRules(rulesBox, refreshAll);
+        // Skill
+        box.addView(purgeSection("Skill"));
+        box.addView(purgeTip("全局 skill（~/.reasonix/skills，跨项目可见）。完整安装/删除/启用请到「高级设置 → SKILL」。"));
+        final LinearLayout skillBox = new LinearLayout(this);
+        skillBox.setOrientation(LinearLayout.VERTICAL);
+        box.addView(skillBox);
+        refreshPurgeSkills(skillBox);
+    }
+
+    /** 重建清洗页（补丁操作后刷新状态） */
+    private void rebuildPurgeClean() {
+        if (purgeContentBox == null) return;
+        buildPurgeClean(purgeContentBox);
+    }
+
+    /** 规则集列表：~/.reasonix/rules/*.md（+meta .json 显示名称/目标），启用=写全局指令 */
+    private void refreshPurgeRules(final LinearLayout box, final Runnable after) {
+        box.removeAllViews();
+        box.addView(purgeTip("加载规则集..."));
+        new Thread(() -> {
+            try {
+                final List<File> md = new ArrayList<>();
+                File rulesDir = new File(new File(new File(getFilesDir(), "rootfs"),
+                        "root/.reasonix"), "rules");
+                if (rulesDir.exists()) {
+                    File[] files = rulesDir.listFiles();
+                    if (files != null) {
+                        for (File f : files) {
+                            if (f.isFile() && f.getName().endsWith(".md")) md.add(f);
+                        }
+                    }
+                }
+                java.util.Collections.sort(md, (a, b) -> a.getName().compareTo(b.getName()));
+                runOnUiThread(() -> {
+                    box.removeAllViews();
+                    if (md.isEmpty()) {
+                        box.addView(purgeTip("（无规则集。点下方「恢复内置模板」创建 rsxm-default）"));
+                    }
+                    for (final File f : md) {
+                        LinearLayout row = new LinearLayout(this);
+                        row.setOrientation(LinearLayout.VERTICAL);
+                        row.setBackgroundColor(purgeRowBg());
+                        row.setPadding(dp(12), dp(6), dp(12), dp(6));
+                        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                        rp.topMargin = dp(4);
+                        row.setLayoutParams(rp);
+                        TextView n = new TextView(this);
+                        n.setText(f.getName().replace(".md", ""));
+                        n.setTextColor(purgeFg());
+                        n.setTextSize(13);
+                        n.setTypeface(null, android.graphics.Typeface.BOLD);
+                        row.addView(n);
+                        TextView meta = new TextView(this);
+                        boolean active = purgeAgentsFile().exists();
+                        meta.setText("目标：AGENTS.md · " + (active ? "已启用（作为全局指令）" : "未启用"));
+                        meta.setTextColor(purgeMute());
+                        meta.setTextSize(11);
+                        row.addView(meta);
+                        LinearLayout btns = new LinearLayout(this);
+                        btns.setOrientation(LinearLayout.HORIZONTAL);
+                        Button enable = purgeButton("启用（写全局指令）");
+                        Button del = purgeButton("删除");
+                        btns.addView(enable, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                        btns.addView(del, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                        enable.setOnClickListener(v -> {
+                            new Thread(() -> {
+                                try {
+                                    File ag = purgeAgentsFile();
+                                    ag.getParentFile().mkdirs();
+                                    final String body = new String(java.nio.file.Files.readAllBytes(
+                                            f.toPath()), StandardCharsets.UTF_8);
+                                    java.nio.file.Files.write(ag.toPath(), body.getBytes(StandardCharsets.UTF_8));
+                                    runOnUiThread(() -> pushOutput("\r\n[dsh purge] 已启用规则 "
+                                            + f.getName() + "（写入 AGENTS.md）\r\n"));
+                                    if (after != null) after.run();
+                                } catch (Exception e) {
+                                    Log.w(TAG, "purge rule enable failed", e);
+                                }
+                            }, "purge-rule-enable").start();
+                        });
+                        del.setOnClickListener(v -> {
+                            if (f.delete()) {
+                                pushOutput("\r\n[dsh purge] 已删除规则 " + f.getName() + "\r\n");
+                                if (after != null) after.run();
+                            }
+                        });
+                        row.addView(btns);
+                        box.addView(row);
+                    }
+                });
+            } catch (Exception e) {
+                Log.w(TAG, "purge rules load failed", e);
+                runOnUiThread(() -> {
+                    box.removeAllViews();
+                    box.addView(purgeTip("（加载失败：" + e.getMessage() + "）"));
+                });
+            }
+        }, "purge-rules").start();
+    }
+
+    /** Skill 列表（只读展示 + 启用状态，管理走高级设置 SKILL 面板） */
+    private void refreshPurgeSkills(final LinearLayout box) {
+        box.removeAllViews();
+        box.addView(purgeTip("加载 skill..."));
+        new Thread(() -> {
+            try {
+                final List<String> names = new ArrayList<>();
+                final java.util.Set<String> disabled = new java.util.HashSet<>();
+                File[] dirs = globalSkillsDir().listFiles();
+                if (dirs != null) {
+                    for (File d : dirs) {
+                        String n = d.getName();
+                        if (d.isDirectory() && !n.startsWith(".")) names.add(n);
+                    }
+                }
+                parseDisabled(executeInGuest(
+                        "grep -A8 '\\[skills\\]' $HOME/.reasonix/config.toml 2>/dev/null | grep disabled_skills", 4),
+                        disabled);
+                runOnUiThread(() -> {
+                    box.removeAllViews();
+                    if (names.isEmpty()) {
+                        box.addView(purgeTip("（无已安装全局 skill）"));
+                        return;
+                    }
+                    for (final String name : names) {
+                        TextView row = new TextView(this);
+                        row.setText((disabled.contains(name) ? "○ 禁用  " : "● 启用  ") + name);
+                        row.setTextColor(disabled.contains(name) ? purgeMute() : 0xFF4CAF50);
+                        row.setTextSize(12);
+                        row.setPadding(dp(4), dp(3), 0, dp(3));
+                        box.addView(row);
+                    }
+                });
+            } catch (Exception e) {
+                Log.w(TAG, "purge skills load failed", e);
+                runOnUiThread(() -> {
+                    box.removeAllViews();
+                    box.addView(purgeTip("（加载失败：" + e.getMessage() + "）"));
+                });
+            }
+        }, "purge-skills").start();
+    }
+
+    /** 读取 APK assets 文本（purge 面板模板/说明用） */
+    private String readAssetText(String assetPath) throws java.io.IOException {
+        try (InputStream in = getAssets().open(assetPath);
+             java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            return bos.toString("UTF-8");
+        }
+    }
+
+    /** dsh purge 主面板：页签（清洗 / 演练台）+ 白墨主题切换 + 关于 */
+    private void showPurgeDialog() {
+        final boolean light = purgeLight();
+        final LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(16));
+        panel.setBackgroundColor(purgeBg());
+        // 头：标题 + 版本 + 白/墨切换
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView title = new TextView(this);
+        title.setText("dsh purge 清洗台");
+        title.setTextColor(0xFFFF8A5C);
+        title.setTextSize(16);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView ver = new TextView(this);
+        ver.setText("v" + PURGE_VER);
+        ver.setTextColor(purgeMute());
+        ver.setTextSize(11);
+        head.addView(ver);
+        Button theme = purgeButton(light ? "墨" : "白");
+        theme.setOnClickListener(v -> {
+            getSharedPreferences("prefs", MODE_PRIVATE).edit()
+                    .putBoolean(PURGE_THEME_KEY, !purgeLight()).apply();
+            showPurgeDialog();   // 重建面板切换主题
+        });
+        head.addView(theme);
+        panel.addView(head);
+        // 页签栏
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        final Button tabClean = purgeTabButton("清洗", true);
+        final Button tabDrill = purgeTabButton("演练台", false);
+        tabs.addView(tabClean, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        tabs.addView(tabDrill, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        panel.addView(tabs);
+        // 内容容器
+        purgeContentBox = new LinearLayout(this);
+        purgeContentBox.setOrientation(LinearLayout.VERTICAL);
+        panel.addView(purgeContentBox);
+        tabClean.setOnClickListener(v -> {
+            tabClean.setTextColor(0xFF6DBF8C);
+            tabClean.setTypeface(null, android.graphics.Typeface.BOLD);
+            tabDrill.setTextColor(purgeMute());
+            tabDrill.setTypeface(null, android.graphics.Typeface.NORMAL);
+            buildPurgeClean(purgeContentBox);
+        });
+        tabDrill.setOnClickListener(v -> {
+            tabDrill.setTextColor(0xFF6DBF8C);
+            tabDrill.setTypeface(null, android.graphics.Typeface.BOLD);
+            tabClean.setTextColor(purgeMute());
+            tabClean.setTypeface(null, android.graphics.Typeface.NORMAL);
+            buildPurgeDrill(purgeContentBox);
+        });
+        buildPurgeClean(purgeContentBox);   // 默认进清洗页
+        showPanel("dsh purge", panel, () -> purgeContentBox = null);
+    }
+
+    /** 深色代码结果区（purge 主题版，同 createDarkResult 但跟随白/墨） */
+    private TextView purgeResult() {
+        TextView tv = new TextView(this);
+        tv.setTextColor(0xFF7FDB8A);
+        tv.setTextSize(11);
+        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tv.setBackgroundColor(purgeRowBg());
+        tv.setPadding(dp(10), dp(8), dp(10), dp(8));
+        tv.setMinHeight(dp(48));
+        tv.setMaxLines(6);
+        tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        return tv;
+    }
+
+    /** 演练台页：未授权 → 声明 + 三项勾选；已授权 → 资产 / 技能 / 环境（只读巡检） */
+    private void buildPurgeDrill(LinearLayout box) {
+        box.removeAllViews();
+        final boolean ok = getSharedPreferences("prefs", MODE_PRIVATE)
+                .getBoolean(PURGE_DRILL_OK, false);
+        if (!ok) {
+            box.addView(purgeSection("演练台授权"));
+            box.addView(purgeTip("演练台只用于你有权管理的本机、离线靶标，或已书面授权的演练环境。"
+                    + "未经授权的渗透、攻击、窃取和破坏一律禁止。首次进入请阅读声明并勾选以下三项。"));
+            CheckBox c1 = new CheckBox(this);
+            c1.setText("我确认演练范围仅限本机 / 离线靶标 / 已书面授权环境");
+            c1.setTextColor(purgeFg());
+            CheckBox c2 = new CheckBox(this);
+            c2.setText("我确认不对外网或未授权系统发起任何扫描、探测或攻击");
+            c2.setTextColor(purgeFg());
+            CheckBox c3 = new CheckBox(this);
+            c3.setText("我确认不将演练台用于违法用途，后果由使用者承担");
+            c3.setTextColor(purgeFg());
+            addV(box, c1, 6);
+            addV(box, c2, 2);
+            addV(box, c3, 2);
+            final Button go = purgeButton("确认授权并进入演练台");
+            go.setEnabled(false);
+            go.setTextColor(0xFF5A5A5A);
+            addV(box, go, 10);
+            android.widget.CompoundButton.OnCheckedChangeListener checkAll = (b, chk) -> {
+                boolean all = c1.isChecked() && c2.isChecked() && c3.isChecked();
+                go.setEnabled(all);
+                go.setTextColor(all ? purgeFg() : 0xFF5A5A5A);
+            };
+            c1.setOnCheckedChangeListener(checkAll);
+            c2.setOnCheckedChangeListener(checkAll);
+            c3.setOnCheckedChangeListener(checkAll);
+            go.setOnClickListener(v -> {
+                getSharedPreferences("prefs", MODE_PRIVATE).edit()
+                        .putBoolean(PURGE_DRILL_OK, true).apply();
+                pushOutput("\r\n[dsh purge] 演练台授权已确认（本机/离线/书面授权范围）\r\n");
+                buildPurgeDrill(box);
+            });
+            return;
+        }
+        // 已授权：资产 / 技能 / 环境
+        box.addView(purgeSection("资产"));
+        final TextView assets = purgeResult();
+        assets.setText("（加载中...）");
+        addV(box, assets, 4);
+        box.addView(purgeSection("技能"));
+        final LinearLayout skillBox = new LinearLayout(this);
+        skillBox.setOrientation(LinearLayout.VERTICAL);
+        addV(box, skillBox, 4);
+        refreshPurgeSkills(skillBox);
+        box.addView(purgeSection("环境"));
+        final TextView env = purgeResult();
+        env.setText("（加载中...）");
+        addV(box, env, 4);
+        Button refresh = purgeButton("刷新巡检");
+        addV(box, refresh, 10);
+        // 资产巡检：guest 内实际挂载状态（依赖环境运行）
+        new Thread(() -> {
+            String out = executeInGuest(
+                    "echo '[挂载]'; ls -ld /sdcard /host-data /host/system 2>&1; "
+                            + "echo '[host-data]'; ls /host-data 2>/dev/null | head -3; "
+                            + "echo '[sdcard]'; ls /sdcard 2>/dev/null | head -3", 12);
+            final String r = out;
+            runOnUiThread(() -> {
+                assets.setTextColor(0xFF7FDB8A);
+                assets.setText(r);
+            });
+        }, "purge-assets").start();
+        // 环境巡检：宿主侧 + guest 混合
+        new Thread(() -> {
+            String guest = executeInGuest(
+                    "echo '[系统] '$(cat /etc/alpine-release 2>/dev/null)' '$(uname -m 2>/dev/null); "
+                            + "echo '[reasonix] '$(cat /root/.reasonix/.npm-version 2>/dev/null || echo 内置); "
+                            + "echo '[root桥] '$([ -f /root/.root-ok ] && echo OK || echo 未授权); "
+                            + "echo '[adb] '$(cat /root/.adb_status 2>/dev/null || echo 未连接); "
+                            + "echo '[ds2api] '$(pgrep -x ds2api >/dev/null 2>&1 && echo RUNNING || echo STOPPED); "
+                            + "echo '[磁盘] '$(df -h / 2>/dev/null | tail -1 | awk '{print $2\" 可用 \"$4}')", 12);
+            final String mode = isChrootMode() ? "chroot（需 root）" : "proot（免 root）";
+            final String r = "[运行模式] " + mode + "\n" + guest;
+            runOnUiThread(() -> {
+                env.setTextColor(0xFF7FDB8A);
+                env.setText(r);
+            });
+        }, "purge-env").start();
+        refresh.setOnClickListener(v -> buildPurgeDrill(box));
     }
 
     /**
@@ -6505,6 +7300,8 @@ public class MainActivity extends Activity {
         armor.getParentFile().mkdirs();
         extractAsset("break-armor-prompt.md", armor);
         Log.d(TAG, "break-armor-prompt.md deployed to rootfs");
+        // dsh purge 面板资产（about / prompt-inject 模板 / 默认规则）：随 APK 刷新
+        deployPurgeAssets(rootfs);
         // DS2API 网关（内置上游 AGPL-3.0 服务端，见 assets/ds2api/README-upstream.md）：
         // 覆盖刷新整个 ds2api 目录（删除再解压，保证升级后二进制/WebUI 与 APK 一致）
         File ds2Dir = new File(rootfs, "usr/local/ds2api");
@@ -6548,6 +7345,29 @@ public class MainActivity extends Activity {
         }
         ds2Bundle.delete();
         Log.d(TAG, "runtime assets refreshed (tarMiss=" + tarMiss + ")");
+    }
+
+    /** 部署 dsh purge 面板资产（about / prompt-inject 模板 / 默认规则）到 rootfs
+     *  ~/.reasonix/purge/ 与 ~/.reasonix/rules/（规则集分区默认模板）。幂等。 */
+    private void deployPurgeAssets(File rootfs) {
+        try {
+            File base = new File(new File(rootfs, "root/.reasonix"), "purge");
+            extractAsset("purge/purge-about.md", new File(base, "purge-about.md"));
+            extractAsset("purge/prompt-inject.md", new File(base, "prompt-inject.md"));
+            File tpl = new File(new File(base, "rules"), "rsxm-default.md");
+            extractAsset("purge/rules/rsxm-default.md", tpl);
+            // 同步默认规则到 ~/.reasonix/rules/（规则集分区读取路径；已存在不覆盖，
+            // 尊重用户新建/编辑）
+            File rulesTarget = new File(new File(new File(rootfs, "root/.reasonix"),
+                    "rules"), "rsxm-default.md");
+            rulesTarget.getParentFile().mkdirs();
+            if (!rulesTarget.exists()) {
+                extractAsset("purge/rules/rsxm-default.md", rulesTarget);
+            }
+            Log.d(TAG, "dsh-purge assets deployed to rootfs");
+        } catch (java.io.IOException e) {
+            Log.w(TAG, "deployPurgeAssets failed", e);
+        }
     }
 
     /** ADB 无线调试持久化：把本机局域网 IP 写入 guest 持久文件，供 entry.sh 自动重连使用 */
@@ -6601,6 +7421,8 @@ public class MainActivity extends Activity {
         armor.getParentFile().mkdirs();
         extractAsset("break-armor-prompt.md", armor);
         Log.d(TAG, "break-armor-prompt.md deployed (first time)");
+        // dsh purge 面板资产（about / prompt-inject 模板 / 默认规则）：首次安装即就位
+        deployPurgeAssets(rootfs);
 
         // 4.5 DS2API 网关（内置上游 AGPL-3.0 服务端）：解压 ds2api-bundle.tgz 到 /usr/local/ds2api
         //     （bundle 内含 ds2api 二进制 + static WebUI + LICENSE + README.MD）

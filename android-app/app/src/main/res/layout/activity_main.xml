@@ -344,6 +344,19 @@
                         android:textSize="15sp" />
 
                     <TextView
+                        android:id="@+id/menu_purge"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="#141414"
+                        android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="dsh purge"
+                        android:textColor="#FF8A5C"
+                        android:textSize="15sp"
+                        android:drawablePadding="12dp" />
+
+                    <TextView
                         android:id="@+id/menu_adb"
                         android:layout_width="match_parent"
                         android:layout_height="48dp"

@@ -26,6 +26,12 @@
   - **快捷键**：侧滑栏「快捷键」弹出 reasonix 常用按键面板（Enter / Ctrl+A / Ctrl+E / Ctrl+W / Ctrl+U、↑↓、PgUp / PgDn、End、Tab / Shift+Tab、Esc、Ctrl+C、编辑门 y / n / u 等），点击条目即把对应按键序列发送到 reasonix 终端（不追加换行，面板保持打开可连续点按翻页）。
   - **MCP 服务器**：管理当前项目 `.mcp.json`（reasonix 按项目根 `.mcp.json` 的 `mcpServers` 发现 MCP 服务器）：列出已配置服务器（名称/类型/摘要），表单添加/编辑/删除——本地命令型选 stdio（command + args + env），远程选 http/sse（url + headers），支持 `auto_start` 开关（关闭则需在终端手动 `reasonix mcp start`）；`${VAR}` 环境变量按 CLI 原生规则展开；保存后重启环境生效。
   - **更新 resonix**：从官方 npm 包（`@reasonix/cli-linux-arm64`，npmmirror 国内镜像）下载 tgz 解压更新，或从手机选择新版文件、恢复内置版本。
+  - **dsh purge 清洗台**：融合上游 dsh-purge v1.1.35（DeepSeek Harness 网络安全红队评测插件，MIT）侧栏 UI 的原生面板（侧滑栏「dsh purge」→ 全屏面板）。双页签「清洗 / 演练台」+ 白/墨主题：
+    - **清洗 → 补丁**：RSXM 宿主策略补丁分组（破甲 system_prompt / [permissions] 白名单 / Guardian 禁用 / YOLO 审批 / 全局指令 AGENTS.md），每项实时状态 + 应用/还原（直接改 `~/.reasonix/config.toml`，应用后需重启环境生效，与上游一致）。
+    - **清洗 → 提示词**：编辑 `~/.reasonix/break-armor-prompt.md`（会话覆盖段），一键「应用为 system_prompt」重注入 `[agent]`，可恢复内置模板。
+    - **清洗 → 规则集**：`~/.reasonix/rules/` 多套规则，启用即写全局指令、删除即移除（内置 rsxm-default 模板由 APK 资产提供副本）。
+    - **清洗 → Skill**：全局 skill 启用状态列表（与「高级设置 → SKILL」面板互通）。
+    - **演练台**：读声明 + 勾选三项授权后进入，巡检资产（/sdcard、/host-data、/host/system 挂载）、技能与运行环境（proot/chroot 模式、Alpine 版本、adb/root 桥、ds2api、磁盘），只用于有权管理的本机/离线靶标/已书面授权环境。
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。

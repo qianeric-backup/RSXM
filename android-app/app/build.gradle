@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.3.1 — 破甲内核升级 v0.4.0-hardened + 锚点自愈）
-        versionCode 73
-        versionName "2.3.1"
+        // 版本随 GitHub Release 同步更新（当前 v2.3.2 — purge 资源中心：漏洞库/规则库/skill 包 + GitHub 同步）
+        versionCode 74
+        versionName "2.3.2"
     }
 
     buildTypes {

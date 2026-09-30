@@ -3163,27 +3163,42 @@ public class MainActivity extends Activity {
         tabs.setOrientation(LinearLayout.HORIZONTAL);
         final Button tabClean = purgeTabButton("清洗", true);
         final Button tabDrill = purgeTabButton("演练台", false);
+        final Button tabRes = purgeTabButton("资源", false);
         tabs.addView(tabClean, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         tabs.addView(tabDrill, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        tabs.addView(tabRes, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         panel.addView(tabs);
         // 内容容器
         purgeContentBox = new LinearLayout(this);
         purgeContentBox.setOrientation(LinearLayout.VERTICAL);
         panel.addView(purgeContentBox);
-        tabClean.setOnClickListener(v -> {
+        final Runnable setClean = () -> {
             tabClean.setTextColor(0xFF6DBF8C);
             tabClean.setTypeface(null, android.graphics.Typeface.BOLD);
             tabDrill.setTextColor(purgeMute());
             tabDrill.setTypeface(null, android.graphics.Typeface.NORMAL);
-            buildPurgeClean(purgeContentBox);
-        });
-        tabDrill.setOnClickListener(v -> {
+            tabRes.setTextColor(purgeMute());
+            tabRes.setTypeface(null, android.graphics.Typeface.NORMAL);
+        };
+        final Runnable setDrill = () -> {
             tabDrill.setTextColor(0xFF6DBF8C);
             tabDrill.setTypeface(null, android.graphics.Typeface.BOLD);
             tabClean.setTextColor(purgeMute());
             tabClean.setTypeface(null, android.graphics.Typeface.NORMAL);
-            buildPurgeDrill(purgeContentBox);
-        });
+            tabRes.setTextColor(purgeMute());
+            tabRes.setTypeface(null, android.graphics.Typeface.NORMAL);
+        };
+        final Runnable setRes = () -> {
+            tabRes.setTextColor(0xFF6DBF8C);
+            tabRes.setTypeface(null, android.graphics.Typeface.BOLD);
+            tabClean.setTextColor(purgeMute());
+            tabClean.setTypeface(null, android.graphics.Typeface.NORMAL);
+            tabDrill.setTextColor(purgeMute());
+            tabDrill.setTypeface(null, android.graphics.Typeface.NORMAL);
+        };
+        tabClean.setOnClickListener(v -> { setClean.run(); buildPurgeClean(purgeContentBox); });
+        tabDrill.setOnClickListener(v -> { setDrill.run(); buildPurgeDrill(purgeContentBox); });
+        tabRes.setOnClickListener(v -> { setRes.run(); buildPurgeResources(purgeContentBox); });
         buildPurgeClean(purgeContentBox);   // 默认进清洗页
         showPanel("dsh purge", panel, () -> purgeContentBox = null);
     }
@@ -3288,6 +3303,136 @@ public class MainActivity extends Activity {
             });
         }, "purge-env").start();
         refresh.setOnClickListener(v -> buildPurgeDrill(box));
+    }
+
+    /** 资源页签：漏洞库 / 规则库 / skill 包 —— 内置安装到 guest + GitHub 同步（RSXM resources/） */
+    private void buildPurgeResources(LinearLayout box) {
+        box.removeAllViews();
+        box.addView(purgeSection("资源中心"));
+        box.addView(purgeTip("内置：漏洞库（7 份速查）、规则库（2 套）、红队 skill 包（dsh-purge 上游 23 个）。"
+                + "「安装到环境」从 APK 提取部署（离线可用）；「GitHub 同步」从 "
+                + "github.com/qianeric-backup/RSXM 的 resources/ 拉取更新（需网络）。"));
+        // 漏洞库
+        box.addView(purgeSection("漏洞库"));
+        box.addView(purgeTip("~/.reasonix/purge/vulndb/：web-injection / web-logic / auth-identity / "
+                + "intranet-post / cloud-mobile / cve-quick（reasonix 内 /vulndb 检索）"));
+        final TextView vulnState = purgeResult();
+        addV(box, vulnState, 4);
+        LinearLayout vbtns = new LinearLayout(this);
+        vbtns.setOrientation(LinearLayout.HORIZONTAL);
+        Button vInstall = purgeButton("安装到环境");
+        Button vSync = purgeButton("GitHub 同步");
+        vbtns.addView(vInstall, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        vbtns.addView(vSync, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        addV(box, vbtns, 6);
+        // 规则库
+        box.addView(purgeSection("规则库"));
+        box.addView(purgeTip("~/.reasonix/rules/：rsxm-default + redteam-operations（启用即写全局指令）"));
+        final LinearLayout rulesBox = new LinearLayout(this);
+        rulesBox.setOrientation(LinearLayout.VERTICAL);
+        addV(box, rulesBox, 4);
+        refreshPurgeRules(rulesBox, null);
+        // skill 包
+        box.addView(purgeSection("Skill 包（红队 23 个）"));
+        box.addView(purgeTip("~/.reasonix/skills/redteam/：recon / dir-bruteforce / fscan-intranet / "
+                + "lateral-movement / shell-handler 等，reasonix 自动加载（/skills 查看）"));
+        final TextView skillState = purgeResult();
+        addV(box, skillState, 4);
+        LinearLayout sbtns = new LinearLayout(this);
+        sbtns.setOrientation(LinearLayout.HORIZONTAL);
+        Button sInstall = purgeButton("安装到环境");
+        Button sSync = purgeButton("GitHub 同步");
+        sbtns.addView(sInstall, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        sbtns.addView(sSync, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        addV(box, sbtns, 6);
+        // 初始状态
+        refreshPurgeResourceStates(vulnState, skillState);
+        // 安装（宿主侧从 APK 提取，离线可用）
+        vInstall.setOnClickListener(v -> {
+            deployPurgeAssets(new File(getFilesDir(), "rootfs"));
+            refreshPurgeResourceStates(vulnState, skillState);
+            pushOutput("\r\n[dsh purge] 漏洞库已安装到环境（~/.reasonix/purge/vulndb/）\r\n");
+        });
+        sInstall.setOnClickListener(v -> {
+            deployPurgeAssets(new File(getFilesDir(), "rootfs"));
+            refreshPurgeResourceStates(vulnState, skillState);
+            pushOutput("\r\n[dsh purge] 红队 skill 包已安装（~/.reasonix/skills/redteam/，重启环境生效）\r\n");
+        });
+        // GitHub 同步（guest 内 wget，busybox 自带）
+        vSync.setOnClickListener(v -> {
+            vSync.setEnabled(false);
+            new Thread(() -> {
+                String cmd = buildPurgeSyncCmd("vulndb", new String[]{
+                        "00-index.md", "web-injection.md", "web-logic.md",
+                        "auth-identity.md", "intranet-post.md", "cloud-mobile.md", "cve-quick.md"},
+                        "~/.reasonix/purge/vulndb");
+                String out = executeInGuest(cmd, 90);
+                runOnUiThread(() -> {
+                    vSync.setEnabled(true);
+                    refreshPurgeResourceStates(vulnState, skillState);
+                    pushOutput("\r\n[dsh purge] 漏洞库 GitHub 同步：" + out + "\r\n");
+                });
+            }, "purge-vuln-sync").start();
+        });
+        sSync.setOnClickListener(v -> {
+            vSync.setEnabled(false);
+            new Thread(() -> {
+                String[] names;
+                try {
+                    names = getAssets().list("purge/skills/redteam");
+                } catch (java.io.IOException e) {
+                    names = new String[0];
+                }
+                java.util.List<String> mds = new ArrayList<>();
+                if (names != null) {
+                    for (String n : names) if (n.endsWith(".md")) mds.add(n);
+                }
+                String cmd = buildPurgeSyncCmd("skills/redteam", mds.toArray(new String[0]),
+                        "~/.reasonix/skills/redteam");
+                String out = executeInGuest(cmd, 120);
+                runOnUiThread(() -> {
+                    vSync.setEnabled(true);
+                    refreshPurgeResourceStates(vulnState, skillState);
+                    pushOutput("\r\n[dsh purge] skill 包 GitHub 同步：" + out + "\r\n");
+                });
+            }, "purge-skill-sync").start();
+        });
+    }
+
+    /** 生成 guest 内 GitHub 同步命令：逐文件 wget raw.githubusercontent.com/qianeric-backup/RSXM/main/resources/<group>/<file> */
+    private String buildPurgeSyncCmd(String group, String[] files, String destDir) {
+        StringBuilder sb = new StringBuilder("mkdir -p ").append(destDir).append("; cd /tmp && ");
+        String base = "https://raw.githubusercontent.com/qianeric-backup/RSXM/main/resources/" + group + "/";
+        for (String f : files) {
+            sb.append("wget -q -T 20 -O ").append(f).append(" '").append(base).append(f)
+                    .append("' && mv -f ").append(f).append(" ").append(destDir).append("/; ");
+        }
+        sb.append("echo __SYNC_DONE__");
+        return sb.toString();
+    }
+
+    /** 刷新资源状态行（guest 侧已装文件数 / 总文件数） */
+    private void refreshPurgeResourceStates(final TextView vulnState, final TextView skillState) {
+        new Thread(() -> {
+            try {
+                final int vulnTotal = 7;
+                File vd = new File(new File(new File(new File(getFilesDir(), "rootfs"),
+                        "root/.reasonix"), "purge"), "vulndb");
+                final int vulnHave = vd.exists() ? (vd.listFiles() == null ? 0 : vd.listFiles().length) : 0;
+                File sd = new File(new File(new File(getFilesDir(), "rootfs"),
+                        "root/.reasonix"), "skills/redteam");
+                final int skillHave = sd.exists() && sd.listFiles() != null ? sd.listFiles().length : 0;
+                runOnUiThread(() -> {
+                    vulnState.setTextColor(0xFF7FDB8A);
+                    vulnState.setText("漏洞库：已装 " + vulnHave + "/" + vulnTotal
+                            + " 份（内置 7 份，APK 升级自动刷新）");
+                    skillState.setTextColor(0xFF7FDB8A);
+                    skillState.setText("红队 skill：已装 " + skillHave + "/23 个（reasonix 自动加载）");
+                });
+            } catch (Exception e) {
+                Log.w(TAG, "purge resource states failed", e);
+            }
+        }, "purge-res-states").start();
     }
 
     /**
@@ -7360,8 +7505,9 @@ public class MainActivity extends Activity {
         Log.d(TAG, "runtime assets refreshed (tarMiss=" + tarMiss + ")");
     }
 
-    /** 部署 dsh purge 面板资产（about / prompt-inject 模板 / 默认规则 / 破甲备用载荷）
-     *  到 rootfs ~/.reasonix/purge/ 与 ~/.reasonix/rules/（规则集分区默认模板）。幂等。 */
+    /** 部署 dsh purge 面板资产（about / prompt-inject / 规则 / 备用载荷 / 漏洞库 / skill 包）
+     *  到 rootfs。skill 包部署到 ~/.reasonix/skills/redteam/（reasonix 自动加载）。
+     *  幂等：已存在不覆盖（尊重用户编辑）；APK 升级时由 refreshAssets 全量刷新。 */
     private void deployPurgeAssets(File rootfs) {
         try {
             File base = new File(new File(rootfs, "root/.reasonix"), "purge");
@@ -7376,13 +7522,37 @@ public class MainActivity extends Activity {
             extractAsset("purge/prompts/infinite-gen-4.md", p4);
             File p3 = new File(new File(base, "prompts"), "infinite-gen-3.md");
             extractAsset("purge/prompts/infinite-gen-3.md", p3);
-            // 同步默认规则到 ~/.reasonix/rules/（规则集分区读取路径；已存在不覆盖，
-            // 尊重用户新建/编辑）
-            File rulesTarget = new File(new File(new File(rootfs, "root/.reasonix"),
-                    "rules"), "rsxm-default.md");
-            rulesTarget.getParentFile().mkdirs();
-            if (!rulesTarget.exists()) {
-                extractAsset("purge/rules/rsxm-default.md", rulesTarget);
+            // 漏洞库（~/.reasonix/purge/vulndb/）：内置速查，reasonix 可按 /vulndb 检索
+            File vulnDir = new File(new File(base, "vulndb"), "00-index.md");
+            extractAsset("purge/vulndb/00-index.md", vulnDir);
+            for (String vf : new String[]{"web-injection.md", "web-logic.md", "auth-identity.md",
+                    "intranet-post.md", "cloud-mobile.md", "cve-quick.md"}) {
+                extractAsset("purge/vulndb/" + vf, new File(new File(base, "vulndb"), vf));
+            }
+            // 红队 skill 包（dsh-purge 上游 23 个）：部署到 reasonix 全局 skills，自动加载
+            File redteamDir = new File(new File(new File(rootfs, "root/.reasonix"),
+                    "skills/redteam"), "recon-pipeline.md");
+            redteamDir.getParentFile().mkdirs();
+            String[] redteamSkills = getAssets().list("purge/skills/redteam");
+            if (redteamSkills != null) {
+                for (String sf : redteamSkills) {
+                    if (sf.endsWith(".md")) {
+                        extractAsset("purge/skills/redteam/" + sf,
+                                new File(redteamDir.getParentFile(), sf));
+                    }
+                }
+            }
+            // 规则集：默认模板 + 红队操作规范（已存在不覆盖，尊重用户编辑）
+            File rulesDir = new File(new File(new File(rootfs, "root/.reasonix"), "rules"),
+                    "rsxm-default.md");
+            rulesDir.getParentFile().mkdirs();
+            if (!rulesDir.exists()) {
+                extractAsset("purge/rules/rsxm-default.md", rulesDir);
+            }
+            File roRules = new File(new File(new File(rootfs, "root/.reasonix"), "rules"),
+                    "redteam-operations.md");
+            if (!roRules.exists()) {
+                extractAsset("purge/rules/redteam-operations.md", roRules);
             }
             Log.d(TAG, "dsh-purge assets deployed to rootfs");
         } catch (java.io.IOException e) {

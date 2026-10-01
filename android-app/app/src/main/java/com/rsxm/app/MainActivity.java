@@ -686,7 +686,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** YOLO 免审批模式标签：开启时 reasonix 完全跳过工具审批（--permission-mode bypassPermissions） */
+    /** YOLO 免审批模式标签：开启时 reasonix 完全跳过工具审批（--permission-mode danger-full-access） */
     private void updateYoloModeLabel() {
         TextView tv = advancedYoloLabel;
         if (tv != null) {
@@ -2505,13 +2505,13 @@ public class MainActivity extends Activity {
             "RSXM_ARMOR_V2", "RSXM_PERM_ALLOW", "RSXM_GUARDIAN_OFF", "RSXM_DESK_YOLO", null
     };
     private static final String[] PATCH_NAMES = {
-            "破甲 system_prompt", "权限白名单", "Guardian 禁用", "YOLO 审批", "全局指令 AGENTS.md"
+            "破甲 system_prompt", "权限白名单", "Guardian 禁用", "Full access 审批", "全局指令 AGENTS.md"
     };
     private static final String[] PATCH_DESCS = {
             "破甲内核注入 [agent] system_prompt（标记 RSXM_ARMOR_V2）",
             "[permissions] allow 白名单覆盖渗透/侦查/运维命令（标记 RSXM_PERM_ALLOW）",
             "guardian_model=\"\" 禁用高风险审查（标记 RSXM_GUARDIAN_OFF）",
-            "[desktop] default_tool_approval_mode=\"yolo\" 免审批（标记 RSXM_DESK_YOLO）",
+            "[desktop] default_tool_approval_mode=\"danger-full-access\" 免审批（标记 RSXM_DESK_YOLO）",
             "全局指令 ~/.reasonix/AGENTS.md（与规则集联动，应用=启用规则）"
     };
 
@@ -2641,13 +2641,16 @@ public class MainActivity extends Activity {
         return content;
     }
 
-    /** 补丁 3 应用：desktop 默认审批 yolo */
+    /** 补丁 3 应用：desktop 默认审批 danger-full-access（reasonix 1.39.3 权限枚举，
+     *  旧值 yolo/auto 已退役；Full access = 无 bwrap 时也允许非受限会话）。
+     *  幂等：先清除旧键/旧标记再注入。 */
     private String injectYolo(String content) {
+        content = stripYolo(content);
         if (java.util.regex.Pattern.compile("(?m)^\\s*\\[desktop\\]\\s*$").matcher(content).find()) {
             content = content.replaceFirst("(?m)^\\s*\\[desktop\\]\\s*$",
-                    "[desktop]\ndefault_tool_approval_mode = \"yolo\"");
+                    "[desktop]\ndefault_tool_approval_mode = \"danger-full-access\"");
         } else {
-            content += "\n[desktop]\ndefault_tool_approval_mode = \"yolo\"\n";
+            content += "\n[desktop]\ndefault_tool_approval_mode = \"danger-full-access\"\n";
         }
         content += "\n# RSXM_DESK_YOLO\n";
         return content;
@@ -3470,7 +3473,7 @@ public class MainActivity extends Activity {
         updateBgModeLabel();
         addV(panel, bgRow, 4);
 
-        final LinearLayout yoloRow = createDarkMenuRow("YOLO 免审批", "reasonix 完全跳过工具审批（等价 --permission-mode bypassPermissions）", null, () -> {
+        final LinearLayout yoloRow = createDarkMenuRow("YOLO 免审批", "reasonix 完全跳过工具审批（等价 --permission-mode danger-full-access）", null, () -> {
             SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
             boolean on = !sp.getBoolean("yolo_mode", true);
             sp.edit().putBoolean("yolo_mode", on).apply();
@@ -7313,17 +7316,23 @@ public class MainActivity extends Activity {
                 java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
                 Log.d(TAG, "reasonix guardian_model disabled (top-level)");
             }
-            // desktop 默认审批 yolo：独立幂等门（RSXM_DESK_YOLO）。
-            if (!content.contains("default_tool_approval_mode")) {
+            // desktop 默认审批 danger-full-access：独立幂等门（RSXM_DESK_YOLO）。
+            // reasonix 1.39.3 权限枚举为 read-only|workspace-write|danger-full-access|plan，
+            // 旧值 yolo/auto 已退役；Full access 是 Android 无 bwrap 时 serve/会话
+            // 允许非受限运行的显式选择（否则报 "shell sandbox requested but unavailable…"）。
+            // 迁移：旧设备 config 已有 yolo 值 → 先清旧键再注入新值。
+            if (!content.contains("default_tool_approval_mode")
+                    || content.contains("default_tool_approval_mode = \"yolo\"")) {
+                content = content.replaceAll("(?m)^\\s*default_tool_approval_mode\\s*=.*$\\n?", "");
                 if (java.util.regex.Pattern.compile("(?m)^\\s*\\[desktop\\]\\s*$").matcher(content).find()) {
                     content = content.replaceFirst("(?m)^\\s*\\[desktop\\]\\s*$",
-                            "[desktop]\ndefault_tool_approval_mode = \"yolo\"");
+                            "[desktop]\ndefault_tool_approval_mode = \"danger-full-access\"");
                 } else {
-                    content += "\n[desktop]\ndefault_tool_approval_mode = \"yolo\"\n";
+                    content += "\n[desktop]\ndefault_tool_approval_mode = \"danger-full-access\"\n";
                 }
                 content += "\n# RSXM_DESK_YOLO\n";
                 java.nio.file.Files.write(conf.toPath(), content.getBytes(StandardCharsets.UTF_8));
-                Log.d(TAG, "reasonix desktop yolo injected");
+                Log.d(TAG, "reasonix desktop danger-full-access injected");
             }
             // 破甲注入 v2（RSXM_ARMOR_V2 标记）：reasonix 只读 [agent] 表内的 system_prompt，
             // 顶层键被忽略（实测会话 system 仍是默认 prompt → 破甲不生效）。
@@ -8229,7 +8238,9 @@ public class MainActivity extends Activity {
                 + ReasonixServe.PID_FILE_GUEST + ")\" 2>/dev/null; sleep 0.5; fi; "
                 // 兜底：没有 pid 文件时（旧版、异常退出、进过 TUI 的残留）按可执行文件名清理，
                 // 否则残留进程占着 8787 会让新实例绑定失败。方括号避免匹配到本命令自身。
-                + "pkill -f '[r]easonix serve' 2>/dev/null; "
+                // 必须匹配 reasonix serve 与 reasonix.bin serve（wrapper exec 后 argv 是 .bin）：
+                // 旧模式 '[r]easonix serve' 匹配不到 .bin，残留进程会让 bind: address already in use。
+                + "pkill -f 'reasonix.*[s]erve' 2>/dev/null; "
                 + "rm -f " + ReasonixServe.PORT_FILE_GUEST;
     }
 
@@ -8251,6 +8262,10 @@ public class MainActivity extends Activity {
                 // 纯变量展开，不执行外部命令（诊断卡片里能看到实际跑的是哪一份）
                 + "echo \"[rsxm] RX=$RX\"; "
                 + "nohup \"$RX\" serve --addr 127.0.0.1:8787 --auth token "
+                // Full access：Android 无 bubblewrap 时 serve 会拒绝非受限运行
+                // （"shell sandbox requested but unavailable… refusing to run unconfined"），
+                // 显式 --permission-mode danger-full-access 选择非受限会话
+                + "--permission-mode danger-full-access "
                 + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
                 + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
                 + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "

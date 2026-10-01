@@ -556,17 +556,18 @@ RSXM_PERM
         echo "[armor] system_prompt 已注入 [agent]（破甲生效）"
     fi
 
-    # 门4：desktop 默认审批 yolo（RSXM_DESK_YOLO）
+    # 门4：desktop 默认审批 Full access（RSXM_DESK_YOLO；reasonix 1.39.3 权限枚举
+    # 为 read-only|workspace-write|danger-full-access，旧 "yolo"/"auto" 已退役）
     if ! grep -q "default_tool_approval_mode" "$RSXM_CONF" 2>/dev/null; then
         if grep -q '^\[desktop\]' "$RSXM_CONF" 2>/dev/null; then
             sed -i '0,/^[[:space:]]*\[desktop\][[:space:]]*$/s//@desktop@@
-default_tool_approval_mode = "yolo"/' "$RSXM_CONF" 2>/dev/null
+default_tool_approval_mode = "danger-full-access"/' "$RSXM_CONF" 2>/dev/null
             sed -i 's/^@desktop@@$/[desktop]/' "$RSXM_CONF" 2>/dev/null
         else
-            printf '\n[desktop]\ndefault_tool_approval_mode = "yolo"\n' >> "$RSXM_CONF"
+            printf '\n[desktop]\ndefault_tool_approval_mode = "danger-full-access"\n' >> "$RSXM_CONF"
         fi
         printf '\n# RSXM_DESK_YOLO\n' >> "$RSXM_CONF"
-        echo "[approval] desktop 默认 yolo 注入完成"
+        echo "[approval] desktop 默认 danger-full-access 注入完成"
     fi
 fi
 
@@ -606,18 +607,20 @@ if [ -n "$P" ]; then
     cd "$P" 2>/dev/null || true
 fi
 # 审批模式（App 侧滑栏「YOLO 免审批模式」开关写 /root/.rsxm-yolo 标记）：
-#   标记存在 → bypassPermissions（完全跳过工具审批）；否则 → auto（自动批准普通工具，保留安全规则）
+#   标记存在 → danger-full-access（完全跳过工具审批，Full access）；
+#   否则 → workspace-write（自动批准工作区写工具，保留只读/越权审批）。
+#   reasonix 1.39.3 权限枚举：read-only|workspace-write|danger-full-access|plan
 if [ -f /root/.rsxm-yolo ]; then
     if [ -n "$RESUME" ]; then
-        exec /usr/local/bin/reasonix.bin --permission-mode bypassPermissions --resume "$RESUME" "$@"
+        exec /usr/local/bin/reasonix.bin --permission-mode danger-full-access --resume "$RESUME" "$@"
     else
-        exec /usr/local/bin/reasonix.bin --permission-mode bypassPermissions "$@"
+        exec /usr/local/bin/reasonix.bin --permission-mode danger-full-access "$@"
     fi
 else
     if [ -n "$RESUME" ]; then
-        exec /usr/local/bin/reasonix.bin --permission-mode auto --resume "$RESUME" "$@"
+        exec /usr/local/bin/reasonix.bin --permission-mode workspace-write --resume "$RESUME" "$@"
     else
-        exec /usr/local/bin/reasonix.bin --permission-mode auto "$@"
+        exec /usr/local/bin/reasonix.bin --permission-mode workspace-write "$@"
     fi
 fi
 SH

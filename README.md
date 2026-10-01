@@ -27,7 +27,7 @@
   - **MCP 服务器**：管理当前项目 `.mcp.json`（reasonix 按项目根 `.mcp.json` 的 `mcpServers` 发现 MCP 服务器）：列出已配置服务器（名称/类型/摘要），表单添加/编辑/删除——本地命令型选 stdio（command + args + env），远程选 http/sse（url + headers），支持 `auto_start` 开关（关闭则需在终端手动 `reasonix mcp start`）；`${VAR}` 环境变量按 CLI 原生规则展开；保存后重启环境生效。
   - **更新 resonix**：从官方 npm 包（`@reasonix/cli-linux-arm64`，npmmirror 国内镜像）下载 tgz 解压更新，或从手机选择新版文件、恢复内置版本。
   - **dsh purge 清洗台**：融合上游 dsh-purge v1.1.35（DeepSeek Harness 网络安全红队评测插件，MIT）侧栏 UI 的原生面板（侧滑栏「dsh purge」→ 全屏面板）。双页签「清洗 / 演练台」+ 白/墨主题：
-    - **清洗 → 补丁**：RSXM 宿主策略补丁分组（破甲 system_prompt / [permissions] 白名单 / Guardian 禁用 / YOLO 审批 / 全局指令 AGENTS.md），每项实时状态 + 应用/还原（直接改 `~/.reasonix/config.toml`，应用后需重启环境生效，与上游一致）。
+    - **清洗 → 补丁**：RSXM 宿主策略补丁分组（破甲 system_prompt / [permissions] 白名单 / Guardian 禁用 / Full access 审批 / 全局指令 AGENTS.md），每项实时状态 + 应用/还原（直接改 `~/.reasonix/config.toml`，应用后需重启环境生效，与上游一致）。
     - **清洗 → 提示词**：编辑 `~/.reasonix/break-armor-prompt.md`（会话覆盖段），一键「应用为 system_prompt」重注入 `[agent]`，可恢复内置模板。
     - **清洗 → 规则集**：`~/.reasonix/rules/` 多套规则，启用即写全局指令、删除即移除（内置 rsxm-default 模板由 APK 资产提供副本）。
     - **清洗 → Skill**：全局 skill 启用状态列表（与「高级设置 → SKILL」面板互通）。

@@ -34,10 +34,11 @@
     - **演练台**：读声明 + 勾选三项授权后进入，巡检资产（/sdcard、/host-data、/host/system 挂载）、技能与运行环境（proot/chroot 模式、Alpine 版本、adb/root 桥、ds2api、磁盘），只用于有权管理的本机/离线靶标/已书面授权环境。
     - **资源**：漏洞库（7 份速查：web-injection / web-logic / auth-identity / intranet-post / cloud-mobile / cve-quick，部署 `~/.reasonix/purge/vulndb/`，reasonix 内 `/vulndb` 检索）、规则库（rsxm-default + redteam-operations，目标 AGENTS.md）、Skill 包（redteam：dsh-purge 上游 23 个；av-evasion：免杀对抗 18 章手册；hacker-asm-decompile：全平台反编译，分别部署 `~/.reasonix/skills/` 对应目录自动加载；另内置 Skills4RedTeam 社区技能索引 `~/.reasonix/purge/skills-index.md`）。「安装到环境」离线可用；「GitHub 同步」从 `github.com/qianeric-backup/RSXM` 的 `resources/` 拉取更新（仓库目录与 `assets/purge/` 双写保持）。
   - **AI 破甲工具箱（AITEST8.0 融合）**：解包 Windows 桌面版 AITEST8.0 v8.1.5（AI-Pojia-Toolbox，PySide6，作者 dengbo-hui）后按其 UI 路由重建的原生面板（侧滑栏「AI 破甲工具箱」→ 全屏面板，赛博绿黑主题 #050908/#36F29A）。四页签：
-    - **仪表盘**：IDE 破甲目标区块（Claude Code / Codex / Gemini CLI / Cursor / Trae / CodeBuddy / Qoder / WorkBuddy 等 10 个，桌面版为 Windows 插件，本侧映射为目标区块）+ 破甲指令编辑（内置默认 / 自定义，存 `~/.reasonix/aitest8/purge-instruction.md`）+ 批量破甲（对接内置破甲环境：config 注入 + 全局技能 + 锚点自愈）+ 操作日志面板。
+    - **破甲中心（三处破甲 UI 融合后的统一入口）**：聚合 purge 补丁「破甲 system_prompt」、purge 提示词页签、AITEST8 批量破甲为一站式操作——① 破甲内核状态（config 标记 + 内容锚点双确认，实时显示已注入/未注入）② 一键部署破甲（config 注入 + 全局技能 + 资产 + 锚点自愈）/ 一键还原 ③ 破甲指令编辑「保存并应用」（自定义内容写入 break-armor-prompt.md 并真正注入 `[agent] system_prompt`，修复旧版"保存不生效"缺口；可恢复内置 infinite-gen-4 v0.4.0-hardened 模板）④ IDE 破甲目标（10 个，默认折叠摘要、点开展开）⑤ 关联资产（reverse-flow/redteam/av-evasion/decompile 部署状态 + 一键部署）⑥ 操作日志。
     - **装技**：技能卡片勾选安装/卸载（reverse-flow 逆向全谱系技能包 94 文件，含 SKILL.md 启动词「真心为你」→ `~/.reasonix/skills/reverse-flow/` 自动装载；redteam / av-evasion / decompile 与 purge 资源互通）。
     - **共享池**：社区共享技能池入口（gitee `dengbo-hui/ai-armor-piercing-toolbox` shared_skills + manifest.json，含自动审核流程说明：frontmatter/结构/安全扫描/跨 IDE 兼容/配额/重复检测）。
     - **激活**：设备码（SHA-256 派生 AT8- 前缀）+ AT8 注册码本地记录（`~/.reasonix/aitest8/license.json`）+ 联系客服 @sifthost / Telegram 群 + 关于说明（assets/aitest8/about.md）。
+    - **便利性联动**：dsh purge 清洗页「破甲 system_prompt」补丁行新增「破甲中心」快捷跳转按钮，两面板互相可达。
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。

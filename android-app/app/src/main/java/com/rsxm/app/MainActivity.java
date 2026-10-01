@@ -2904,6 +2904,21 @@ public class MainActivity extends Activity {
             revert.setEnabled(false);
             runPurgeOp(() -> purgePatchRevert(id), badge, apply, revert, after);
         });
+        // 破甲补丁行：联动「破甲中心」（融合后的统一入口，含指令编辑/批量部署/资产）
+        if (id == PATCH_ARMOR) {
+            Button center = purgeButton("破甲中心");
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            clp.leftMargin = dp(4);
+            btns.addView(center, clp);
+            center.setOnClickListener(v -> {
+                // 关闭 purge 面板（触发 onClose 清理引用）后进入统一破甲中心
+                findViewById(R.id.panel_overlay).setVisibility(View.GONE);
+                Runnable oc = panelOnClose;
+                panelOnClose = null;
+                if (oc != null) oc.run();
+                showAITest8Dialog();
+            });
+        }
         row.addView(btns);
         return row;
     }
@@ -3281,10 +3296,10 @@ public class MainActivity extends Activity {
         ver.setTextSize(11);
         head.addView(ver);
         panel.addView(head);
-        // 页签栏
+        // 页签栏（破甲中心 = 聚合三处破甲 UI：purge 破甲补丁 / purge 提示词 / AITEST8 批量破甲）
         LinearLayout tabs = new LinearLayout(this);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
-        final Button tabDash = aitest8Tab("仪表盘", true);
+        final Button tabDash = aitest8Tab("破甲中心", true);
         final Button tabSkills = aitest8Tab("装技", false);
         final Button tabPool = aitest8Tab("共享池", false);
         final Button tabAct = aitest8Tab("激活", false);
@@ -3372,92 +3387,196 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 仪表盘页：状态 + IDE 区块 + 破甲指令 + 批量破甲 + 日志 */
+    /** 破甲中心页（融合三处破甲 UI：purge 补丁[破甲 system_prompt] / purge 提示词页签 /
+     *  AITEST8 批量破甲）：内核状态 + 一键部署/还原 + 指令编辑（自定义真正生效）+
+     *  IDE 目标 + 关联资产 + 日志 */
     private void buildAITest8Dash(LinearLayout box) {
         box.removeAllViews();
-        // 授权状态行
-        final TextView status = new TextView(this);
-        status.setTextColor(0xFF8B949E);
-        status.setTextSize(12);
-        box.addView(status);
-        refreshAITest8AuthStatus(status);
-        // IDE 区块（桌面版插件 → 破甲目标区块）
-        box.addView(aitest8Section("IDE 破甲目标（" + AITEST8_IDES.length + "）"));
-        box.addView(aitest8Tip("桌面版插件为 Windows 专属（.pyd），本侧映射为破甲目标区块；"
-                + "「批量破甲」对全部目标执行破甲指令部署（写入 reasonix config + 全局 skills）。"));
-        for (String[] ide : AITEST8_IDES) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(10), dp(6), dp(10), dp(6));
-            row.setBackgroundColor(0xFF0B1713);
-            row.setLayoutParams(new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            LinearLayout.LayoutParams m1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-            TextView name = new TextView(this);
-            name.setText(ide[1]);
-            name.setTextColor(0xFFE6EDF3);
-            name.setTextSize(13);
-            name.setTypeface(null, android.graphics.Typeface.BOLD);
-            row.addView(name, m1);
-            TextView desc = new TextView(this);
-            desc.setText(ide[2]);
-            desc.setTextColor(0xFF6E7681);
-            desc.setTextSize(11);
-            row.addView(desc);
-            box.addView(row);
-        }
-        // 破甲指令编辑（内置默认 / 自定义）
-        box.addView(aitest8Section("破甲指令"));
-        box.addView(aitest8Tip("修改后保存，下次破甲时使用自定义内容；留空则使用内置默认（破甲环境提示词）。"));
-        final EditText inst = new EditText(this);
-        inst.setSingleLine(false);
-        inst.setMinLines(3);
-        inst.setTextSize(12);
-        inst.setTextColor(0xFFE6EDF3);
-        inst.setBackgroundColor(0xFF07110E);
-        inst.setHint("留空 = 内置默认（infinite-gen-4 v0.4.0-hardened 破甲提示词）");
-        box.addView(inst);
-        LinearLayout instRow = new LinearLayout(this);
-        instRow.setOrientation(LinearLayout.HORIZONTAL);
-        Button saveInst = aitest8Button("保存指令", false);
-        saveInst.setOnClickListener(v -> {
-            String txt = inst.getText().toString().trim();
-            try {
-                File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "purge-instruction.md");
-                f.getParentFile().mkdirs();
-                try (java.io.FileOutputStream fo = new java.io.FileOutputStream(f)) {
-                    fo.write(txt.getBytes(StandardCharsets.UTF_8));
-                }
-                aitest8Log("破甲指令已" + (txt.isEmpty() ? "重置为内置默认" : "保存（自定义）"));
-                showToast(txt.isEmpty() ? "已重置为内置默认" : "自定义指令已保存");
-            } catch (Exception e) {
-                aitest8Log("保存失败: " + e.getMessage());
-            }
-        });
-        Button batchBtn = aitest8Button("批量破甲", true);
-        batchBtn.setOnClickListener(v -> {
-            aitest8Log("批量破甲：对 " + AITEST8_IDES.length + " 个 IDE 目标部署破甲指令…");
+        // ── 破甲内核状态 ──
+        box.addView(aitest8Section("破甲内核"));
+        final TextView kernel = new TextView(this);
+        kernel.setTextColor(0xFF8B949E);
+        kernel.setTextSize(12);
+        box.addView(kernel);
+        new Thread(() -> {
+            final boolean on = purgePatchApplied(PATCH_ARMOR);
+            final String tip = on ? "已注入 [agent] system_prompt（锚点自愈激活）" : "未注入";
+            runOnUiThread(() -> {
+                kernel.setText("● " + tip);
+                kernel.setTextColor(on ? 0xFF3FB950 : 0xFFF85149);
+            });
+        }, "aitest8-kernel").start();
+        // 主操作：部署 / 还原
+        LinearLayout opRow = new LinearLayout(this);
+        opRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button deployBtn = aitest8Button("一键部署破甲", true);
+        deployBtn.setOnClickListener(v -> {
+            aitest8Log("一键部署破甲：注入 [agent] system_prompt + 全局技能 + 资产…");
             new Thread(() -> {
                 try {
                     File rootfs = new File(getFilesDir(), "rootfs");
-                    deployAITest8Assets(rootfs);        // 技能包 + 教程等资产
-                    ensureSandboxDisabled(rootfs);      // 破甲环境注入（config + skills + 锚点自愈）
-                    aitest8Log("破甲部署完成：config [agent] system_prompt 已注入（锚点 "
-                            + "escape-clause free kernel），全局技能已装载");
+                    deployAITest8Assets(rootfs);        // reverse-flow 技能包 + 教程
+                    ensureSandboxDisabled(rootfs);      // config 注入 + skills + 锚点自愈
+                    aitest8Log("破甲部署完成：system_prompt 已写入 [agent]（锚点 escape-clause free kernel）");
                     aitest8Log("提示：重启 reasonix 环境后完全生效");
-                    showToast("批量破甲完成");
+                    showToast("破甲部署完成");
+                    runOnUiThread(() -> buildAITest8Dash(aitest8ContentBox));
                 } catch (Exception e) {
-                    aitest8Log("批量破甲失败: " + e.getMessage());
+                    aitest8Log("破甲部署失败: " + e.getMessage());
                 }
             }, "aitest8-deploy").start();
         });
-        instRow.addView(saveInst, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        LinearLayout.LayoutParams bml = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
-        bml.leftMargin = dp(4);
-        instRow.addView(batchBtn, bml);
+        Button revertBtn = aitest8Button("还原破甲", false);
+        revertBtn.setOnClickListener(v -> {
+            aitest8Log("还原破甲：移除 [agent] system_prompt 块…");
+            new Thread(() -> {
+                String msg = purgePatchRevert(PATCH_ARMOR);
+                aitest8Log(msg);
+                showToast(msg);
+                runOnUiThread(() -> buildAITest8Dash(aitest8ContentBox));
+            }, "aitest8-revert").start();
+        });
+        opRow.addView(deployBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams rvl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        rvl.leftMargin = dp(4);
+        opRow.addView(revertBtn, rvl);
+        box.addView(opRow);
+        // ── 破甲指令（自定义真正生效：保存 → 应用为 system_prompt 写 config）──
+        box.addView(aitest8Section("破甲指令"));
+        box.addView(aitest8Tip("编辑破甲提示词（含内核）。「保存并应用」写入 break-armor-prompt.md 并注入 [agent]"
+                + " system_prompt（自定义内容生效）；「恢复内置模板」回到 infinite-gen-4 v0.4.0-hardened 默认。"));
+        final EditText inst = new EditText(this);
+        inst.setSingleLine(false);
+        inst.setMinLines(4);
+        inst.setTextSize(12);
+        inst.setTextColor(0xFFE6EDF3);
+        inst.setHintTextColor(0xFF6E7681);
+        inst.setBackgroundColor(0xFF07110E);
+        inst.setGravity(android.view.Gravity.TOP);
+        inst.setVerticalScrollBarEnabled(true);
+        inst.setMovementMethod(new android.text.method.ScrollingMovementMethod());
+        box.addView(inst, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(140)));
+        new Thread(() -> {
+            final String body = readArmorPromptSource();   // 当前生效内容（自定义或内置）
+            runOnUiThread(() -> {
+                if (body != null && !body.isEmpty()) inst.setText(body);
+            });
+        }, "aitest8-inst-load").start();
+        LinearLayout instRow = new LinearLayout(this);
+        instRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button saveApply = aitest8Button("保存并应用", true);
+        saveApply.setOnClickListener(v -> {
+            final String txt = inst.getText().toString();
+            new Thread(() -> {
+                try {
+                    File f = new File(new File(new File(getFilesDir(), "rootfs"),
+                            "root/.reasonix"), "break-armor-prompt.md");
+                    f.getParentFile().mkdirs();
+                    java.nio.file.Files.write(f.toPath(), txt.getBytes(StandardCharsets.UTF_8));
+                    String msg = purgePatchApply(PATCH_ARMOR);   // 自定义内容真正注入 [agent]
+                    aitest8Log(msg);
+                    showToast(txt.trim().isEmpty() ? "已恢复内置默认并应用" : "自定义指令已保存并应用");
+                } catch (Exception e) {
+                    aitest8Log("保存失败: " + e.getMessage());
+                }
+            }, "aitest8-inst-save").start();
+        });
+        Button restoreInst = aitest8Button("恢复内置模板", false);
+        restoreInst.setOnClickListener(v -> {
+            try {
+                final String tpl = readAssetText("purge/prompts/infinite-gen-4.1-flash.md");
+                runOnUiThread(() -> inst.setText(tpl));
+                aitest8Log("已恢复内置破甲模板（等待保存并应用）");
+            } catch (Exception e) {
+                aitest8Log("恢复模板失败: " + e.getMessage());
+            }
+        });
+        instRow.addView(saveApply, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams ril = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        ril.leftMargin = dp(4);
+        instRow.addView(restoreInst, ril);
         box.addView(instRow);
-        // 日志面板
+        // ── IDE 破甲目标（默认折叠摘要，点展开）──
+        box.addView(aitest8Section("IDE 破甲目标（" + AITEST8_IDES.length + "）"));
+        box.addView(aitest8Tip("桌面版插件为 Windows 专属（.pyd），本侧映射为破甲目标区块——"
+                + "一键部署即对所有目标生效。"));
+        final LinearLayout ideBox = new LinearLayout(this);
+        ideBox.setOrientation(LinearLayout.VERTICAL);
+        final TextView ideFold = new TextView(this);
+        ideFold.setText("▸ 展开 " + AITEST8_IDES.length + " 个 IDE 目标列表");
+        ideFold.setTextColor(0xFF36F29A);
+        ideFold.setTextSize(12);
+        ideFold.setPadding(dp(4), dp(4), 0, dp(4));
+        ideFold.setOnClickListener(v -> {
+            boolean show = ideBox.getChildCount() == 0;
+            ideFold.setText(show ? "▾ 收起 IDE 目标列表" : "▸ 展开 " + AITEST8_IDES.length + " 个 IDE 目标列表");
+            if (show) {
+                for (String[] ide : AITEST8_IDES) {
+                    LinearLayout row = new LinearLayout(this);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                    row.setPadding(dp(10), dp(6), dp(10), dp(6));
+                    row.setBackgroundColor(0xFF0B1713);
+                    TextView name = new TextView(this);
+                    name.setText(ide[1]);
+                    name.setTextColor(0xFFE6EDF3);
+                    name.setTextSize(13);
+                    name.setTypeface(null, android.graphics.Typeface.BOLD);
+                    row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                    TextView desc = new TextView(this);
+                    desc.setText(ide[2]);
+                    desc.setTextColor(0xFF6E7681);
+                    desc.setTextSize(11);
+                    row.addView(desc);
+                    ideBox.addView(row);
+                }
+            } else {
+                ideBox.removeAllViews();
+            }
+        });
+        box.addView(ideFold);
+        box.addView(ideBox);
+        // ── 关联资产（技能包部署状态 + 一键部署）──
+        box.addView(aitest8Section("关联资产"));
+        final TextView assetState = new TextView(this);
+        assetState.setTextColor(0xFF8B949E);
+        assetState.setTextSize(12);
+        box.addView(assetState);
+        new Thread(() -> {
+            File skillsDir = new File(new File(getFilesDir(), "rootfs/root/.reasonix"), "skills");
+            StringBuilder sb = new StringBuilder();
+            for (String[] sk : AITEST8_SKILLS) {
+                File d = new File(skillsDir, sk[0]);
+                sb.append(sk[0]).append(d.isDirectory() ? " ●" : " ○").append("  ");
+            }
+            final String s = sb.toString().trim();
+            runOnUiThread(() -> assetState.setText(s));
+        }, "aitest8-assets").start();
+        Button assetBtn = aitest8Button("部署关联技能包", false);
+        assetBtn.setOnClickListener(v -> {
+            new Thread(() -> {
+                File skillsDir = new File(new File(getFilesDir(), "rootfs/root/.reasonix"), "skills");
+                skillsDir.mkdirs();
+                for (String[] sk : AITEST8_SKILLS) {
+                    File dest = new File(skillsDir, sk[0]);
+                    if (dest.isDirectory()) continue;
+                    if ("reverse-flow".equals(sk[0])) {
+                        try {
+                            extractAssetTree("aitest8/reverse_flow_skill", dest);
+                            aitest8Log("已部署 reverse-flow（94 文件）");
+                        } catch (Exception e) {
+                            aitest8Log("部署 reverse-flow 失败: " + e.getMessage());
+                        }
+                    } else {
+                        deployAITest8SkillGroup(sk[0], dest);
+                    }
+                }
+                aitest8Log("关联技能包部署完成（重启 reasonix 后完全生效）");
+                runOnUiThread(() -> buildAITest8Dash(aitest8ContentBox));
+            }, "aitest8-assets-deploy").start();
+        });
+        box.addView(assetBtn);
+        // ── 操作日志 ──
         box.addView(aitest8Section("操作日志"));
         aitest8LogView = new TextView(this);
         aitest8LogView.setTextColor(0xFF7FFFC1);
@@ -3467,7 +3586,7 @@ public class MainActivity extends Activity {
         aitest8LogView.setPadding(dp(10), dp(8), dp(10), dp(8));
         aitest8LogView.setMinHeight(dp(72));
         box.addView(aitest8LogView);
-        aitest8Log("AITEST8 仪表盘就绪 · 桌面版 v" + AITEST8_VER + " UI 路由融合");
+        aitest8Log("破甲中心就绪 · 三处破甲 UI 已融合（purge 补丁 / 提示词 / 批量破甲）");
     }
 
     /** 装技页：技能卡片勾选安装/卸载（→ ~/.reasonix/skills/） */

@@ -54,6 +54,8 @@ public class TranscriptClient {
     private volatile boolean running = false;
     private volatile Thread thread;
     private volatile HttpURLConnection conn;
+    /** 已切换 /events fallback 通道（/transcript 契约缺失时；reasonix 1.38/1.39 实测无此契约） */
+    private volatile boolean fallbackMode = false;
 
     public TranscriptClient(String baseUrl, String token, Listener listener) {
         this.baseUrl = baseUrl;
@@ -62,6 +64,9 @@ public class TranscriptClient {
     }
 
     public boolean isRunning() { return running; }
+
+    /** 是否处于 /events 回退通道（true 时 GUI 用 /history 拉取渲染，事件帧仅作刷新触发） */
+    public boolean isFallbackMode() { return fallbackMode; }
 
     /** 启动后台跟随线程（幂等：重复调用先停旧的；重连后会自动重新取基线） */
     public void start() {
@@ -75,6 +80,7 @@ public class TranscriptClient {
 
     public void stop() {
         running = false;
+        fallbackMode = false;
         Thread t = thread;
         thread = null;
         HttpURLConnection c = conn;
@@ -141,6 +147,12 @@ public class TranscriptClient {
                 conn = c;
                 int code = c.getResponseCode();
                 if (code != 200) {
+                    if (code == 404) {
+                        // 无 /transcript 契约（reasonix 1.38/1.39 实测缺失）→ 切 /events 通道
+                        listener.onConnection(true, "无 /transcript 契约，切换 /events 通道");
+                        enterFallback();
+                        return;
+                    }
                     broken = true;
                     sleepQuiet(backoff);
                     backoff = Math.min(backoff * 2, 15000);
@@ -152,10 +164,20 @@ public class TranscriptClient {
                 try (BufferedReader r = new BufferedReader(
                         new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
+                    boolean firstLine = true;
                     while (running && (line = r.readLine()) != null) {
                         String s = line.trim();
-                        if (s.isEmpty()) continue;
                         if (s.startsWith("data:")) s = s.substring(5).trim();
+                        // 首行内容探测：契约存在时首行是 JSON 对象；缺失时 serve 回退返回
+                        // Web UI HTML（<!doctype html>）→ 切 /events fallback
+                        if (firstLine) {
+                            firstLine = false;
+                            if (!s.startsWith("{")) {
+                                listener.onConnection(true, "无 /transcript 契约，切换 /events 通道");
+                                enterFallback();
+                                return;
+                            }
+                        }
                         if (s.isEmpty() || s.charAt(0) != '{') continue;   // 注释/心跳/其它字段
                         JSONObject o;
                         try {
@@ -184,6 +206,61 @@ public class TranscriptClient {
             }
             // 连接成功但被服务端立即收尾时按最小间隔重连（相当于轮询）；失败走退避
             if (running) sleepQuiet(connected ? MIN_RECONNECT_MS : backoff);
+        }
+    }
+
+    /** 切换 /events 回退通道（SSE；事件帧驱动 GUI 拉 /history 渲染，断线退避重连） */
+    private void enterFallback() {
+        fallbackMode = true;
+        fallbackLoop();
+    }
+
+    private void fallbackLoop() {
+        int backoff = 500;
+        while (running) {
+            HttpURLConnection c = null;
+            try {
+                c = open("/events", 0);
+                conn = c;
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    sleepQuiet(backoff);
+                    backoff = Math.min(backoff * 2, 15000);
+                    continue;
+                }
+                backoff = 500;
+                listener.onConnection(true, "events 流");
+                // 基线：通知 GUI 拉 /history 全量渲染（事件流本身无消息内容）
+                JSONObject base = new JSONObject();
+                try { base.put("__fallbackBaseline", true); } catch (Exception ignored) {}
+                listener.onBaseline(base);
+                try (BufferedReader r = new BufferedReader(
+                        new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while (running && (line = r.readLine()) != null) {
+                        String s = line.trim();
+                        if (s.startsWith("data:")) s = s.substring(5).trim();
+                        if (s.isEmpty() || s.charAt(0) != '{') continue;
+                        JSONObject o;
+                        try {
+                            o = new JSONObject(s);
+                        } catch (Exception ignored) {
+                            continue;
+                        }
+                        try { o.put("__fallbackEvent", true); } catch (Exception ignored) {}
+                        listener.onDelta(o);
+                    }
+                }
+            } catch (Exception e) {
+                if (running) listener.onConnection(false, "events 断开，重连中…");
+            } finally {
+                conn = null;
+                if (c != null) {
+                    try { c.disconnect(); } catch (Exception ignored) {}
+                }
+            }
+            if (running) sleepQuiet(backoff);
+            backoff = Math.min(backoff * 2, 15000);
         }
     }
 

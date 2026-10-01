@@ -1218,7 +1218,8 @@ public class MainActivity extends Activity {
         panel.setPadding(dp(16), dp(8), dp(16), dp(12));
         panel.addView(createDarkTip(
                 "reasonix 会话（聊天记录）按项目保存在 ~/.reasonix/projects/<项目>/sessions/，"
-                        + "退出 reasonix 即自动保存。\n"
+                        + "退出 reasonix 即自动保存；serve/GUI 会话同样落盘（文件 <时间戳>-<模型>.jsonl，"
+                        + "标题取首条消息）。\n"
                         + "「继续」恢复该会话聊天（重启环境生效）；「删除」移入回收站；「新建会话」开始全新对话。"));
         panel.addView(createDarkSectionTitle("历史会话"));
         final ScrollView listScroll = new ScrollView(this);
@@ -1264,9 +1265,10 @@ public class MainActivity extends Activity {
                         java.util.Arrays.sort(pds, java.util.Comparator.comparing(File::getName));
                         for (File pd : pds) {
                             File sessions = new File(pd, "sessions");
-                            // 只认 transcript 投影 <id>.jsonl：排除 events/turns/conflicts 等
-                            // 事件流——它们不含 role/content/model，且 lastModified 更新，
-                            // 一旦被选中就会挤掉真正的会话文件（GUI 无气泡、无模型名）
+                            // 只认会话主文件 *.jsonl（v1.39 新格式 <时间戳>-<模型>.jsonl，serve/GUI 会话
+                            // 同样落盘；旧格式 <id>.jsonl 兼容）：排除 events/turns/conflicts 事件流
+                            // （不含 role/content/model，且 lastModified 更新，一旦被选中就会挤掉
+                            // 真正的会话文件——GUI 无气泡、无模型名）
                             File[] files = sessions.listFiles((d, n) ->
                                     n.endsWith(".jsonl") && !n.startsWith(".")
                                             && !n.endsWith(".events.jsonl") && !n.endsWith(".conflicts.jsonl")
@@ -2511,7 +2513,8 @@ public class MainActivity extends Activity {
             "破甲内核注入 [agent] system_prompt（标记 RSXM_ARMOR_V2）",
             "[permissions] allow 白名单覆盖渗透/侦查/运维命令（标记 RSXM_PERM_ALLOW）",
             "guardian_model=\"\" 禁用高风险审查（标记 RSXM_GUARDIAN_OFF）",
-            "[desktop] default_tool_approval_mode=\"danger-full-access\" 免审批（标记 RSXM_DESK_YOLO）",
+            "[desktop] default_tool_approval_mode=\"danger-full-access\" 免审批（标记 RSXM_DESK_YOLO；"
+                    + "与高级设置 YOLO 开关协同：开关写 wrapper 会话标记，本补丁写 config 新会话默认）",
             "全局指令 ~/.reasonix/AGENTS.md（与规则集联动，应用=启用规则）"
     };
 
@@ -5857,7 +5860,8 @@ public class MainActivity extends Activity {
         panel.setPadding(dp(16), dp(8), dp(16), dp(12));
 
         panel.addView(createDarkTip("Serve 模式：reasonix serve 无头 HTTP 引擎（JSON 接口，无 TUI 依赖）。\n"
-                + "transcript 投影结构化回显/checkpoint 回溯/审批模式切换。127.0.0.1 直连，token 持久化。"));
+                + "GUI 会话数据自动适配契约：优先 transcript 投影；reasonix 1.38/1.39 无此契约时"
+                + "自动回退 /events + /history（本版内置 1.39.3 即回退模式）。checkpoint 回溯/审批切换可用。"));
 
         final TextView status = createDarkResult();
         status.setMaxLines(3);
@@ -6139,7 +6143,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 拉 transcript 快照渲染到面板（面板内为只读展示，独立于主会话视图的索引） */
+    /** 拉会话历史渲染到 serve 面板（只读展示，独立于主会话视图索引）。
+     *  优先 transcript 快照（结构化）；无 /transcript 契约（v1.38/1.39 实测）回退 /history。 */
     private void serveReloadHistory(boolean append) {
         new Thread(() -> {
             int port = ReasonixServe.readBoundPort(getFilesDir());
@@ -6147,7 +6152,36 @@ public class MainActivity extends Activity {
             TranscriptClient c = new TranscriptClient("http://127.0.0.1:" + port,
                     ReasonixServe.readToken(getFilesDir()), null);
             org.json.JSONObject snap = c.fetchSnapshot(8000);
-            if (snap == null) return;
+            if (snap == null) {
+                // 回退：/history 全量渲染（[{role, content}...]，过滤 system）
+                try {
+                    ReasonixServe client = serveClient();
+                    if (client == null) return;
+                    String body = client.history();
+                    if (body == null) return;
+                    final org.json.JSONArray arr = new org.json.JSONArray(body);
+                    runOnUiThread(() -> {
+                        LinearLayout box = serveHistoryBox;
+                        if (box == null) return;
+                        box.removeAllViews();
+                        for (int i = 0; i < arr.length(); i++) {
+                            org.json.JSONObject m = arr.optJSONObject(i);
+                            if (m == null) continue;
+                            String role = m.optString("role", "");
+                            String content = m.optString("content", "");
+                            if ("system".equals(role) || content.isEmpty()) continue;
+                            TranscriptRecord r = new TranscriptRecord();
+                            r.role = role;
+                            r.content = content;
+                            r.id = "h" + i;
+                            box.addView(createBubble(r).wrap);
+                        }
+                    });
+                } catch (Exception e) {
+                    Log.w(TAG, "serve history fallback failed", e);
+                }
+                return;
+            }
             java.util.List<TranscriptRecord> recs =
                     TranscriptRecord.parseArray(snap.optJSONArray("records"));
             java.util.Collections.sort(recs, (a, b) -> Long.compare(a.order, b.order));
@@ -8079,8 +8113,6 @@ public class MainActivity extends Activity {
     private volatile boolean transcriptRunning = false;
     /** 最近一次渲染的窗口内容签名（基线重复到达时跳过整表 setText，避免空转卡顿） */
     private String transcriptWindowSig = "";
-    /** 是否已提示过"reasonix 版本过旧、无 /transcript 契约"（避免重复插卡片） */
-    private volatile boolean transcriptUnavailableNoted = false;
     /** 最近一次内置 reasonix 部署失败原因（null = 成功/未尝试；诊断卡片会显示） */
     private volatile String reasonixDeployError = null;
     /** 本地即时回显的 user 气泡（服务端 user record 到达后移除，避免重复） */
@@ -8421,22 +8453,10 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * serve 在线、但拿不到 /transcript 快照：说明设备上的 reasonix 版本过旧（该契约 v1.39 才有），
-     * GUI 回显无从取数。给出明确原因与解决办法，避免"引擎在线却空白"这种无解释状态。
+     * 建立 transcript 跟随流（幂等：重复调用先停旧的；断线由客户端自行重连并重取基线）。
+     * reasonix 1.38/1.39 无 /transcript 契约（实测回退 Web UI HTML）时，客户端自动切
+     * /events 通道：事件帧仅作刷新触发，GUI 走 /history 全量渲染（refreshFromHistory）。
      */
-    private void noteTranscriptUnavailable() {
-        if (!serveOnline || transcriptUnavailableNoted) return;
-        transcriptUnavailableNoted = true;
-        setNativeStatus("serve 在线，但无 /transcript 契约（reasonix 版本过旧）");
-        appendDiagnosticCard("⚠ serve 在线，但取不到 /transcript 数据（reasonix 版本过旧）",
-                "原因：设备上 guest 内的 reasonix 版本过旧，不提供服务端 transcript 投影\n"
-                        + "（该契约 v1.39 起才有；v1.31/v1.38 只有 /events + /history）。\n"
-                        + "本版 APK 已内置 reasonix " + BUNDLED_REASONIX_VERSION + "：升级安装本 APK 后会自动覆盖部署，\n"
-                        + "重启环境（侧滑栏 ADB 面板或重开 app）即可生效。\n"
-                        + "也可以在侧滑栏「更新 resonix」里联网更新到最新版。");
-    }
-
-    /** 建立 transcript 跟随流（幂等：重复调用先停旧的；断线由客户端自行重连并重取基线） */
     private void startTranscriptFollow() {
         int port = ReasonixServe.readBoundPort(getFilesDir());
         if (port <= 0) port = 8787;
@@ -8446,21 +8466,28 @@ public class MainActivity extends Activity {
                     @Override
                     public void onBaseline(org.json.JSONObject frame) {
                         serveOnline = true;
-                        ui.post(() -> applyTranscriptBaseline(frame));
+                        if (frame.optBoolean("__fallbackBaseline", false)) {
+                            ui.post(MainActivity.this::refreshFromHistory);
+                        } else {
+                            ui.post(() -> applyTranscriptBaseline(frame));
+                        }
                     }
 
                     @Override
                     public void onDelta(org.json.JSONObject frame) {
-                        ui.post(() -> applyTranscriptDelta(frame));
+                        if (frame.optBoolean("__fallbackEvent", false)) {
+                            ui.post(MainActivity.this::refreshFromHistory);
+                        } else {
+                            ui.post(() -> applyTranscriptDelta(frame));
+                        }
                     }
 
                     @Override
                     public void onConnection(boolean connected, String detail) {
                         serveOnline = connected;
                         ui.post(() -> setNativeStatus(connected ? ""
-                                : "transcript 流中断"
-                                        + ((detail == null || detail.isEmpty()) ? "" : "（" + detail + "）")
-                                        + "，正在重连…"));
+                                : ((detail == null || detail.isEmpty()) ? "会话流中断，正在重连…"
+                                : detail + "，正在重连…")));
                     }
                 });
         transcript = c;
@@ -8494,7 +8521,8 @@ public class MainActivity extends Activity {
         return "";
     }
 
-    /** 同步拉一次 /transcript/snapshot 渲染（进入视图 / 新会话后调用；窗口比 follow 首帧更大） */
+    /** 同步拉一次 /transcript/snapshot 渲染（进入视图 / 新会话后调用；窗口比 follow 首帧更大）。
+     *  快照不可用（无 /transcript 契约）时回退 /history 渲染（/events 通道由跟随流负责刷新）。 */
     private void loadTranscriptSnapshot() {
         new Thread(() -> {
             int port = ReasonixServe.readBoundPort(getFilesDir());
@@ -8503,7 +8531,7 @@ public class MainActivity extends Activity {
                     ReasonixServe.readToken(getFilesDir()), null);
             final org.json.JSONObject snap = c.fetchSnapshot(8000);
             if (snap == null) {
-                ui.post(this::noteTranscriptUnavailable);   // serve 在线却取不到 → 版本过旧，给出解释
+                refreshFromHistory();   // 无 /transcript 契约（v1.38/1.39 实测）→ /history 渲染
                 return;
             }
             org.json.JSONObject frame = new org.json.JSONObject();
@@ -8513,6 +8541,53 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {}
             ui.post(() -> applyTranscriptBaseline(frame));
         }, "transcript-snapshot").start();
+    }
+
+    /** /events 回退通道：拉 /history 全量渲染（整表重建，简单可靠；事件帧仅作刷新触发）。
+     *  /history 返回 [{role, content}...]（含 system；渲染时过滤）。 */
+    private void refreshFromHistory() {
+        new Thread(() -> {
+            try {
+                ReasonixServe client = serveClient();
+                if (client == null) return;
+                String body = client.history();
+                if (body == null) return;
+                final org.json.JSONArray arr = new org.json.JSONArray(body);
+                ui.post(() -> renderHistoryMessages(arr));
+            } catch (Exception e) {
+                Log.w(TAG, "refreshFromHistory failed", e);
+            }
+        }, "serve-history").start();
+    }
+
+    /** /history 消息数组 → 气泡列表（user 右对齐蓝底 / assistant 左对齐；过滤 system 默认说明） */
+    private void renderHistoryMessages(org.json.JSONArray arr) {
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        int n = arr.length();
+        if (n == 0) return;
+        // 整表重建（fallback 通道无 record 索引；历史较短，重建成本可忽略）
+        list.removeAllViews();
+        resetTranscriptView();
+        for (int i = 0; i < n; i++) {
+            org.json.JSONObject m = arr.optJSONObject(i);
+            if (m == null) continue;
+            String role = m.optString("role", "");
+            String content = m.optString("content", "");
+            if (content.isEmpty()) continue;
+            if ("system".equals(role)) continue;    // 系统提示词不展示
+            TranscriptRecord r = new TranscriptRecord();
+            r.role = role;
+            r.content = content;
+            r.id = "h" + i;
+            BubbleView bv = createBubble(r);
+            list.addView(bv.wrap);
+        }
+        setBubbleCount(list.getChildCount());
+        updateSessionInfoCount(list.getChildCount());
+        autoScrollBottom(true);
+        setGenInFlight(false);
+        setNativeStatus("");
     }
 
     // ---------------- transcript 投影 → 气泡 ----------------

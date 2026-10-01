@@ -14,23 +14,27 @@ import java.security.SecureRandom;
 /**
  * Reasonix Serve 无头引擎客户端（v2.1.0 新功能）。
  *
- * 依据 reasonix 1.31 `reasonix serve --help` 与实测契约（HTTP+JSON，127.0.0.1 可直连
+ * 依据 reasonix 1.39.3（内置版）实测契约（HTTP+JSON，127.0.0.1 可直连
  * —— proot/chroot 与宿主共享网络命名空间，guest 端口在 app 侧直接可见）：
  *
- *   GET  /status               → {running, runtimeState:{phase,running,turnStatus,activity,...},
- *                                 toolApprovalMode, label, used, window, sessionPath, sessionName,
- *                                 goal, goalStatus, effort:{levels,current}, ...}
- *   GET  /sessions             → JSON 数组（已保存会话）
+ *   GET  /status               → {running, runtimeState:{phase,running,...}, label, used, window,
+ *                                 sessionPath, sessionName, cwd, goal, goalStatus, ...}
+ *   GET  /sessions             → JSON 数组（已保存会话 {name,path,title,turns,current,mtimeMilli}）
  *   GET  /history              → [{role, content}...]（含 system；渲染时过滤）
  *   POST /submit {"input":...} → 202（异步受理；用 /status 轮询 running）
  *   POST /cancel               → 中断当前回合
- *   POST /new                  → 开新会话
+ *   POST /new                  → 204（开新会话，轮换 sessionName；需 Content-Type: application/json）
+ *   GET  /events               → SSE（runtime_state/turn_status/turn_started/turn_phase/stream_attempt；
+ *                                 不含消息正文，GUI 以 /history 渲染）
  *   GET  /todos                → JSON 数组
  *   GET  /checkpoints          → [{turn, prompt, time, canCode, canConversation, coverage}]
  *   POST /rewind               → 回溯到 checkpoint（body {"turn":N}，端点按实测/文档自适应）
- *   GET  /tool-approval-mode   → 200（文本或 JSON）
- *   POST /tool-approval-mode {"mode":"manual|ask|auto|acceptEdits|dontAsk|plan|bypassPermissions"} → 204
+ *   GET  /tool-approval-mode   → 1.39.3 实测 GET 缺失（回退 Web UI）；POST 旧枚举
+ *                                {manual|ask|auto|acceptEdits|dontAsk|bypassPermissions} 仍 204
  *   GET  /models               → {current, default, label, models[]}
+ *
+ * 注意：1.38/1.39 无 /transcript/* 契约（GET /transcript/follow|snapshot|content|outline 均
+ * 回退返回 Web UI HTML）——GUI 回显由 TranscriptClient 探测后自动切换 /events+/history 通道。
  *
  * 认证：--auth token 时所有请求带 Authorization: Bearer <token>。
  * token 由 app 生成落 guest /root/.rsxm-serve-token（宿主侧同路径可读），

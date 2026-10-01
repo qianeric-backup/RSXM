@@ -3336,15 +3336,16 @@ public class MainActivity extends Activity {
         addV(box, rulesBox, 4);
         refreshPurgeRules(rulesBox, null);
         // skill 包
-        box.addView(purgeSection("Skill 包（红队 23 个）"));
-        box.addView(purgeTip("~/.reasonix/skills/redteam/：recon / dir-bruteforce / fscan-intranet / "
-                + "lateral-movement / shell-handler 等，reasonix 自动加载（/skills 查看）"));
+        box.addView(purgeSection("Skill 包"));
+        box.addView(purgeTip("~/.reasonix/skills/：redteam（dsh-purge 23 个）、av-evasion（免杀对抗 18 章）、"
+                + "hacker-asm-decompile（全平台反编译）。reasonix 自动加载（/skills 查看）；"
+                + "另有 Skills4RedTeam 社区技能索引（~/.reasonix/purge/skills-index.md）"));
         final TextView skillState = purgeResult();
         addV(box, skillState, 4);
         LinearLayout sbtns = new LinearLayout(this);
         sbtns.setOrientation(LinearLayout.HORIZONTAL);
         Button sInstall = purgeButton("安装到环境");
-        Button sSync = purgeButton("GitHub 同步");
+        Button sSync = purgeButton("GitHub 同步全部");
         sbtns.addView(sInstall, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         sbtns.addView(sSync, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         addV(box, sbtns, 6);
@@ -3378,23 +3379,33 @@ public class MainActivity extends Activity {
             }, "purge-vuln-sync").start();
         });
         sSync.setOnClickListener(v -> {
-            vSync.setEnabled(false);
+            sSync.setEnabled(false);
             new Thread(() -> {
-                String[] names;
+                StringBuilder all = new StringBuilder();
                 try {
-                    names = getAssets().list("purge/skills/redteam");
+                    String[] names = getAssets().list("purge/skills/redteam");
+                    java.util.List<String> mds = new ArrayList<>();
+                    if (names != null) for (String n : names) if (n.endsWith(".md")) mds.add(n);
+                    all.append(buildPurgeSyncCmd("skills/redteam", mds.toArray(new String[0]),
+                            "~/.reasonix/skills/redteam")).append(" ");
+                    all.append(buildPurgeSyncCmd("skills/av-evasion",
+                            new String[]{"SKILL.md"}, "~/.reasonix/skills/av-evasion")).append(" ");
+                    String[] avRefs = getAssets().list("purge/skills/av-evasion/references");
+                    java.util.List<String> avRefMds = new ArrayList<>();
+                    if (avRefs != null) for (String n : avRefs) if (n.endsWith(".md")) avRefMds.add(n);
+                    all.append(buildPurgeSyncCmd("skills/av-evasion/references",
+                            avRefMds.toArray(new String[0]),
+                            "~/.reasonix/skills/av-evasion/references")).append(" ");
+                    all.append(buildPurgeSyncCmd("skills/decompile",
+                            new String[]{"SKILL.md"}, "~/.reasonix/skills/hacker-asm-decompile")).append(" ");
+                    all.append(buildPurgeSyncCmd("", new String[]{"skills-index.md", "skills-index-LICENSE.txt"},
+                            "~/.reasonix/purge")).append(" ");
                 } catch (java.io.IOException e) {
-                    names = new String[0];
+                    Log.w(TAG, "purge skill sync list failed", e);
                 }
-                java.util.List<String> mds = new ArrayList<>();
-                if (names != null) {
-                    for (String n : names) if (n.endsWith(".md")) mds.add(n);
-                }
-                String cmd = buildPurgeSyncCmd("skills/redteam", mds.toArray(new String[0]),
-                        "~/.reasonix/skills/redteam");
-                String out = executeInGuest(cmd, 120);
+                String out = executeInGuest(all.toString(), 150);
                 runOnUiThread(() -> {
-                    vSync.setEnabled(true);
+                    sSync.setEnabled(true);
                     refreshPurgeResourceStates(vulnState, skillState);
                     pushOutput("\r\n[dsh purge] skill 包 GitHub 同步：" + out + "\r\n");
                 });
@@ -3405,7 +3416,8 @@ public class MainActivity extends Activity {
     /** 生成 guest 内 GitHub 同步命令：逐文件 wget raw.githubusercontent.com/qianeric-backup/RSXM/main/resources/<group>/<file> */
     private String buildPurgeSyncCmd(String group, String[] files, String destDir) {
         StringBuilder sb = new StringBuilder("mkdir -p ").append(destDir).append("; cd /tmp && ");
-        String base = "https://raw.githubusercontent.com/qianeric-backup/RSXM/main/resources/" + group + "/";
+        String base = "https://raw.githubusercontent.com/qianeric-backup/RSXM/main/resources"
+                + (group.isEmpty() ? "/" : "/" + group + "/");
         for (String f : files) {
             sb.append("wget -q -T 20 -O ").append(f).append(" '").append(base).append(f)
                     .append("' && mv -f ").append(f).append(" ").append(destDir).append("/; ");
@@ -3422,15 +3434,26 @@ public class MainActivity extends Activity {
                 File vd = new File(new File(new File(new File(getFilesDir(), "rootfs"),
                         "root/.reasonix"), "purge"), "vulndb");
                 final int vulnHave = vd.exists() ? (vd.listFiles() == null ? 0 : vd.listFiles().length) : 0;
-                File sd = new File(new File(new File(getFilesDir(), "rootfs"),
+                File rt = new File(new File(new File(getFilesDir(), "rootfs"),
                         "root/.reasonix"), "skills/redteam");
-                final int skillHave = sd.exists() && sd.listFiles() != null ? sd.listFiles().length : 0;
+                final int rtHave = rt.exists() && rt.listFiles() != null ? rt.listFiles().length : 0;
+                File av = new File(new File(new File(getFilesDir(), "rootfs"),
+                        "root/.reasonix"), "skills/av-evasion");
+                final int avHave = av.exists() && av.listFiles() != null ? av.listFiles().length : 0;
+                File dec = new File(new File(new File(getFilesDir(), "rootfs"),
+                        "root/.reasonix"), "skills/hacker-asm-decompile/SKILL.md");
+                final boolean decHave = dec.exists();
+                File idx = new File(new File(new File(getFilesDir(), "rootfs"),
+                        "root/.reasonix"), "purge/skills-index.md");
+                final boolean idxHave = idx.exists();
                 runOnUiThread(() -> {
                     vulnState.setTextColor(0xFF7FDB8A);
                     vulnState.setText("漏洞库：已装 " + vulnHave + "/" + vulnTotal
                             + " 份（内置 7 份，APK 升级自动刷新）");
                     skillState.setTextColor(0xFF7FDB8A);
-                    skillState.setText("红队 skill：已装 " + skillHave + "/23 个（reasonix 自动加载）");
+                    skillState.setText("Skill：redteam " + rtHave + "/23 · av-evasion " + avHave
+                            + "/2 · decompile " + (decHave ? "✓" : "✗")
+                            + " · 索引 " + (idxHave ? "✓" : "✗") + "（reasonix 自动加载）");
                 });
             } catch (Exception e) {
                 Log.w(TAG, "purge resource states failed", e);
@@ -7551,6 +7574,33 @@ public class MainActivity extends Activity {
                     }
                 }
             }
+            // 免杀对抗 skill 包（shangdi-w/-skills · redteam-av-evasion）：SKILL.md + references/
+            File avDir = new File(new File(new File(rootfs, "root/.reasonix"),
+                    "skills/av-evasion"), "SKILL.md");
+            avDir.getParentFile().mkdirs();
+            extractAsset("purge/skills/av-evasion/SKILL.md", avDir);
+            File avRefDir = new File(new File(new File(rootfs, "root/.reasonix"),
+                    "skills/av-evasion/references"), "00-目录与速查.md");
+            avRefDir.getParentFile().mkdirs();
+            String[] avRefs = getAssets().list("purge/skills/av-evasion/references");
+            if (avRefs != null) {
+                for (String rf : avRefs) {
+                    if (rf.endsWith(".md")) {
+                        extractAsset("purge/skills/av-evasion/references/" + rf,
+                                new File(avRefDir.getParentFile(), rf));
+                    }
+                }
+            }
+            // 全平台反编译 skill（shangdi-w/-skills · hacker-asm-decompile）
+            File decDir = new File(new File(new File(rootfs, "root/.reasonix"),
+                    "skills/hacker-asm-decompile"), "SKILL.md");
+            decDir.getParentFile().mkdirs();
+            extractAsset("purge/skills/decompile/SKILL.md", decDir);
+            // 红队技能索引（din4e/Skills4RedTeam · MIT 社区推荐清单）
+            extractAsset("purge/skills-index.md",
+                    new File(new File(rootfs, "root/.reasonix/purge"), "skills-index.md"));
+            extractAsset("purge/skills-index-LICENSE.txt",
+                    new File(new File(rootfs, "root/.reasonix/purge"), "skills-index-LICENSE.txt"));
             // 规则集：默认模板 + 红队操作规范（已存在不覆盖，尊重用户编辑）
             File rulesDir = new File(new File(new File(rootfs, "root/.reasonix"), "rules"),
                     "rsxm-default.md");

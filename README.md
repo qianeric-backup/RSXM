@@ -32,7 +32,7 @@
     - **清洗 → 规则集**：`~/.reasonix/rules/` 多套规则，启用即写全局指令、删除即移除（内置 rsxm-default 模板由 APK 资产提供副本）。
     - **清洗 → Skill**：全局 skill 启用状态列表（与「高级设置 → SKILL」面板互通）。
     - **演练台**：读声明 + 勾选三项授权后进入，巡检资产（/sdcard、/host-data、/host/system 挂载）、技能与运行环境（proot/chroot 模式、Alpine 版本、adb/root 桥、ds2api、磁盘），只用于有权管理的本机/离线靶标/已书面授权环境。
-    - **资源**：漏洞库（7 份速查：web-injection / web-logic / auth-identity / intranet-post / cloud-mobile / cve-quick，部署 `~/.reasonix/purge/vulndb/`，reasonix 内 `/vulndb` 检索）、规则库（rsxm-default + redteam-operations，目标 AGENTS.md）、红队 skill 包（dsh-purge 上游 23 个，部署 `~/.reasonix/skills/redteam/` 自动加载）。「安装到环境」离线可用；「GitHub 同步」从 `github.com/qianeric-backup/RSXM` 的 `resources/` 拉取更新（仓库目录与 `assets/purge/` 双写保持）。
+    - **资源**：漏洞库（7 份速查：web-injection / web-logic / auth-identity / intranet-post / cloud-mobile / cve-quick，部署 `~/.reasonix/purge/vulndb/`，reasonix 内 `/vulndb` 检索）、规则库（rsxm-default + redteam-operations，目标 AGENTS.md）、Skill 包（redteam：dsh-purge 上游 23 个；av-evasion：免杀对抗 18 章手册；hacker-asm-decompile：全平台反编译，分别部署 `~/.reasonix/skills/` 对应目录自动加载；另内置 Skills4RedTeam 社区技能索引 `~/.reasonix/purge/skills-index.md`）。「安装到环境」离线可用；「GitHub 同步」从 `github.com/qianeric-backup/RSXM` 的 `resources/` 拉取更新（仓库目录与 `assets/purge/` 双写保持）。
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。

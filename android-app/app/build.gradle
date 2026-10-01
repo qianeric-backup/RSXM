@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.3.3 — serve 引擎修复：v1.39.3 权限枚举对齐 danger-full-access + 端口残留清理）
-        versionCode 75
-        versionName "2.3.3"
+        // 版本随 GitHub Release 同步更新（当前 v2.3.4 — 融合 Skills4RedTeam 索引 + shangdi-w skill 包）
+        versionCode 76
+        versionName "2.3.4"
     }
 
     buildTypes {

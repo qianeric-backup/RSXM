@@ -227,6 +227,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.menu_ds2api).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showDs2ApiDialog(); });
         findViewById(R.id.menu_update).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showUpdateResonixDialog(); });
         findViewById(R.id.menu_purge).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showPurgeDialog(); });
+        findViewById(R.id.menu_aitest8).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAITest8Dialog(); });
         findViewById(R.id.menu_project).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showProjectDialog(); });
         findViewById(R.id.menu_sessions).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSessionsDialog(); });
         findViewById(R.id.menu_advanced).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdvancedDialog(); });
@@ -2521,6 +2522,35 @@ public class MainActivity extends Activity {
     /** purge 面板当前内容容器（页签切换/操作刷新用） */
     private LinearLayout purgeContentBox;
 
+    /* ==================== AI 破甲工具箱（AITEST8 融合，桌面版 v8.1.5 重构） ==================== */
+    private static final String AITEST8_VER = "8.1.5";
+    private static final String AITEST8_CHANNEL = "正式版";
+    private static final String AITEST8_CONTACT = "@sifthost";
+    private static final String AITEST8_GROUP = "https://t.me/+v5eOTuqSKVkwZWVl";
+    /** 桌面版 IDE 插件清单（Windows 专属，Android 侧映射为破甲目标区块） */
+    private static final String[][] AITEST8_IDES = {
+            {"claude_code", "Claude Code", "Anthropic 编码代理"},
+            {"codex", "Codex CLI", "OpenAI 编码代理"},
+            {"gemini_cli", "Gemini CLI", "Google 编码代理"},
+            {"claude_haha", "Claude Haha", "Claude 变体客户端"},
+            {"cursor", "Cursor", "AI 编辑器"},
+            {"trae", "Trae", "字节 AI IDE"},
+            {"trae_cn", "Trae CN", "Trae 国内版"},
+            {"codebuddy", "CodeBuddy", "腾讯 AI IDE"},
+            {"qoder", "Qoder", "AI 编辑器"},
+            {"workbuddy", "WorkBuddy", "通用工作代理"},
+    };
+    /** 本机技能包清单（装技页：勾选安装/卸载 → ~/.reasonix/skills/） */
+    private static final String[][] AITEST8_SKILLS = {
+            {"reverse-flow", "逆向全谱系技能包（94 文件；启动词「真心为你」）", "逆向反编译"},
+            {"redteam", "红队 23 技能包（信息收集→权限维持）", "红队"},
+            {"av-evasion", "免杀规避 18 章技能包", "检测规避"},
+            {"decompile", "hacker-asm-decompile（反汇编/解混淆）", "逆向反编译"},
+    };
+    /** AITEST8 面板内容容器（页签切换/操作刷新用） */
+    private LinearLayout aitest8ContentBox;
+    private TextView aitest8LogView;
+
     /** config.toml 宿主侧路径（rootfs/root/.reasonix/config.toml） */
     private File purgeConfFile() {
         return new File(new File(new File(getFilesDir(), "rootfs"), "root/.reasonix"), "config.toml");
@@ -3221,6 +3251,569 @@ public class MainActivity extends Activity {
         tv.setMaxLines(6);
         tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
         return tv;
+    }
+
+    /* ==================== AI 破甲工具箱（AITEST8 融合面板） ====================
+     * 源自 Windows 桌面版 AITEST8.0 v8.1.5「AI 破甲工具箱 / AI-Pojia-Toolbox」
+     * （PySide6，作者 dengbo-hui）：桌面 Qt UI 无法在 Android 直接运行，按「UI 路由
+     * 融合」原则在 RSXM 原生面板重建——功能区/主题/文案对齐桌面版，能力与内置
+     * 破甲环境（config 注入 + skills 部署）打通。桌面版自有能力（Windows IDE 插件
+     * .pyd、gitee 共享池、作者激活 API）在本侧映射为区块入口/说明/本地配置。
+     */
+    private void showAITest8Dialog() {
+        final LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(16));
+        panel.setBackgroundColor(0xFF050908);
+        // 头：标题 + 版本 + 主题色
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView title = new TextView(this);
+        title.setText("AI 破甲工具箱");
+        title.setTextColor(0xFF36F29A);
+        title.setTextSize(16);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView ver = new TextView(this);
+        ver.setText("v" + AITEST8_VER + " · " + AITEST8_CHANNEL);
+        ver.setTextColor(0xFF6E7681);
+        ver.setTextSize(11);
+        head.addView(ver);
+        panel.addView(head);
+        // 页签栏
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        final Button tabDash = aitest8Tab("仪表盘", true);
+        final Button tabSkills = aitest8Tab("装技", false);
+        final Button tabPool = aitest8Tab("共享池", false);
+        final Button tabAct = aitest8Tab("激活", false);
+        tabs.addView(tabDash, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        tabs.addView(tabSkills, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        tabs.addView(tabPool, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        tabs.addView(tabAct, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        panel.addView(tabs);
+        aitest8ContentBox = new LinearLayout(this);
+        aitest8ContentBox.setOrientation(LinearLayout.VERTICAL);
+        panel.addView(aitest8ContentBox);
+        final java.util.function.Consumer<Button> sel = (Button on) -> {
+            for (Button b : new Button[]{tabDash, tabSkills, tabPool, tabAct}) {
+                b.setTextColor(b == on ? 0xFF36F29A : 0xFF6E7681);
+                b.setTypeface(null, b == on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+            }
+        };
+        tabDash.setOnClickListener(v -> { sel.accept(tabDash); buildAITest8Dash(aitest8ContentBox); });
+        tabSkills.setOnClickListener(v -> { sel.accept(tabSkills); buildAITest8Skills(aitest8ContentBox); });
+        tabPool.setOnClickListener(v -> { sel.accept(tabPool); buildAITest8Pool(aitest8ContentBox); });
+        tabAct.setOnClickListener(v -> { sel.accept(tabAct); buildAITest8Activation(aitest8ContentBox); });
+        buildAITest8Dash(aitest8ContentBox);
+        showPanel("AI 破甲工具箱", panel, () -> aitest8ContentBox = null);
+    }
+
+    /** AITEST8 页签按钮（选中=品牌绿） */
+    private Button aitest8Tab(String text, boolean on) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextSize(14);
+        b.setAllCaps(false);
+        b.setMinHeight(dp(40));
+        b.setMinimumHeight(dp(40));
+        b.setPadding(dp(14), 0, dp(14), 0);
+        b.setBackgroundColor(0x00000000);
+        b.setTextColor(on ? 0xFF36F29A : 0xFF6E7681);
+        b.setTypeface(null, on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+        return b;
+    }
+
+    /** AITEST8 强调按钮（品牌绿底/暗底） */
+    private Button aitest8Button(String text, boolean primary) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextColor(0xFFE6EDF3);
+        b.setTextSize(13);
+        b.setAllCaps(false);
+        b.setMinHeight(dp(38));
+        b.setMinimumHeight(dp(38));
+        b.setPadding(dp(12), 0, dp(12), 0);
+        b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
+                primary ? 0xFF0F6E49 : 0xFF0C1B16));
+        return b;
+    }
+
+    /** AITEST8 说明行（暗色小字） */
+    private TextView aitest8Tip(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(0xFF9BA6B4);
+        tv.setTextSize(12);
+        tv.setLineSpacing(0, 1.3f);
+        return tv;
+    }
+
+    /** AITEST8 区块标题（品牌绿加粗） */
+    private TextView aitest8Section(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(0xFF7FFFC1);
+        tv.setTextSize(14);
+        tv.setTypeface(null, android.graphics.Typeface.BOLD);
+        tv.setPadding(0, dp(6), 0, dp(2));
+        return tv;
+    }
+
+    /** 追加一行到面板日志（主线程安全） */
+    private void aitest8Log(String line) {
+        if (aitest8LogView == null) return;
+        runOnUiThread(() -> {
+            String t = aitest8LogView.getText().toString();
+            String ts = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT)
+                    .format(new java.util.Date());
+            aitest8LogView.setText("[" + ts + "] " + line + "\n" + t);
+        });
+    }
+
+    /** 仪表盘页：状态 + IDE 区块 + 破甲指令 + 批量破甲 + 日志 */
+    private void buildAITest8Dash(LinearLayout box) {
+        box.removeAllViews();
+        // 授权状态行
+        final TextView status = new TextView(this);
+        status.setTextColor(0xFF8B949E);
+        status.setTextSize(12);
+        box.addView(status);
+        refreshAITest8AuthStatus(status);
+        // IDE 区块（桌面版插件 → 破甲目标区块）
+        box.addView(aitest8Section("IDE 破甲目标（" + AITEST8_IDES.length + "）"));
+        box.addView(aitest8Tip("桌面版插件为 Windows 专属（.pyd），本侧映射为破甲目标区块；"
+                + "「批量破甲」对全部目标执行破甲指令部署（写入 reasonix config + 全局 skills）。"));
+        for (String[] ide : AITEST8_IDES) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(10), dp(6), dp(10), dp(6));
+            row.setBackgroundColor(0xFF0B1713);
+            row.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams m1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            TextView name = new TextView(this);
+            name.setText(ide[1]);
+            name.setTextColor(0xFFE6EDF3);
+            name.setTextSize(13);
+            name.setTypeface(null, android.graphics.Typeface.BOLD);
+            row.addView(name, m1);
+            TextView desc = new TextView(this);
+            desc.setText(ide[2]);
+            desc.setTextColor(0xFF6E7681);
+            desc.setTextSize(11);
+            row.addView(desc);
+            box.addView(row);
+        }
+        // 破甲指令编辑（内置默认 / 自定义）
+        box.addView(aitest8Section("破甲指令"));
+        box.addView(aitest8Tip("修改后保存，下次破甲时使用自定义内容；留空则使用内置默认（破甲环境提示词）。"));
+        final EditText inst = new EditText(this);
+        inst.setSingleLine(false);
+        inst.setMinLines(3);
+        inst.setTextSize(12);
+        inst.setTextColor(0xFFE6EDF3);
+        inst.setBackgroundColor(0xFF07110E);
+        inst.setHint("留空 = 内置默认（infinite-gen-4 v0.4.0-hardened 破甲提示词）");
+        box.addView(inst);
+        LinearLayout instRow = new LinearLayout(this);
+        instRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button saveInst = aitest8Button("保存指令", false);
+        saveInst.setOnClickListener(v -> {
+            String txt = inst.getText().toString().trim();
+            try {
+                File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "purge-instruction.md");
+                f.getParentFile().mkdirs();
+                try (java.io.FileOutputStream fo = new java.io.FileOutputStream(f)) {
+                    fo.write(txt.getBytes(StandardCharsets.UTF_8));
+                }
+                aitest8Log("破甲指令已" + (txt.isEmpty() ? "重置为内置默认" : "保存（自定义）"));
+                showToast(txt.isEmpty() ? "已重置为内置默认" : "自定义指令已保存");
+            } catch (Exception e) {
+                aitest8Log("保存失败: " + e.getMessage());
+            }
+        });
+        Button batchBtn = aitest8Button("批量破甲", true);
+        batchBtn.setOnClickListener(v -> {
+            aitest8Log("批量破甲：对 " + AITEST8_IDES.length + " 个 IDE 目标部署破甲指令…");
+            new Thread(() -> {
+                try {
+                    File rootfs = new File(getFilesDir(), "rootfs");
+                    deployAITest8Assets(rootfs);        // 技能包 + 教程等资产
+                    ensureSandboxDisabled(rootfs);      // 破甲环境注入（config + skills + 锚点自愈）
+                    aitest8Log("破甲部署完成：config [agent] system_prompt 已注入（锚点 "
+                            + "escape-clause free kernel），全局技能已装载");
+                    aitest8Log("提示：重启 reasonix 环境后完全生效");
+                    showToast("批量破甲完成");
+                } catch (Exception e) {
+                    aitest8Log("批量破甲失败: " + e.getMessage());
+                }
+            }, "aitest8-deploy").start();
+        });
+        instRow.addView(saveInst, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams bml = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        bml.leftMargin = dp(4);
+        instRow.addView(batchBtn, bml);
+        box.addView(instRow);
+        // 日志面板
+        box.addView(aitest8Section("操作日志"));
+        aitest8LogView = new TextView(this);
+        aitest8LogView.setTextColor(0xFF7FFFC1);
+        aitest8LogView.setTextSize(11);
+        aitest8LogView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        aitest8LogView.setBackgroundColor(0xFF07110E);
+        aitest8LogView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        aitest8LogView.setMinHeight(dp(72));
+        box.addView(aitest8LogView);
+        aitest8Log("AITEST8 仪表盘就绪 · 桌面版 v" + AITEST8_VER + " UI 路由融合");
+    }
+
+    /** 装技页：技能卡片勾选安装/卸载（→ ~/.reasonix/skills/） */
+    private void buildAITest8Skills(LinearLayout box) {
+        box.removeAllViews();
+        box.addView(aitest8Section("技能库"));
+        box.addView(aitest8Tip("勾选安装，取消勾选卸载；部署到 ~/.reasonix/skills/ 后 reasonix 自动装载。"
+                + "reverse-flow 为桌面版内置技能包（94 文件，启动词「真心为你」）。"));
+        final LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        box.addView(list);
+        final TextView state = new TextView(this);
+        state.setTextColor(0xFF8B949E);
+        state.setTextSize(12);
+        box.addView(state);
+        final java.util.Map<String, Boolean> checks = new java.util.HashMap<>();
+        new Thread(() -> {
+            File skillsDir = new File(new File(getFilesDir(), "rootfs/root/.reasonix"), "skills");
+            java.util.Set<String> installed = new java.util.HashSet<>();
+            File[] dirs = skillsDir.listFiles(File::isDirectory);
+            if (dirs != null) for (File d : dirs) installed.add(d.getName());
+            runOnUiThread(() -> {
+                list.removeAllViews();
+                for (String[] sk : AITEST8_SKILLS) {
+                    String dirName = sk[0];
+                    boolean has = installed.contains(dirName);
+                    checks.put(dirName, has);
+                    LinearLayout card = new LinearLayout(this);
+                    card.setOrientation(LinearLayout.HORIZONTAL);
+                    card.setGravity(android.view.Gravity.CENTER_VERTICAL);
+                    card.setPadding(dp(10), dp(6), dp(10), dp(6));
+                    card.setBackgroundColor(0xFF0B1713);
+                    card.setLayoutParams(new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                    final android.widget.CheckBox cb = new android.widget.CheckBox(this);
+                    cb.setChecked(has);
+                    cb.setText(sk[1] + (has ? "　● 已安装" : "　○ 未安装"));
+                    cb.setTextColor(has ? 0xFF7FFFC1 : 0xFF8B949E);
+                    cb.setTextSize(12);
+                    cb.setOnCheckedChangeListener((b, checked) -> checks.put(dirName, checked));
+                    card.addView(cb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                    TextView cat = new TextView(this);
+                    cat.setText(sk[2]);
+                    cat.setTextColor(0xFF36F29A);
+                    cat.setTextSize(11);
+                    cat.setPadding(dp(8), 0, 0, 0);
+                    card.addView(cat);
+                    list.addView(card);
+                }
+                state.setText("已选 " + 0 + " / 共 " + AITEST8_SKILLS.length
+                        + "（勾选后点「应用变更」生效）");
+            });
+        }, "aitest8-skills-scan").start();
+        Button apply = aitest8Button("应用变更", true);
+        apply.setOnClickListener(v -> {
+            new Thread(() -> {
+                File skillsDir = new File(new File(getFilesDir(), "rootfs/root/.reasonix"), "skills");
+                skillsDir.mkdirs();
+                for (String[] sk : AITEST8_SKILLS) {
+                    File dest = new File(skillsDir, sk[0]);
+                    boolean want = Boolean.TRUE.equals(checks.get(sk[0]));
+                    if (want && !dest.isDirectory()) {
+                        if ("reverse-flow".equals(sk[0])) {
+                            try {
+                                extractAssetTree("aitest8/reverse_flow_skill", dest);
+                                aitest8Log("已装载技能 reverse-flow（94 文件）");
+                            } catch (Exception e) {
+                                aitest8Log("装载 reverse-flow 失败: " + e.getMessage());
+                            }
+                        } else {
+                            deployAITest8SkillGroup(sk[0], dest);
+                        }
+                    } else if (!want && dest.isDirectory()) {
+                        deleteRecursive(dest);
+                        aitest8Log("已移除技能 " + sk[0]);
+                    }
+                }
+                aitest8Log("技能变更已应用，重启 reasonix 后完全生效");
+                runOnUiThread(() -> buildAITest8Skills(aitest8ContentBox));
+            }, "aitest8-skills-apply").start();
+        });
+        box.addView(apply);
+    }
+
+    /** 部署 purge 自带技能组（redteam/av-evasion/decompile）到 skills 目录 */
+    private void deployAITest8SkillGroup(String group, File dest) {
+        try {
+            String prefix = "purge/skills/" + group;
+            android.content.res.AssetManager am = getAssets();
+            String[] top = am.list(prefix);
+            if (top == null || top.length == 0) return;
+            dest.mkdirs();
+            for (String t : top) {
+                String ap = prefix + "/" + t;
+                if (t.contains(".")) {
+                    extractAsset(ap, new File(dest, t));
+                } else {
+                    extractAssetTree(ap, new File(dest, t));
+                }
+            }
+            aitest8Log("已装载技能 " + group);
+        } catch (Exception e) {
+            aitest8Log("装载 " + group + " 失败: " + e.getMessage());
+        }
+    }
+
+    /** 共享池页：社区共享技能（gitee 上游仓库） */
+    private void buildAITest8Pool(LinearLayout box) {
+        box.removeAllViews();
+        box.addView(aitest8Section("共享技能池"));
+        box.addView(aitest8Tip("取之于社区，用之于社区：浏览/下载共享技能（桌面版经 gitee 仓库 "
+                + "dengbo-hui/ai-armor-piercing-toolbox 的 shared_skills/ 与 manifest.json 同步，"
+                + "含自动审核：frontmatter/结构/安全扫描/跨 IDE 兼容/配额/重复检测）。\n"
+                + "桌面版插件为 Windows 专属，共享池同步在此侧保留入口：配置 GITEE_TOKEN "
+                + "（git config --global credential.helper 或环境变量）后即可拉取共享技能清单。"));
+        final TextView out = new TextView(this);
+        out.setTextColor(0xFF7FFFC1);
+        out.setTextSize(11);
+        out.setTypeface(android.graphics.Typeface.MONOSPACE);
+        out.setBackgroundColor(0xFF07110E);
+        out.setPadding(dp(10), dp(8), dp(10), dp(8));
+        out.setMinHeight(dp(64));
+        box.addView(out);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        Button check = aitest8Button("刷新列表", false);
+        check.setOnClickListener(v -> {
+            out.setText("正在读取 gitee 共享池清单…");
+            new Thread(() -> {
+                String r = executeInGuest("curl -sS -m 12 "
+                        + "'https://gitee.com/api/v5/repos/dengbo-hui/ai-armor-piercing-toolbox/contents/shared_skills'"
+                        + " | head -c 1200", 16);
+                String msg = (r == null || r.trim().isEmpty() || r.contains("404"))
+                        ? "共享池不可读（网络受限或仓库路径变更）：" + (r == null ? "无输出" : r.substring(0, Math.min(r.length(), 200)))
+                        : "gitee API 返回：\n" + (r.length() > 800 ? r.substring(0, 800) + "…" : r);
+                runOnUiThread(() -> out.setText(msg));
+            }, "aitest8-pool").start();
+        });
+        Button share = aitest8Button("分享说明", false);
+        share.setOnClickListener(v -> out.setText("分享流程（桌面版）：自动审核（实时回显）→ ① 自动修正"
+                + "（补 author/license / 命名冲突重命名 / 跨 IDE 换行归一 / 绝对路径转相对路径；"
+                + "内容/安全类问题不自动改）→ ② 提交到共享池（gitee，单文件 1MB 上限）。\n"
+                + "本融合版保留入口与规则说明，实际发布请在桌面版或 gitee 仓库完成。"));
+        row.addView(check, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        sl.leftMargin = dp(4);
+        row.addView(share, sl);
+        box.addView(row);
+    }
+
+    /** 激活页：设备码 + 注册码（作者签发）+ 关于/客服 */
+    private void buildAITest8Activation(LinearLayout box) {
+        box.removeAllViews();
+        final TextView status = new TextView(this);
+        status.setTextSize(13);
+        status.setTypeface(null, android.graphics.Typeface.BOLD);
+        box.addView(status);
+        refreshAITest8AuthStatus(status);
+        box.addView(aitest8Section("软件激活"));
+        box.addView(aitest8Tip("桌面版为订阅制（7/30/360 天，首次激活起算；支持 3 分钟体验）。"
+                + "本融合版保留激活 UI 与本地注册记录：设备码 + 作者签发的 AT8 注册码。"));
+        // 设备码
+        final String deviceCode = aitest8DeviceCode();
+        TextView devLabel = new TextView(this);
+        devLabel.setText("本机设备码（发给作者换取注册码）");
+        devLabel.setTextColor(0xFFE6EDF3);
+        devLabel.setTextSize(12);
+        box.addView(devLabel);
+        LinearLayout devRow = new LinearLayout(this);
+        devRow.setOrientation(LinearLayout.HORIZONTAL);
+        final EditText dev = new EditText(this);
+        dev.setText(deviceCode);
+        dev.setEnabled(false);
+        dev.setTextSize(12);
+        dev.setTextColor(0xFFE6EDF3);
+        dev.setBackgroundColor(0xFF07110E);
+        devRow.addView(dev, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button copy = aitest8Button("复制设备码", false);
+        copy.setOnClickListener(v -> {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                    getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("device", deviceCode));
+            showToast("设备码已复制到剪贴板");
+        });
+        LinearLayout.LayoutParams cml = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        cml.leftMargin = dp(4);
+        devRow.addView(copy, cml);
+        box.addView(devRow);
+        // 注册码
+        TextView codeLabel = new TextView(this);
+        codeLabel.setText("注册码");
+        codeLabel.setTextColor(0xFFE6EDF3);
+        codeLabel.setTextSize(12);
+        box.addView(codeLabel);
+        final EditText code = new EditText(this);
+        code.setSingleLine(false);
+        code.setMinLines(3);
+        code.setTextSize(12);
+        code.setTextColor(0xFFE6EDF3);
+        code.setBackgroundColor(0xFF07110E);
+        code.setHint("粘贴作者提供的 AT8 注册码");
+        box.addView(code);
+        Button act = aitest8Button("激活 / 续费", true);
+        act.setOnClickListener(v -> {
+            String c = code.getText().toString().trim();
+            if (c.isEmpty()) {
+                showToast("请先粘贴注册码");
+                return;
+            }
+            try {
+                File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "license.json");
+                f.getParentFile().mkdirs();
+                org.json.JSONObject o = new org.json.JSONObject();
+                o.put("device", deviceCode);
+                o.put("code", c);
+                o.put("activated_at", System.currentTimeMillis() / 1000);
+                try (java.io.FileOutputStream fo = new java.io.FileOutputStream(f)) {
+                    fo.write(o.toString(2).getBytes(StandardCharsets.UTF_8));
+                }
+                aitest8Log("注册码已保存（本地记录）；桌面版激活需作者服务器校验");
+                showToast("注册码已保存");
+                refreshAITest8AuthStatus(status);
+            } catch (Exception e) {
+                showToast("保存失败: " + e.getMessage());
+            }
+        });
+        box.addView(act);
+        // 客服/群
+        LinearLayout contact = new LinearLayout(this);
+        contact.setOrientation(LinearLayout.HORIZONTAL);
+        Button support = aitest8Button("联系客服 " + AITEST8_CONTACT, false);
+        support.setOnClickListener(v -> {
+            try {
+                startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse("https://t.me/sifthost")));
+            } catch (Exception ignored) {}
+        });
+        Button group = aitest8Button("加入 Telegram 群", false);
+        group.setOnClickListener(v -> {
+            try {
+                startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse(AITEST8_GROUP)));
+            } catch (Exception ignored) {}
+        });
+        contact.addView(support, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams gl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        gl.leftMargin = dp(4);
+        contact.addView(group, gl);
+        box.addView(contact);
+        // 关于
+        Button about = aitest8Button("关于 · 使用说明", false);
+        about.setOnClickListener(v -> {
+            StringBuilder sb = new StringBuilder();
+            try (java.io.InputStream in = getAssets().open("aitest8/about.md")) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+            } catch (Exception ignored) {}
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("关于 — AI 破甲工具箱")
+                    .setMessage(sb.length() == 0 ? "AITEST8.0 · AI 破甲工具箱（RSXM 融合版）" : sb.toString())
+                    .setPositiveButton("关闭", null)
+                    .show();
+        });
+        box.addView(about);
+    }
+
+    /** 设备码：Android ID / 序列号 hash（稳定、可复制） */
+    private String aitest8DeviceCode() {
+        String id = android.provider.Settings.Secure.getString(
+                getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
+        if (id == null) id = "RSXM";
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] h = md.digest((id + "::aitest8").getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder("AT8-");
+            for (int i = 0; i < 8; i++) sb.append(String.format("%02X", h[i] & 0xFF));
+            return sb.toString();
+        } catch (Exception e) {
+            return "AT8-" + id;
+        }
+    }
+
+    /** 刷新授权状态行（guest ~/.reasonix/aitest8/license.json） */
+    private void refreshAITest8AuthStatus(final TextView status) {
+        new Thread(() -> {
+            String txt = "本机未授权 · 请前往「激活」页完成注册";
+            int color = 0xFFF85149;
+            try {
+                File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "license.json");
+                if (f.exists()) {
+                    String s = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+                    org.json.JSONObject o = new org.json.JSONObject(s);
+                    long at = o.optLong("activated_at", 0);
+                    String code = o.optString("code", "");
+                    txt = (code.isEmpty() ? "本机未授权" : "本机已授权（注册码已记录）")
+                            + (at > 0 ? " · 记录时间 " + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",
+                            java.util.Locale.ROOT).format(new java.util.Date(at * 1000)) : "");
+                    color = code.isEmpty() ? 0xFFF85149 : 0xFF3FB950;
+                }
+            } catch (Exception ignored) {}
+            final String t = txt;
+            final int c = color;
+            runOnUiThread(() -> {
+                status.setText("● " + t);
+                status.setTextColor(c);
+            });
+        }, "aitest8-auth").start();
+    }
+
+    /** 递归解压 assets 目录树到 dest（保持目录结构；目录/文件以可 open 判断） */
+    private void extractAssetTree(String assetDir, File dest) throws IOException {
+        String[] children = getAssets().list(assetDir);
+        if (children == null) return;
+        dest.mkdirs();
+        for (String child : children) {
+            String ap = assetDir + "/" + child;
+            boolean isFile;
+            try (InputStream probe = getAssets().open(ap)) {
+                isFile = true;
+            } catch (IOException dirLike) {
+                isFile = false;
+            }
+            if (isFile) {
+                extractAsset(ap, new File(dest, child));
+            } else {
+                extractAssetTree(ap, new File(dest, child));
+            }
+        }
+    }
+
+    /** AITEST8 资产部署（技能包 / 教程 / 关于）：~/.reasonix/ 下（幂等） */
+    private void deployAITest8Assets(File rootfs) {
+        try {
+            File rx = new File(rootfs, "root/.reasonix");
+            File skillsDir = new File(rx, "skills/reverse-flow");
+            if (!skillsDir.exists()) {
+                extractAssetTree("aitest8/reverse_flow_skill", skillsDir);
+                Log.d(TAG, "AITEST8 reverse-flow skill deployed");
+            }
+            File a8 = new File(rx, "aitest8");
+            extractAsset("aitest8/tutorial.html", new File(a8, "tutorial.html"));
+            extractAsset("aitest8/about.md", new File(a8, "about.md"));
+        } catch (Exception e) {
+            Log.w(TAG, "AITEST8 asset deploy failed", e);
+        }
     }
 
     /** 演练台页：未授权 → 声明 + 三项勾选；已授权 → 资产 / 技能 / 环境（只读巡检） */
@@ -7526,6 +8119,8 @@ public class MainActivity extends Activity {
         Log.d(TAG, "break-armor-prompt.md deployed to rootfs");
         // dsh purge 面板资产（about / prompt-inject 模板 / 默认规则）：随 APK 刷新
         deployPurgeAssets(rootfs);
+        // AI 破甲工具箱（AITEST8 融合）：技能包/教程/关于部署（幂等）
+        deployAITest8Assets(rootfs);
         // DS2API 网关（内置上游 AGPL-3.0 服务端，见 assets/ds2api/README-upstream.md）：
         // 覆盖刷新整个 ds2api 目录（删除再解压，保证升级后二进制/WebUI 与 APK 一致）
         File ds2Dir = new File(rootfs, "usr/local/ds2api");
@@ -7706,6 +8301,8 @@ public class MainActivity extends Activity {
         Log.d(TAG, "break-armor-prompt.md deployed (first time)");
         // dsh purge 面板资产（about / prompt-inject 模板 / 默认规则）：首次安装即就位
         deployPurgeAssets(rootfs);
+        // AI 破甲工具箱（AITEST8 融合）：技能包/教程/关于部署（幂等）
+        deployAITest8Assets(rootfs);
 
         // 4.5 DS2API 网关（内置上游 AGPL-3.0 服务端）：解压 ds2api-bundle.tgz 到 /usr/local/ds2api
         //     （bundle 内含 ds2api 二进制 + static WebUI + LICENSE + README.MD）

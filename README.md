@@ -13,7 +13,7 @@
 - **触摸滚动**：reasonix TUI 内滑动 → 模拟 SGR 滚轮事件滚动历史输出；shell 主屏滑动 → 滚动终端 scrollback；侧滑菜单内置滑动调速（档位 1~10，默认 5），档位越低滑动越慢越精细，可随时调整。
 - **纯黑主题（顶边栏仅菜单）**：全局纯黑界面——顶部仅保留「☰ 菜单」入口（其余功能收进侧滑栏/高级设置）；GUI 输入框、新会话、回终端等控件均为黑底白字。
 - **顶边栏（仅菜单）**：顶部快捷栏仅保留「☰ 菜单」一个入口，所有功能经侧滑栏进入（ADB / API Key / GitHub / DS2API / 更新 / 项目 / 会话 / 视图切换 / 高级设置）。
-- **侧边栏精简 + 高级设置二级菜单**：侧滑栏仅保留高频项（ADB / API Key / GitHub / DS2API / 更新 / 项目 / 会话 / 高级设置）；ROOT、开发环境、SKILL、MCP、后台运行（默认开启，见下）、YOLO 免审批、滑动速度、快捷键等收进「高级设置」二级面板（点按对应行进入功能页，返回箭头关闭）。
+- **侧边栏精简 + 高级设置二级菜单**：侧滑栏仅保留高频项（ADB / API Key / GitHub / DS2API / 更新 / 项目 / 会话 / 高级设置 / dsh purge / AI 破甲工具箱）；ROOT、开发环境、SKILL、MCP、后台运行（默认开启，见下）、YOLO 免审批、滑动速度、快捷键等收进「高级设置」二级面板（点按对应行进入功能页，返回箭头关闭）。
 - **双视图切换（终端 / GUI 对话）**：侧滑栏「视图切换」在 xterm.js 终端与原生会话视图间切换。原生视图的数据源**自动适配 reasonix 契约**：优先 transcript 投影（Transcript v2，`GET /transcript/follow` SSE + `/transcript/snapshot`，结构化气泡渲染）；**reasonix 1.38/1.39 无 /transcript 契约（实测回退 Web UI HTML）时自动回退 /events+/history 通道**——`GET /events` SSE 事件帧（runtime_state/turn_status/turn_started/turn_phase/stream_attempt）仅作刷新触发，`GET /history`（`[{role,content}]`）全量渲染气泡（过滤 system 提示词），事件驱动增量重绘；`POST /submit`、`/cancel`、`/new` 开新会话（204，轮换 sessionName，/new 后 /history 仅剩 system → GUI 呈现空白新会话）。**不解析任何终端字节流**：PTY 字节流剥离 ANSI 拼接（整屏重绘混入边框/状态行）与逐 token 拼接（分不出消息/工具）均已删除。气泡按 role 结构化渲染：user 靠右蓝底、assistant 靠左、tool 灰色等宽卡片、notice 系统小字；serve 为**常驻引擎**，切到终端视图或其它 app 都保持在线。
 - **后台保活默认开启 + serve 看门狗自愈（v2.2.9）**：「后台运行」（前台服务保活：环境与 Activity 生命周期解耦，进程不退化成 cached 进程被系统回收）**默认开启**——切到微信/浏览器等其它 app 时 proot 环境与 serve 引擎继续运行，重新打开 app 直接复用（终端 I/O 无缝续接），可在 **高级设置 → 后台运行** 关闭；serve 由宿主侧**看门狗**每 20 秒 `GET /status` 确认在线，掉线（进程被冻结/回收、环境重启）自动重新拉起并接回 transcript 跟随流，连续失败按 15s → 30s → 60s → 120s 退避（serve 自身起不来时不密集重启、不刷诊断卡片），回到前台时额外立即探测一次；Android 13+ 首次自动开启时顺带请求一次通知权限（未授权前台服务照常运行，只是常驻通知不可见）。
 - **破甲环境（Guardian 已禁用）**：内置 reasonix Guardian 高风险审查会 deny 破甲任务，v2.0.5 起在 `~/.reasonix/config.toml` 写入 `guardian_model = ""`（Guardian 因模型缺失自动禁用）。
@@ -33,6 +33,11 @@
     - **清洗 → Skill**：全局 skill 启用状态列表（与「高级设置 → SKILL」面板互通）。
     - **演练台**：读声明 + 勾选三项授权后进入，巡检资产（/sdcard、/host-data、/host/system 挂载）、技能与运行环境（proot/chroot 模式、Alpine 版本、adb/root 桥、ds2api、磁盘），只用于有权管理的本机/离线靶标/已书面授权环境。
     - **资源**：漏洞库（7 份速查：web-injection / web-logic / auth-identity / intranet-post / cloud-mobile / cve-quick，部署 `~/.reasonix/purge/vulndb/`，reasonix 内 `/vulndb` 检索）、规则库（rsxm-default + redteam-operations，目标 AGENTS.md）、Skill 包（redteam：dsh-purge 上游 23 个；av-evasion：免杀对抗 18 章手册；hacker-asm-decompile：全平台反编译，分别部署 `~/.reasonix/skills/` 对应目录自动加载；另内置 Skills4RedTeam 社区技能索引 `~/.reasonix/purge/skills-index.md`）。「安装到环境」离线可用；「GitHub 同步」从 `github.com/qianeric-backup/RSXM` 的 `resources/` 拉取更新（仓库目录与 `assets/purge/` 双写保持）。
+  - **AI 破甲工具箱（AITEST8.0 融合）**：解包 Windows 桌面版 AITEST8.0 v8.1.5（AI-Pojia-Toolbox，PySide6，作者 dengbo-hui）后按其 UI 路由重建的原生面板（侧滑栏「AI 破甲工具箱」→ 全屏面板，赛博绿黑主题 #050908/#36F29A）。四页签：
+    - **仪表盘**：IDE 破甲目标区块（Claude Code / Codex / Gemini CLI / Cursor / Trae / CodeBuddy / Qoder / WorkBuddy 等 10 个，桌面版为 Windows 插件，本侧映射为目标区块）+ 破甲指令编辑（内置默认 / 自定义，存 `~/.reasonix/aitest8/purge-instruction.md`）+ 批量破甲（对接内置破甲环境：config 注入 + 全局技能 + 锚点自愈）+ 操作日志面板。
+    - **装技**：技能卡片勾选安装/卸载（reverse-flow 逆向全谱系技能包 94 文件，含 SKILL.md 启动词「真心为你」→ `~/.reasonix/skills/reverse-flow/` 自动装载；redteam / av-evasion / decompile 与 purge 资源互通）。
+    - **共享池**：社区共享技能池入口（gitee `dengbo-hui/ai-armor-piercing-toolbox` shared_skills + manifest.json，含自动审核流程说明：frontmatter/结构/安全扫描/跨 IDE 兼容/配额/重复检测）。
+    - **激活**：设备码（SHA-256 派生 AT8- 前缀）+ AT8 注册码本地记录（`~/.reasonix/aitest8/license.json`）+ 联系客服 @sifthost / Telegram 群 + 关于说明（assets/aitest8/about.md）。
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。

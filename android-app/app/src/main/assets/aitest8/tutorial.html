@@ -1,0 +1,23 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+body{font-family:"Microsoft YaHei UI",sans-serif;color:#d9ebe3;background:#050908;line-height:1.75;padding:12px 26px;font-size:14px}h1{color:#36f29a;border-bottom:1px solid #24513f;padding-bottom:10px}h2{color:#70e5cd;border-left:4px solid #36f29a;padding-left:10px;margin-top:28px}h3{color:#a5ffd3}code{font-family:Consolas,monospace;background:#07110e;color:#65ffd0;border:1px solid #18372d;border-radius:4px;padding:2px 5px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #24513f;padding:8px;text-align:left}th{background:#0b1713;color:#7fffc1}.tip{background:#0b1713;border-left:4px solid #35c9d0;padding:10px 14px}.warn{background:#19130a;border-left:4px solid #eab464;padding:10px 14px}</style></head><body>
+<h1>AITEST8.0 使用教程</h1><p>本版按“检测 → 选择全局或项目目录 → 安装技能 → 重新加载模型工具 → 在对话中调用”的顺序工作。安装结果会显示目标路径，只有复制成功才记为成功。</p>
+<h2>一、首次使用与订阅</h2><ol><li>首次启动，阅读并勾选同意《使用规则》。</li><li>联网开始一次 3 分钟体验，关闭程序不会暂停计时。</li><li>购买 7 天、30 天或 360 天注册码，将设备码发给客服。</li><li>粘贴注册码，再次确认规则并激活。续费从现有到期时间顺延。</li></ol>
+<h2>二、模型工具教程</h2><table><tr><th>产品</th><th>识别与安装</th><th>安装后使用</th></tr>
+<tr><td>Claude Code</td><td>检测 Claude 配置；技能写入用户或项目技能目录。</td><td>重启会话，让 Claude 读取 <code>SKILL.md</code>，明确要求按 reverse-flow-skill 执行。</td></tr>
+<tr><td>Codex / ChatGPT</td><td>全局写入 <code>~/.codex/skills</code>；项目可写入项目技能目录。</td><td>重开任务或刷新技能列表，直接点名技能。</td></tr>
+<tr><td>CodeBuddy</td><td>检测 CodeBuddy 配置目录并复制技能。</td><td>重新打开工作区，在 Agent 对话中引用技能名。</td></tr>
+<tr><td>Trae / Trae CN</td><td>分别识别国际版与中国版配置，互不混写。</td><td>重载窗口后在 Agent 模式说明要使用已安装技能。</td></tr>
+<tr><td>Claude Haha</td><td>使用该产品自己的用户或项目目录。</td><td>重启应用并在新会话中调用技能。</td></tr>
+<tr><td>Qoder</td><td>检测 Qoder 配置，支持全局和项目安装。</td><td>重新加载项目后从 Agent 会话调用。</td></tr>
+<tr><td>Cursor</td><td>检测 Cursor；项目技能随当前工程保存。</td><td>重载窗口，在 Agent 模式点名技能或引用其文件。</td></tr>
+<tr><td>WorkBuddy</td><td>检测 WorkBuddy 配置并安装到独立目录。</td><td>重新启动对应工作区后调用。</td></tr>
+<tr><td>Gemini CLI</td><td>检测 Gemini 用户目录；项目安装随仓库保存。</td><td>在项目中新建会话，要求读取技能说明。</td></tr>
+<tr><td>GitHub Copilot</td><td>安装到 Copilot 支持的项目技能位置。</td><td>重载 VS Code，再从 Copilot Chat 调用。</td></tr>
+<tr><td>Kiro</td><td>检测 Kiro 配置与项目目录。</td><td>重新打开工作区，在 Agent 会话使用。</td></tr>
+<tr><td>通用 Agent Skills</td><td>对支持开放 Agent Skills 目录结构的新工具使用通用适配器。</td><td>安装后查看工具文档要求的刷新方法，再点名技能。</td></tr></table>
+<div class="tip"><b>未探测到的未来产品：</b>先使用“通用 Agent Skills”选择项目目录。若产品不读取标准 <code>SKILL.md</code>，使用“Agent / Skill 模板库”复制内容到该产品的自定义规则或 Agent 提示区域。界面不会把未验证的产品显示为已兼容。</div>
+<h2>三、技能管理</h2><p>“安装内置逆向技能”安装完整技能；“管理技能 / 加载新技能”可导入本地技能目录。逆向技能中的脚本、参考资料和 <code>SKILL.md</code>会作为一个整体复制。</p><div class="warn">在线共享技能池尚未迁移到 AITEST8.0 服务。当前可靠功能是内置技能、本地导入、安装和卸载。</div>
+<h2>四、我的消息</h2><p>菜单“我的消息”从授权站点读取作者发布的签名消息。内容经过签名验证，网络异常时会明确显示读取失败。</p>
+<h2>五、在线更新</h2><p>菜单“在线更新”读取签名发布清单。发现新版后可下载 ZIP，程序会核验 SHA-256。把新包上传到授权站点的下载目录，并更新签名发布清单后，客户端才能看到新版；只把文件丢在本机目录不会自动同步。下载完成后关闭旧版、解压新版并运行。</p>
+<h2>六、需要帮助</h2><p>如果模型工具未显示、技能没有生效、激活失败或在线功能无法使用，请点击“订阅与续费”中的客服入口联系技术支持，并说明所用模型工具和界面提示。</p>
+</body></html>

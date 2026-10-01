@@ -1,0 +1,8 @@
+# reverse-flow skill — Python dependencies
+# Core scripts use stdlib only. The two packages below unlock:
+#   - ROP gadget disassembly (rop_finder.py)
+#   - Shellcode disassembly + emulation (shellcode_tools.py)
+# All other scripts work without any external packages.
+
+capstone>=5.0      # disassembly (rop_finder.py, shellcode_tools.py)
+unicorn>=2.0       # CPU emulation (shellcode_tools.py emulate)

@@ -1,0 +1,9 @@
+{
+  "sample": "tmp829885ck.bin",
+  "size": 23,
+  "scan_time": "2026-07-09T12:58:26.557490+00:00",
+  "constants_found": 0,
+  "findings": [],
+  "crypto_api_imports": [],
+  "high_entropy_regions": 0
+}

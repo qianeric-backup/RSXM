@@ -1,0 +1,82 @@
+{
+  "analysis_time": "2026-07-09T12:58:26.241547+00:00",
+  "sample": {
+    "name": "tmp8syll89q.bin",
+    "path": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\tmp8syll89q.bin",
+    "size": 23,
+    "size_human": "23.0 B",
+    "hashes": {
+      "md5": "1f9e4524c938ee488cca3e1542104e3e",
+      "sha1": "6e644cf516ad30efcc8746bf71ce0aff1107bb29",
+      "sha256": "a06dab0d510be621c1cbbd5422cb855d45f9c8d225fd1f9fb420b27d16a15d1c"
+    }
+  },
+  "identification": {
+    "extension": ".bin",
+    "magic_hex": "4e4f545f415f5641",
+    "type": "unknown"
+  },
+  "entropy": 3.447,
+  "entropy_segments": {},
+  "strings": {
+    "count": 1,
+    "ascii_count": 1,
+    "top_20": [
+      "NOT_A_VALID_BINARY_XXXX"
+    ]
+  },
+  "crypto_indicators": [],
+  "packer_detection": {
+    "packed": false,
+    "indicators": [],
+    "confidence": "low"
+  },
+  "anti_analysis_strings": [],
+  "suspicious_api_calls": {},
+  "risk_indicators": [],
+  "deep_analysis": {},
+  "triage": {
+    "triage_indicators": {},
+    "recommended_profiles": [
+      "firmware"
+    ],
+    "recommended_tools": [
+      "binwalk",
+      "unblob",
+      "ghidra",
+      "qiling/unicorn",
+      "yara"
+    ],
+    "recommended_next_steps": [
+      "Attempt filesystem/container extraction on a copy",
+      "Identify CPU/OS/service startup scripts"
+    ]
+  },
+  "crypto_scan": {
+    "constants": [],
+    "imports": [],
+    "high_entropy_regions": []
+  },
+  "risk_hint": {
+    "rating": "unknown/low",
+    "rating_raw": "Unknown/Low",
+    "reasons": [
+      "limited evidence from offline triage"
+    ]
+  },
+  "yara_rule_meta": {
+    "generator": "yara_gen",
+    "strings_selected": 1,
+    "byte_patterns": 0
+  },
+  "ghidra_status": {
+    "installed": false,
+    "root": null,
+    "analyzeHeadless": null,
+    "java": false,
+    "error": "GHIDRA_HOME not set and no installation found in common paths"
+  },
+  "rop_gadgets": {},
+  "obfuscation_findings": [],
+  "debugger_scripts": {}
+}

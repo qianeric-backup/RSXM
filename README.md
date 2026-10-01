@@ -39,6 +39,7 @@
     - **共享池**：社区共享技能池入口（gitee `dengbo-hui/ai-armor-piercing-toolbox` shared_skills + manifest.json，含自动审核流程说明：frontmatter/结构/安全扫描/跨 IDE 兼容/配额/重复检测）。
     - **激活**：设备码（SHA-256 派生 AT8- 前缀）+ AT8 注册码本地记录（`~/.reasonix/aitest8/license.json`）+ 联系客服 @sifthost / Telegram 群 + 关于说明（assets/aitest8/about.md）。
     - **便利性联动**：dsh purge 清洗页「破甲 system_prompt」补丁行新增「破甲中心」快捷跳转按钮，两面板互相可达。
+    - **操作性优化（v2.3.8）**：破甲指令编辑草稿在页面重建时自动保留（部署/还原/应用后不丢输入）；IDE 目标列表展开/收起状态记忆；所有操作按钮执行中禁用 + 文案切换（防重复点击）；新增「重启环境生效」一键按钮（部署/还原/应用后无需去 ADB 面板，直接重启使注入生效）；操作日志区上移至主操作下方，反馈立即可见；purge 面板跳转统一走 hidePanel（引用清理完整）。
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。

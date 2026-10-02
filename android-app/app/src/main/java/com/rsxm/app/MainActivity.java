@@ -3783,13 +3783,16 @@ public class MainActivity extends Activity {
         status.setTypeface(null, android.graphics.Typeface.BOLD);
         box.addView(status);
         refreshAITest8AuthStatus(status);
-        box.addView(aitest8Section("软件激活"));
-        box.addView(aitest8Tip("桌面版为订阅制（7/30/360 天，首次激活起算；支持 3 分钟体验）。"
-                + "本融合版保留激活 UI 与本地注册记录：设备码 + 作者签发的 AT8 注册码。"));
-        // 设备码
+        box.addView(aitest8Section("软件激活 · 永久授权"));
+        box.addView(aitest8Tip("桌面版校验链：设备 Ed25519 密钥对 + 服务端短租约（POST /v1/access，"
+                + "LEASE_PUBLIC_KEY 验签） + AT8 注册码在线兑换（PUBLIC_KEY 验签） + 风险停用闸。"
+                + "zip 破解版已在 subscription.py 末尾追加 local patch：同名函数覆盖 status/activate/"
+                + "refresh/check_token，恒返回 authorized / mode=lifetime（本机授权：永久）。"
+                + "本融合版注入等效永久授权，无需注册码、无需联网、无到期/吊销。"));
+        // 设备码（展示 + 复制）
         final String deviceCode = aitest8DeviceCode();
         TextView devLabel = new TextView(this);
-        devLabel.setText("本机设备码（发给作者换取注册码）");
+        devLabel.setText("本机设备码");
         devLabel.setTextColor(0xFFE6EDF3);
         devLabel.setTextSize(12);
         box.addView(devLabel);
@@ -3813,45 +3816,65 @@ public class MainActivity extends Activity {
         cml.leftMargin = dp(4);
         devRow.addView(copy, cml);
         box.addView(devRow);
-        // 注册码
+        // 注册码（已破解：可选展示，不再要求）
         TextView codeLabel = new TextView(this);
-        codeLabel.setText("注册码");
-        codeLabel.setTextColor(0xFFE6EDF3);
+        codeLabel.setText("注册码（已破解，无需填写）");
+        codeLabel.setTextColor(0xFF6E7681);
         codeLabel.setTextSize(12);
         box.addView(codeLabel);
         final EditText code = new EditText(this);
         code.setSingleLine(false);
-        code.setMinLines(3);
+        code.setMinLines(2);
         code.setTextSize(12);
         code.setTextColor(0xFFE6EDF3);
         code.setBackgroundColor(0xFF07110E);
-        code.setHint("粘贴作者提供的 AT8 注册码");
+        code.setHint("可选：粘贴桌面版 AT8 注册码留档（不影响授权）");
         box.addView(code);
-        Button act = aitest8Button("激活 / 续费", true);
-        act.setOnClickListener(v -> {
+        // 授权操作：注入永久授权 / 还原
+        LinearLayout actRow = new LinearLayout(this);
+        actRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button inject = aitest8Button("注入永久授权", true);
+        Button reset = aitest8Button("还原为未授权", false);
+        actRow.addView(inject, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams rtl = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        rtl.leftMargin = dp(4);
+        actRow.addView(reset, rtl);
+        box.addView(actRow);
+        inject.setOnClickListener(v -> {
             String c = code.getText().toString().trim();
-            if (c.isEmpty()) {
-                showToast("请先粘贴注册码");
-                return;
-            }
             try {
                 File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "license.json");
                 f.getParentFile().mkdirs();
                 org.json.JSONObject o = new org.json.JSONObject();
                 o.put("device", deviceCode);
                 o.put("code", c);
+                o.put("patched", true);
+                o.put("mode", "lifetime");
+                o.put("authorized", true);
                 o.put("activated_at", System.currentTimeMillis() / 1000);
                 try (java.io.FileOutputStream fo = new java.io.FileOutputStream(f)) {
                     fo.write(o.toString(2).getBytes(StandardCharsets.UTF_8));
                 }
-                aitest8Log("注册码已保存（本地记录）；桌面版激活需作者服务器校验");
-                showToast("注册码已保存");
+                aitest8Log("✓ 已注入永久授权（mode=lifetime，local patch 等效）");
+                showToast("本机授权：永久");
                 refreshAITest8AuthStatus(status);
             } catch (Exception e) {
-                showToast("保存失败: " + e.getMessage());
+                showToast("注入失败: " + e.getMessage());
             }
         });
-        box.addView(act);
+        reset.setOnClickListener(v -> {
+            try {
+                File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "license.json");
+                if (f.exists() && !f.delete()) {
+                    showToast("删除失败");
+                    return;
+                }
+                aitest8Log("已还原为未授权状态");
+                refreshAITest8AuthStatus(status);
+            } catch (Exception e) {
+                showToast("还原失败: " + e.getMessage());
+            }
+        });
         // 客服/群
         LinearLayout contact = new LinearLayout(this);
         contact.setOrientation(LinearLayout.HORIZONTAL);
@@ -3874,8 +3897,8 @@ public class MainActivity extends Activity {
         gl.leftMargin = dp(4);
         contact.addView(group, gl);
         box.addView(contact);
-        // 关于
-        Button about = aitest8Button("关于 · 使用说明", false);
+        // 关于（含授权破解机制说明）
+        Button about = aitest8Button("关于 · 破解说明", false);
         about.setOnClickListener(v -> {
             StringBuilder sb = new StringBuilder();
             try (java.io.InputStream in = getAssets().open("aitest8/about.md")) {
@@ -3884,8 +3907,8 @@ public class MainActivity extends Activity {
                 while ((n = in.read(buf)) > 0) sb.append(new String(buf, 0, n, StandardCharsets.UTF_8));
             } catch (Exception ignored) {}
             new android.app.AlertDialog.Builder(this)
-                    .setTitle("关于 — AI 破甲工具箱")
-                    .setMessage(sb.length() == 0 ? "AITEST8.0 · AI 破甲工具箱（RSXM 融合版）" : sb.toString())
+                    .setTitle("关于 — AI 破甲工具箱（破解授权）")
+                    .setMessage(sb.length() == 0 ? "AITEST8.0 · AI 破甲工具箱（RSXM 融合版 · 永久授权）" : sb.toString())
                     .setPositiveButton("关闭", null)
                     .show();
         });
@@ -3908,22 +3931,27 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 刷新授权状态行（guest ~/.reasonix/aitest8/license.json） */
+    /** 刷新授权状态行（guest ~/.reasonix/aitest8/license.json；patched=true → 永久授权） */
     private void refreshAITest8AuthStatus(final TextView status) {
         new Thread(() -> {
-            String txt = "本机未授权 · 请前往「激活」页完成注册";
+            String txt = "本机未授权 · 点击「注入永久授权」完成破解";
             int color = 0xFFF85149;
             try {
                 File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "license.json");
                 if (f.exists()) {
                     String s = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
                     org.json.JSONObject o = new org.json.JSONObject(s);
+                    boolean patched = o.optBoolean("patched", false);
+                    String mode = o.optString("mode", "");
                     long at = o.optLong("activated_at", 0);
-                    String code = o.optString("code", "");
-                    txt = (code.isEmpty() ? "本机未授权" : "本机已授权（注册码已记录）")
-                            + (at > 0 ? " · 记录时间 " + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",
-                            java.util.Locale.ROOT).format(new java.util.Date(at * 1000)) : "");
-                    color = code.isEmpty() ? 0xFFF85149 : 0xFF3FB950;
+                    if (patched) {
+                        txt = "本机授权：永久 · lifetime（local patch 等效，无到期/吊销）"
+                                + (at > 0 ? " · 注入时间 " + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",
+                                java.util.Locale.ROOT).format(new java.util.Date(at * 1000)) : "");
+                        color = 0xFF3FB950;
+                    } else {
+                        txt = "本机未授权（patched 缺失）";
+                    }
                 }
             } catch (Exception ignored) {}
             final String t = txt;

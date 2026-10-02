@@ -3756,8 +3756,91 @@ public class MainActivity extends Activity {
         box.addView(aitest8Tip("取之于社区，用之于社区：浏览/下载共享技能（桌面版经 gitee 仓库 "
                 + "dengbo-hui/ai-armor-piercing-toolbox 的 shared_skills/ 与 manifest.json 同步，"
                 + "含自动审核：frontmatter/结构/安全扫描/跨 IDE 兼容/配额/重复检测）。\n"
-                + "桌面版插件为 Windows 专属，共享池同步在此侧保留入口：配置 GITEE_TOKEN "
-                + "（git config --global credential.helper 或环境变量）后即可拉取共享技能清单。"));
+                + "桌面版插件为 Windows 专属，共享池同步在此侧保留入口。配置 GITEE Token 后可"
+                + "访问私有/完整共享技能清单（token 保存在环境 ~/.reasonix/aitest8/gitee-token，"
+                + "同时写入 ~/.git-credentials 供 git 操作使用）。"));
+        // ── GITEE Token 配置 ──
+        box.addView(aitest8Section("GITEE Token 配置"));
+        final TextView tokenState = new TextView(this);
+        tokenState.setTextSize(12);
+        box.addView(tokenState);
+        refreshAITest8GiteeTokenState(tokenState);
+        final EditText tokenInput = new EditText(this);
+        tokenInput.setSingleLine(true);
+        tokenInput.setTextSize(12);
+        tokenInput.setTextColor(0xFFE6EDF3);
+        tokenInput.setHintTextColor(0xFF6E7681);
+        tokenInput.setBackgroundColor(0xFF07110E);
+        tokenInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        tokenInput.setHint("粘贴 Gitee 私人令牌（访问令牌，可选：仅访问私有共享池需要）");
+        box.addView(tokenInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
+        LinearLayout tokRow = new LinearLayout(this);
+        tokRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button tokSave = aitest8Button("保存到环境", true);
+        Button tokTest = aitest8Button("测试连接", false);
+        Button tokClear = aitest8Button("清除 token", false);
+        tokRow.addView(tokSave, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams tl1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        tl1.leftMargin = dp(4);
+        tokRow.addView(tokTest, tl1);
+        LinearLayout.LayoutParams tl2 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        tl2.leftMargin = dp(4);
+        tokRow.addView(tokClear, tl2);
+        box.addView(tokRow);
+        tokSave.setOnClickListener(v -> {
+            String tok = tokenInput.getText().toString().trim();
+            if (tok.isEmpty()) {
+                showToast("请先粘贴 Gitee Token");
+                return;
+            }
+            new Thread(() -> {
+                String err = aitest8GiteeTokenWrite(tok);
+                runOnUiThread(() -> {
+                    if (err != null) {
+                        showToast("保存失败: " + err);
+                    } else {
+                        tokenInput.setText("");
+                        aitest8Log("✓ GITEE Token 已保存到环境（~/.reasonix/aitest8/gitee-token + ~/.git-credentials）");
+                        showToast("GITEE Token 已保存");
+                    }
+                    refreshAITest8GiteeTokenState(tokenState);
+                });
+            }, "aitest8-token-save").start();
+        });
+        tokTest.setOnClickListener(v -> {
+            final String tok = tokenInput.getText().toString().trim();
+            new Thread(() -> {
+                String use = tok.isEmpty() ? aitest8GiteeTokenRead() : tok;
+                if (use.isEmpty()) {
+                    runOnUiThread(() -> showToast("未配置 Token，请先保存或粘贴"));
+                    return;
+                }
+                String r = executeInGuest("curl -sS -m 12 "
+                        + "'https://gitee.com/api/v5/user?access_token=" + use + "' | head -c 600", 16);
+                String msg;
+                if (r == null || r.trim().isEmpty() || r.contains("error")) {
+                    msg = "连接失败：Token 无效或网络不可达" + (r == null ? "" : "（" + r.substring(0, Math.min(r.length(), 160)) + "）");
+                } else {
+                    String login = r.replaceAll("(?s).*\"login\"\\s*:\\s*\"([^\"]*)\".*", "$1");
+                    msg = "连接成功：gitee 用户 " + (login.equals(r) ? "（请展开查看返回）" : login) + "\n" + r.substring(0, Math.min(r.length(), 300));
+                }
+                runOnUiThread(() -> {
+                    aitest8Log(msg.startsWith("连接成功") ? "✓ " + msg.split("\n")[0] : "✗ " + msg.split("\n")[0]);
+                    showToast(msg.startsWith("连接成功") ? "Token 有效" : "Token 无效");
+                });
+            }, "aitest8-token-test").start();
+        });
+        tokClear.setOnClickListener(v -> {
+            new Thread(() -> {
+                aitest8GiteeTokenClear();
+                runOnUiThread(() -> {
+                    aitest8Log("GITEE Token 已清除");
+                    refreshAITest8GiteeTokenState(tokenState);
+                });
+            }, "aitest8-token-clear").start();
+        });
+        // ── 列表操作 ──
         final TextView out = new TextView(this);
         out.setTextColor(0xFF7FFFC1);
         out.setTextSize(11);
@@ -3772,12 +3855,15 @@ public class MainActivity extends Activity {
         check.setOnClickListener(v -> {
             out.setText("正在读取 gitee 共享池清单…");
             new Thread(() -> {
-                String r = executeInGuest("curl -sS -m 12 "
-                        + "'https://gitee.com/api/v5/repos/dengbo-hui/ai-armor-piercing-toolbox/contents/shared_skills'"
+                final String tok = aitest8GiteeTokenRead();
+                String auth = tok.isEmpty() ? "" : " -H \"Authorization: token " + tok + "\"";
+                String r = executeInGuest("curl -sS -m 12 " + auth
+                        + " 'https://gitee.com/api/v5/repos/dengbo-hui/ai-armor-piercing-toolbox/contents/shared_skills'"
                         + " | head -c 1200", 16);
                 String msg = (r == null || r.trim().isEmpty() || r.contains("404"))
-                        ? "共享池不可读（网络受限或仓库路径变更）：" + (r == null ? "无输出" : r.substring(0, Math.min(r.length(), 200)))
-                        : "gitee API 返回：\n" + (r.length() > 800 ? r.substring(0, 800) + "…" : r);
+                        ? "共享池不可读（网络受限/仓库路径变更/Token 无权限）：" + (r == null ? "无输出" : r.substring(0, Math.min(r.length(), 200)))
+                        : "gitee API 返回" + (tok.isEmpty() ? "（匿名）" : "（Token 已携带）") + "：\n"
+                                + (r.length() > 800 ? r.substring(0, 800) + "…" : r);
                 runOnUiThread(() -> out.setText(msg));
             }, "aitest8-pool").start();
         });
@@ -3791,6 +3877,86 @@ public class MainActivity extends Activity {
         sl.leftMargin = dp(4);
         row.addView(share, sl);
         box.addView(row);
+    }
+
+    /** gitee token 存储文件（guest ~/.reasonix/aitest8/gitee-token） */
+    private File aitest8GiteeTokenFile() {
+        return new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "gitee-token");
+    }
+
+    /** 读取已保存的 gitee token（空 = 未配置） */
+    private String aitest8GiteeTokenRead() {
+        try {
+            File f = aitest8GiteeTokenFile();
+            if (f.exists()) {
+                String s = new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                        StandardCharsets.UTF_8).trim();
+                if (!s.isEmpty()) return s;
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
+    /** 写入 gitee token：token 文件 + ~/.git-credentials + gitconfig helper（对齐桌面版 gitee_token 语义） */
+    private String aitest8GiteeTokenWrite(String token) {
+        try {
+            File f = aitest8GiteeTokenFile();
+            f.getParentFile().mkdirs();
+            java.nio.file.Files.write(f.toPath(), token.getBytes(StandardCharsets.UTF_8));
+            // git 兼容：~/.git-credentials 记录 gitee 行 + ~/.gitconfig 启用 store helper
+            File cred = new File(new File(getFilesDir(), "rootfs/root"), ".git-credentials");
+            cred.getParentFile().mkdirs();
+            String existing = cred.exists()
+                    ? new String(java.nio.file.Files.readAllBytes(cred.toPath()), StandardCharsets.UTF_8) : "";
+            existing = existing.replaceAll("(?m)^https://[^@]*@gitee[.]com.*$\n?", "");
+            existing += "https://oauth2:" + token + "@gitee.com\n";
+            java.nio.file.Files.write(cred.toPath(), existing.getBytes(StandardCharsets.UTF_8));
+            File gc = new File(new File(getFilesDir(), "rootfs/root"), ".gitconfig");
+            String gcc = gc.exists()
+                    ? new String(java.nio.file.Files.readAllBytes(gc.toPath()), StandardCharsets.UTF_8) : "";
+            if (!gcc.contains("helper = store")) {
+                gcc += "\n[credential]\n\thelper = store\n";
+                java.nio.file.Files.write(gc.toPath(), gcc.getBytes(StandardCharsets.UTF_8));
+            }
+            return null;
+        } catch (Exception e) {
+            return e.getMessage();
+        }
+    }
+
+    /** 清除 gitee token（文件 + git-credentials 行） */
+    private void aitest8GiteeTokenClear() {
+        File f = aitest8GiteeTokenFile();
+        if (f.exists()) f.delete();
+        try {
+            File cred = new File(new File(getFilesDir(), "rootfs/root"), ".git-credentials");
+            if (cred.exists()) {
+                String existing = new String(java.nio.file.Files.readAllBytes(cred.toPath()), StandardCharsets.UTF_8);
+                existing = existing.replaceAll("(?m)^https://[^@]*@gitee[.]com.*$\n?", "");
+                java.nio.file.Files.write(cred.toPath(), existing.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /** 刷新 token 状态行（脱敏显示） */
+    private void refreshAITest8GiteeTokenState(final TextView tv) {
+        new Thread(() -> {
+            final String tok = aitest8GiteeTokenRead();
+            final String txt;
+            final int color;
+            if (tok.isEmpty()) {
+                txt = "○ 未配置（匿名访问公开共享池）";
+                color = 0xFF8B949E;
+            } else {
+                String masked = tok.length() <= 8 ? "***" : tok.substring(0, 4) + "…" + tok.substring(tok.length() - 4);
+                txt = "● 已配置（" + masked + "）· 刷新列表将携带 Token";
+                color = 0xFF3FB950;
+            }
+            runOnUiThread(() -> {
+                tv.setText(txt);
+                tv.setTextColor(color);
+            });
+        }, "aitest8-token-state").start();
     }
 
     /** 激活页：设备码 + 注册码（作者签发）+ 关于/客服 */

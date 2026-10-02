@@ -2554,6 +2554,8 @@ public class MainActivity extends Activity {
     private String aitest8InstDraft = "";
     /** IDE 目标列表展开态（页面重建时保留） */
     private boolean aitest8IdeExpanded = false;
+    /** 操作日志文本（页面重建时保留，避免操作结果丢失） */
+    private String aitest8LogText = "";
 
     /** config.toml 宿主侧路径（rootfs/root/.reasonix/config.toml） */
     private File purgeConfFile() {
@@ -2796,8 +2798,9 @@ public class MainActivity extends Activity {
     private boolean purgePatchApplied(int id) {
         if (id == PATCH_AGENTS) return purgeAgentsFile().exists();
         if (id == PATCH_ARMOR) {
-            String c = purgeConfRead();
-            return c.contains(PATCH_MARKERS[PATCH_ARMOR]) && c.contains(ARMOR_ANCHOR);
+            // 只查标记：自定义破甲指令（不含锚点）也视为已注入；
+            // 锚点仅用于 ensureSandboxDisabled 的旧版迁移判断，不作为状态依据。
+            return purgeConfRead().contains(PATCH_MARKERS[PATCH_ARMOR]);
         }
         return purgeConfRead().contains(PATCH_MARKERS[id]);
     }
@@ -3376,14 +3379,17 @@ public class MainActivity extends Activity {
         return tv;
     }
 
-    /** 追加一行到面板日志（主线程安全） */
+    /** 追加一行到面板日志（主线程安全；文本持久化，重建页面后仍可见） */
     private void aitest8Log(String line) {
-        if (aitest8LogView == null) return;
+        String ts = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT)
+                .format(new java.util.Date());
+        final String entry = "[" + ts + "] " + line;
         runOnUiThread(() -> {
-            String t = aitest8LogView.getText().toString();
-            String ts = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT)
-                    .format(new java.util.Date());
-            aitest8LogView.setText("[" + ts + "] " + line + "\n" + t);
+            aitest8LogText = entry + "\n" + aitest8LogText;
+            if (aitest8LogText.length() > 6000) {
+                aitest8LogText = aitest8LogText.substring(0, 6000);
+            }
+            if (aitest8LogView != null) aitest8LogView.setText(aitest8LogText);
         });
     }
 
@@ -3400,7 +3406,7 @@ public class MainActivity extends Activity {
         box.addView(kernel);
         new Thread(() -> {
             final boolean on = purgePatchApplied(PATCH_ARMOR);
-            final String tip = on ? "已注入 [agent] system_prompt（锚点自愈激活）" : "未注入";
+            final String tip = on ? "已注入 [agent] system_prompt（标记 RSXM_ARMOR_V2）" : "未注入";
             runOnUiThread(() -> {
                 kernel.setText("● " + tip);
                 kernel.setTextColor(on ? 0xFF3FB950 : 0xFFF85149);
@@ -3450,7 +3456,7 @@ public class MainActivity extends Activity {
         });
         restartBtn.setOnClickListener(v -> {
             aitest8Busy(restartBtn, true, "重启中…");
-            aitest8Log("正在重启 reasonix 环境…");
+            aitest8Log("正在重启 reasonix 环境（约 10-30 秒完成）…");
             restartEnvironment();
             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
                     () -> aitest8Busy(restartBtn, false, "重启环境生效"), 1500);
@@ -3465,6 +3471,7 @@ public class MainActivity extends Activity {
         aitest8LogView.setPadding(dp(10), dp(8), dp(10), dp(8));
         aitest8LogView.setMinHeight(dp(72));
         aitest8LogView.setMaxLines(8);
+        if (!aitest8LogText.isEmpty()) aitest8LogView.setText(aitest8LogText);
         box.addView(aitest8LogView);
         aitest8Log("破甲中心就绪 · 三处破甲 UI 已融合");
         // ── 破甲指令（草稿保留：重建不丢输入）──
@@ -3553,6 +3560,10 @@ public class MainActivity extends Activity {
                     row.setGravity(android.view.Gravity.CENTER_VERTICAL);
                     row.setPadding(dp(10), dp(6), dp(10), dp(6));
                     row.setBackgroundColor(0xFF0B1713);
+                    LinearLayout.LayoutParams irlp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    irlp.topMargin = dp(3);
+                    row.setLayoutParams(irlp);
                     TextView name = new TextView(this);
                     name.setText(ide[1]);
                     name.setTextColor(0xFFE6EDF3);
@@ -3616,9 +3627,16 @@ public class MainActivity extends Activity {
         box.addView(assetBtn);
     }
 
-    /** 破甲中心重建（保留草稿与展开态；回到页面顶部） */
+    /** 破甲中心重建（保留草稿/展开态/日志；回到页面顶部） */
     private void rebuildAITest8Dash(LinearLayout box) {
         buildAITest8Dash(box);
+        // 回到页面顶部（滚动容器在 activity_main.xml 中包裹 panel_content）
+        try {
+            android.view.ViewParent parent = findViewById(R.id.panel_content).getParent();
+            if (parent instanceof android.widget.ScrollView) {
+                ((android.widget.ScrollView) parent).smoothScrollTo(0, 0);
+            }
+        } catch (Exception ignored) {}
     }
 
     /** 操作按钮执行态：禁用 + 文案切换（执行中防重复点击） */
@@ -8175,8 +8193,14 @@ public class MainActivity extends Activity {
             // system_prompt 块，然后把完整破甲提示词写入 [agent] 段（存在则段头下插行；不存在则追加新表）。
             // 触发条件：标记缺失 **或** 旧 v1 顶层块仍在（标记已写入但迁移未完成的旧状态）
             // **或** 内容锚点缺失（v0.3.0 浅版残留 / reasonix 更新重写 config 破坏内容 → 自愈重注入）。
+            // 触发重注入：标记缺失 / 旧代残留（v0.5.0、v0.3.0-gen4）/ v1 顶层块
+            // （rsxm-break-armor-v0.4.0-hardened）仍残留但内容无锚点（v1 浅版未迁移）。
+            // 注意：不能仅凭锚点缺失就覆盖——用户「保存并应用」自定义破甲指令后
+            // [agent] 注入已存在（RSXM_ARMOR_V2）且无 v1 顶层块，此时无锚点属于自定义
+            // 内容，尊重用户配置，不得被内置版覆盖。
             if (!content.contains("RSXM_ARMOR_V2") || content.contains("# rsxm-break-armor-v0.5.0")
-                    || content.contains("# rsxm-break-armor-v0.3.0-gen4") || !content.contains(ARMOR_ANCHOR)) {
+                    || content.contains("# rsxm-break-armor-v0.3.0-gen4")
+                    || (content.contains(BREAK_ARMOR_MARKER) && !content.contains(ARMOR_ANCHOR))) {
                 String prompt = readBreakArmorPrompt();
                 if (!prompt.isEmpty()) {
                     // 1) 移除旧顶层破甲块（v1 注入：marker 行 + system_prompt 块；含各代标记）

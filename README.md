@@ -39,6 +39,7 @@
     - **共享池**：社区共享技能池入口（gitee `dengbo-hui/ai-armor-piercing-toolbox` shared_skills + manifest.json，含自动审核流程说明：frontmatter/结构/安全扫描/跨 IDE 兼容/配额/重复检测）。
     - **激活（已破解授权）**：分析桌面版校验链（设备 Ed25519 密钥对 → LICENSE_API_URL 在线短租约 LEASE_PUBLIC_KEY 验签 → AT8 注册码 PUBLIC_KEY 验签在线兑换 → RiskState 远程停用闸）后，按 zip 破解版内置的 subscription.py local patch 语义注入等效永久授权：激活页「注入永久授权」写 `~/.reasonix/aitest8/license.json`（`patched:true, mode:"lifetime"`）→ 状态行显示「本机授权：永久」绿标，无到期/吊销/联网；注册码区仅作可选留档；「还原为未授权」可恢复；设备码（SHA-256 派生 AT8- 前缀）+ 联系客服 @sifthost / Telegram 群 + 破解机制说明（assets/aitest8/about.md）。
     - **便利性联动**：dsh purge 清洗页「破甲 system_prompt」补丁行新增「破甲中心」快捷跳转按钮，两面板互相可达。
+    - **功能检查修复（v2.3.10）**：① 锚点自愈误覆盖修复——用户「保存并应用」自定义破甲指令后，启动链不再因内容缺锚点强制重注入内置版（尊重自定义；仅旧代 v1 顶层块残留时迁移）；② 状态判定修复——破甲内核状态行改为以 RSXM_ARMOR_V2 标记为准（自定义指令无锚点也正确显示已注入，不再误报）；③ 操作日志持久化——部署/还原/应用后页面重建不再清空日志（字段缓存 + 重建恢复）；④ 重建后自动回顶（smoothScrollTo(0,0)）；⑤ 重启环境按钮补日志反馈；⑥ IDE 目标行间距优化。
     - **操作性优化（v2.3.8）**：破甲指令编辑草稿在页面重建时自动保留（部署/还原/应用后不丢输入）；IDE 目标列表展开/收起状态记忆；所有操作按钮执行中禁用 + 文案切换（防重复点击）；新增「重启环境生效」一键按钮（部署/还原/应用后无需去 ADB 面板，直接重启使注入生效）；操作日志区上移至主操作下方，反馈立即可见；purge 面板跳转统一走 hidePanel（引用清理完整）。
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。

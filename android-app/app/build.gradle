@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.3.9 — 破解 AITEST8.0 激活授权（永久授权注入））
-        versionCode 81
-        versionName "2.3.9"
+        // 版本随 GitHub Release 同步更新（当前 v2.3.10 — 破甲中心功能检查修复）
+        versionCode 82
+        versionName "2.3.10"
     }
 
     buildTypes {

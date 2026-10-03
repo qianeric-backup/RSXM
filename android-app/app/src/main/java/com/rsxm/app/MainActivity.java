@@ -413,7 +413,7 @@ public class MainActivity extends Activity {
                 "运行模式：" + (chrootNow ? "chroot（root 直入）" : "proot（默认）") + "\n"
                         + "chroot 使用 root 直接 chroot 进环境（需 root 授权），SELinux 保持 enforcing 时\n"
                         + "JVM/安卓开发环境亦正常（proot 模式 enforcing 下不可用）；切换会重启 reasonix 环境。");
-        modeTip.setTextColor(chrootNow ? 0xFF7FDB8A : 0xFFAAAAAA);
+        modeTip.setTextColor(chrootNow ? 0xFFFFFFFF : 0xFFAAAAAA);
         modeTip.setPadding(0, dp(2), 0, dp(4));
         addV(panel, modeTip, 6);
         Button modeBtn = createDarkButton(chrootNow ? "切换回 proot 模式" : "切换为 chroot 模式（实验）");
@@ -444,7 +444,7 @@ public class MainActivity extends Activity {
             }
             runOnUiThread(() -> {
                 status.setText(st);
-                status.setTextColor(st.contains("已授权") ? 0xFF7FDB8A : (st.contains("未检测") ? 0xFF888888 : 0xFFFFD54F));
+                status.setTextColor(st.contains("已授权") ? 0xFFFFFFFF : (st.contains("未检测") ? 0xFF888888 : 0xFFCCCCCC));
                 // chroot 按钮：root 可用才恢复（chroot 需 su 授权）
                 if (st.contains("已授权")) {
                     modeBtn.setEnabled(true);
@@ -452,7 +452,7 @@ public class MainActivity extends Activity {
                     modeBtn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF262626));
                 } else {
                     modeTip.setText(modeTip.getText() + "\n⚠ chroot 需要 root 授权，当前未检测到可用 root，切换按钮不可用。");
-                    modeTip.setTextColor(0xFFFF6B6B);
+                    modeTip.setTextColor(0xFFFFFFFF);
                 }
             });
         }, "root-check").start();
@@ -461,7 +461,7 @@ public class MainActivity extends Activity {
             new Thread(() -> {
                 String r = execRootCommand("id", 8);
                 runOnUiThread(() -> {
-                    result.setTextColor(r != null && r.contains("uid=0") ? 0xFF7FDB8A : 0xFFFF6E6E);
+                    result.setTextColor(r != null && r.contains("uid=0") ? 0xFFFFFFFF : 0xFFE0E0E0);
                     result.setText(r == null ? "(无输出或超时——请检查授权)" : r.trim());
                 });
             }, "root-test").start();
@@ -683,7 +683,7 @@ public class MainActivity extends Activity {
         if (tv != null) {
             boolean on = bgModeOn();
             tv.setText(on ? "后台运行：开" : "后台运行：关");
-            tv.setTextColor(on ? 0xFF4CAF50 : 0xFFFFFFFF);
+            tv.setTextColor(on ? 0xFFFFFFFF : 0xFFFFFFFF);
         }
     }
 
@@ -693,7 +693,7 @@ public class MainActivity extends Activity {
         if (tv != null) {
             boolean on = getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true);
             tv.setText(on ? "YOLO 免审批：开" : "YOLO 免审批：关");
-            tv.setTextColor(on ? 0xFF4CAF50 : 0xFFFFFFFF);
+            tv.setTextColor(on ? 0xFFFFFFFF : 0xFFFFFFFF);
         }
     }
 
@@ -1158,7 +1158,7 @@ public class MainActivity extends Activity {
                 "项目为 reasonix 工作目录（会话/记忆按项目隔离）。\n"
                         + "「进入」切换（重启生效）；「删除」移除。可建内部或手机目录（文件管理器可见）。"));
         final TextView curView = new TextView(this);
-        curView.setTextColor(0xFF4CAF50);
+        curView.setTextColor(0xFFFFFFFF);
         curView.setTextSize(14);
         curView.setTypeface(null, android.graphics.Typeface.BOLD);
         curView.setPadding(dp(2), dp(8), dp(2), dp(4));
@@ -1298,7 +1298,7 @@ public class MainActivity extends Activity {
                             lastProj = g[0];
                             TextView t = new TextView(this);
                             t.setText("项目 " + g[0]);
-                            t.setTextColor(0xFF7FDB8A);
+                            t.setTextColor(0xFFFFFFFF);
                             t.setTextSize(13);
                             t.setTypeface(null, android.graphics.Typeface.BOLD);
                             t.setPadding(0, dp(10), 0, dp(2));
@@ -1540,7 +1540,7 @@ public class MainActivity extends Activity {
             row.setPadding(0, dp(4), 0, dp(4));
             TextView tv = new TextView(this);
             tv.setText(name + (isCur ? "（当前）" : ""));
-            tv.setTextColor(isCur ? 0xFF4CAF50 : 0xFFE0E0E0);
+            tv.setTextColor(isCur ? 0xFFFFFFFF : 0xFFE0E0E0);
             tv.setTextSize(14);
             row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             Button go = createDarkButton("进入");
@@ -1824,7 +1824,7 @@ public class MainActivity extends Activity {
         final TextView chrootWarn = new TextView(this);
         chrootWarn.setText(chrootOn ? ""
                 : "⚠ 未开启 chroot：Android 开发已置灰（JVM 需 root 域）。\nROOT 面板可切换为 chroot。");
-        chrootWarn.setTextColor(chrootOn ? 0xFFAAAAAA : 0xFFFF6B6B);
+        chrootWarn.setTextColor(chrootOn ? 0xFFAAAAAA : 0xFFFFFFFF);
         chrootWarn.setTextSize(13);
         chrootWarn.setLineSpacing(0, 1.2f);
         chrootWarn.setMaxLines(2);
@@ -2147,7 +2147,7 @@ public class MainActivity extends Activity {
                         runOnUiThread(() -> {
                             if (gen != panelGen) { pushOutput(msg); return; }   // 面板已换：只写终端
                             progressTitle.setText(name + (ok ? " 安装完成" : " 安装失败"));
-                            progressTitle.setTextColor(ok ? 0xFF7FDB8A : 0xFFFF6B6B);
+                            progressTitle.setTextColor(ok ? 0xFFFFFFFF : 0xFFFFFFFF);
                             progressBar.setIndeterminate(false);
                             progressBar.setProgress(100);
                             // 进度条下只显示简单状态，不回显安装日志（tail 已固化省略无意义）
@@ -2161,7 +2161,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (gen != panelGen) return;   // 面板已换：旧控件引用作废
                     progressTitle.setText(name + " 安装超时");
-                    progressTitle.setTextColor(0xFFFFD54F);
+                    progressTitle.setTextColor(0xFFCCCCCC);
                     progressBar.setIndeterminate(false);
                     progressBar.setProgress(0);
                     progressText.setText("超过 15 分钟未完成，请检查网络后重试");
@@ -2173,7 +2173,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     if (gen != panelGen) return;   // 面板已换：旧控件引用作废
                     progressTitle.setText(name + " 安装失败");
-                    progressTitle.setTextColor(0xFFFF6B6B);
+                    progressTitle.setTextColor(0xFFFFFFFF);
                     progressBar.setIndeterminate(false);
                     progressBar.setProgress(0);
                     progressText.setText("异常：" + e.getMessage());
@@ -2251,7 +2251,7 @@ public class MainActivity extends Activity {
             TextView tv = new TextView(this);
             String st = installed[i] ? "已安装" : (partial[i] ? "部分安装" : "未安装");
             tv.setText(e[0] + "：" + st);
-            tv.setTextColor(installed[i] ? 0xFF7FDB8A : (partial[i] ? 0xFFFFD54F : 0xFF888888));
+            tv.setTextColor(installed[i] ? 0xFFFFFFFF : (partial[i] ? 0xFFCCCCCC : 0xFF888888));
             tv.setTextSize(13);
             row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             // 未安装/部分 → 安装（重装）按钮；chroot 依赖环境（Android 开发等，e[3]=="1"）
@@ -2497,7 +2497,6 @@ public class MainActivity extends Activity {
 
     /** purge 面板版本与偏好键 */
     private static final String PURGE_VER = "v1.1.35";
-    private static final String PURGE_THEME_KEY = "purge_theme_light";   // true=白纸主题, false=墨色主题(默认)
     private static final String PURGE_DRILL_OK = "purge_drill_ok";       // 演练台已授权
 
     /** 清洗页补丁定义：RSXM 宿主策略补丁（映射 dsh-purge「清洗 → 补丁」）。
@@ -2808,14 +2807,15 @@ public class MainActivity extends Activity {
     /* ---------- purge 主题控件（白 / 墨） ---------- */
 
     private boolean purgeLight() {
-        return getSharedPreferences("prefs", MODE_PRIVATE).getBoolean(PURGE_THEME_KEY, false);
+        // 统一黑底白字风格：白纸主题已废弃，恒为墨色
+        return false;
     }
 
-    private int purgeFg()    { return purgeLight() ? 0xFF1C1B18 : 0xFFFFFFFF; }
-    private int purgeMute()  { return purgeLight() ? 0xFF5A554C : 0xFFAAAAAA; }
-    private int purgeBg()    { return purgeLight() ? 0xFFFAFAF7 : 0xFF0D0D0D; }
-    private int purgeRowBg() { return purgeLight() ? 0xFFECEBE5 : 0xFF141414; }
-    private int purgeBtnBg() { return purgeLight() ? 0xFFDCDBD4 : 0xFF262626; }
+    private int purgeFg()    { return 0xFFFFFFFF; }          // 黑底白字：正文白
+    private int purgeMute()  { return 0xFFAAAAAA; }          // 次要说明浅灰
+    private int purgeBg()    { return 0xFF0D0D0D; }          // 面板黑底
+    private int purgeRowBg() { return 0xFF141414; }          // 行卡深灰
+    private int purgeBtnBg() { return 0xFF262626; }          // 按钮黑灰底
 
     private TextView purgeTip(String text) {
         TextView tv = new TextView(this);
@@ -2859,7 +2859,7 @@ public class MainActivity extends Activity {
         b.setMinimumHeight(dp(40));
         b.setPadding(dp(18), 0, dp(18), 0);
         b.setBackgroundColor(0x00000000);
-        b.setTextColor(on ? 0xFF6DBF8C : purgeMute());
+        b.setTextColor(on ? 0xFFFFFFFF : purgeMute());
         b.setTypeface(null, on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
         return b;
     }
@@ -2868,7 +2868,7 @@ public class MainActivity extends Activity {
     private TextView purgeBadge(String text, boolean ok) {
         TextView tv = new TextView(this);
         tv.setText((ok ? "● " : "○ ") + text);
-        tv.setTextColor(ok ? 0xFF4CAF50 : 0xFFFFB74D);
+        tv.setTextColor(ok ? 0xFFFFFFFF : 0xFF9BA6B4);
         tv.setTextSize(12);
         tv.setTypeface(null, android.graphics.Typeface.BOLD);
         return tv;
@@ -2936,7 +2936,7 @@ public class MainActivity extends Activity {
                     boolean on = purgePatchApplied(badge.getTag() instanceof Integer
                             ? (Integer) badge.getTag() : PATCH_ARMOR);
                     badge.setText((on ? "● " : "○ ") + (on ? "已应用" : "未应用"));
-                    badge.setTextColor(on ? 0xFF4CAF50 : 0xFFFFB74D);
+                    badge.setTextColor(on ? 0xFFFFFFFF : 0xFF9BA6B4);
                 }
                 if (apply != null) apply.setEnabled(true);
                 if (revert != null) revert.setEnabled(true);
@@ -3155,7 +3155,7 @@ public class MainActivity extends Activity {
                     for (final String name : names) {
                         TextView row = new TextView(this);
                         row.setText((disabled.contains(name) ? "○ 禁用  " : "● 启用  ") + name);
-                        row.setTextColor(disabled.contains(name) ? purgeMute() : 0xFF4CAF50);
+                        row.setTextColor(disabled.contains(name) ? purgeMute() : 0xFFFFFFFF);
                         row.setTextSize(12);
                         row.setPadding(dp(4), dp(3), 0, dp(3));
                         box.addView(row);
@@ -3195,7 +3195,7 @@ public class MainActivity extends Activity {
         head.setGravity(android.view.Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
         title.setText("dsh purge 清洗台");
-        title.setTextColor(0xFFFF8A5C);
+        title.setTextColor(0xFFFFFFFF);
         title.setTextSize(16);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -3204,13 +3204,7 @@ public class MainActivity extends Activity {
         ver.setTextColor(purgeMute());
         ver.setTextSize(11);
         head.addView(ver);
-        Button theme = purgeButton(light ? "墨" : "白");
-        theme.setOnClickListener(v -> {
-            getSharedPreferences("prefs", MODE_PRIVATE).edit()
-                    .putBoolean(PURGE_THEME_KEY, !purgeLight()).apply();
-            showPurgeDialog();   // 重建面板切换主题
-        });
-        head.addView(theme);
+        // 统一黑底白字：白/墨主题切换已移除（purgeLight 恒 false）
         panel.addView(head);
         // 页签栏
         LinearLayout tabs = new LinearLayout(this);
@@ -3227,7 +3221,7 @@ public class MainActivity extends Activity {
         purgeContentBox.setOrientation(LinearLayout.VERTICAL);
         panel.addView(purgeContentBox);
         final Runnable setClean = () -> {
-            tabClean.setTextColor(0xFF6DBF8C);
+            tabClean.setTextColor(0xFFFFFFFF);
             tabClean.setTypeface(null, android.graphics.Typeface.BOLD);
             tabDrill.setTextColor(purgeMute());
             tabDrill.setTypeface(null, android.graphics.Typeface.NORMAL);
@@ -3235,7 +3229,7 @@ public class MainActivity extends Activity {
             tabRes.setTypeface(null, android.graphics.Typeface.NORMAL);
         };
         final Runnable setDrill = () -> {
-            tabDrill.setTextColor(0xFF6DBF8C);
+            tabDrill.setTextColor(0xFFFFFFFF);
             tabDrill.setTypeface(null, android.graphics.Typeface.BOLD);
             tabClean.setTextColor(purgeMute());
             tabClean.setTypeface(null, android.graphics.Typeface.NORMAL);
@@ -3243,7 +3237,7 @@ public class MainActivity extends Activity {
             tabRes.setTypeface(null, android.graphics.Typeface.NORMAL);
         };
         final Runnable setRes = () -> {
-            tabRes.setTextColor(0xFF6DBF8C);
+            tabRes.setTextColor(0xFFFFFFFF);
             tabRes.setTypeface(null, android.graphics.Typeface.BOLD);
             tabClean.setTextColor(purgeMute());
             tabClean.setTypeface(null, android.graphics.Typeface.NORMAL);
@@ -3260,7 +3254,7 @@ public class MainActivity extends Activity {
     /** 深色代码结果区（purge 主题版，同 createDarkResult 但跟随白/墨） */
     private TextView purgeResult() {
         TextView tv = new TextView(this);
-        tv.setTextColor(0xFF7FDB8A);
+        tv.setTextColor(0xFFFFFFFF);
         tv.setTextSize(11);
         tv.setTypeface(android.graphics.Typeface.MONOSPACE);
         tv.setBackgroundColor(purgeRowBg());
@@ -3289,13 +3283,13 @@ public class MainActivity extends Activity {
         head.setGravity(android.view.Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
         title.setText("AI 破甲工具箱");
-        title.setTextColor(0xFF36F29A);
+        title.setTextColor(0xFFFFFFFF);
         title.setTextSize(16);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         TextView ver = new TextView(this);
         ver.setText("v" + AITEST8_VER + " · " + AITEST8_CHANNEL);
-        ver.setTextColor(0xFF6E7681);
+        ver.setTextColor(0xFF9BA6B4);
         ver.setTextSize(11);
         head.addView(ver);
         panel.addView(head);
@@ -3316,7 +3310,7 @@ public class MainActivity extends Activity {
         panel.addView(aitest8ContentBox);
         final java.util.function.Consumer<Button> sel = (Button on) -> {
             for (Button b : new Button[]{tabDash, tabSkills, tabPool, tabAct}) {
-                b.setTextColor(b == on ? 0xFF36F29A : 0xFF6E7681);
+                b.setTextColor(b == on ? 0xFFFFFFFF : 0xFF9BA6B4);
                 b.setTypeface(null, b == on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
             }
         };
@@ -3338,7 +3332,7 @@ public class MainActivity extends Activity {
         b.setMinimumHeight(dp(40));
         b.setPadding(dp(14), 0, dp(14), 0);
         b.setBackgroundColor(0x00000000);
-        b.setTextColor(on ? 0xFF36F29A : 0xFF6E7681);
+        b.setTextColor(on ? 0xFFFFFFFF : 0xFF9BA6B4);
         b.setTypeface(null, on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
         return b;
     }
@@ -3354,7 +3348,7 @@ public class MainActivity extends Activity {
         b.setMinimumHeight(dp(38));
         b.setPadding(dp(12), 0, dp(12), 0);
         b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
-                primary ? 0xFF0F6E49 : 0xFF0C1B16));
+                primary ? 0xFF1E1E1E : 0xFF141414));
         return b;
     }
 
@@ -3372,7 +3366,7 @@ public class MainActivity extends Activity {
     private TextView aitest8Section(String text) {
         TextView tv = new TextView(this);
         tv.setText(text);
-        tv.setTextColor(0xFF7FFFC1);
+        tv.setTextColor(0xFFD0D0D0);
         tv.setTextSize(14);
         tv.setTypeface(null, android.graphics.Typeface.BOLD);
         tv.setPadding(0, dp(6), 0, dp(2));
@@ -3409,7 +3403,7 @@ public class MainActivity extends Activity {
             final String tip = on ? "已注入 [agent] system_prompt（标记 RSXM_ARMOR_V2）" : "未注入";
             runOnUiThread(() -> {
                 kernel.setText("● " + tip);
-                kernel.setTextColor(on ? 0xFF3FB950 : 0xFFF85149);
+                kernel.setTextColor(on ? 0xFFFFFFFF : 0xFFFFFFFF);
             });
         }, "aitest8-kernel").start();
         // ── 主操作：部署 / 还原 / 重启环境生效 ──
@@ -3464,7 +3458,7 @@ public class MainActivity extends Activity {
         // ── 操作日志（紧跟操作区：反馈立即可见）──
         box.addView(aitest8Section("操作日志"));
         aitest8LogView = new TextView(this);
-        aitest8LogView.setTextColor(0xFF7FFFC1);
+        aitest8LogView.setTextColor(0xFFD0D0D0);
         aitest8LogView.setTextSize(11);
         aitest8LogView.setTypeface(android.graphics.Typeface.MONOSPACE);
         aitest8LogView.setBackgroundColor(0xFF07110E);
@@ -3483,7 +3477,7 @@ public class MainActivity extends Activity {
         inst.setMinLines(4);
         inst.setTextSize(12);
         inst.setTextColor(0xFFE6EDF3);
-        inst.setHintTextColor(0xFF6E7681);
+        inst.setHintTextColor(0xFF9BA6B4);
         inst.setBackgroundColor(0xFF07110E);
         inst.setGravity(android.view.Gravity.TOP);
         inst.setVerticalScrollBarEnabled(true);
@@ -3546,7 +3540,7 @@ public class MainActivity extends Activity {
         final TextView ideFold = new TextView(this);
         ideFold.setText(aitest8IdeExpanded ? "▾ 收起 IDE 目标列表"
                 : "▸ 展开 " + AITEST8_IDES.length + " 个 IDE 目标列表");
-        ideFold.setTextColor(0xFF36F29A);
+        ideFold.setTextColor(0xFFFFFFFF);
         ideFold.setTextSize(12);
         ideFold.setPadding(dp(4), dp(4), 0, dp(4));
         ideFold.setOnClickListener(v -> {
@@ -3559,7 +3553,7 @@ public class MainActivity extends Activity {
                     row.setOrientation(LinearLayout.HORIZONTAL);
                     row.setGravity(android.view.Gravity.CENTER_VERTICAL);
                     row.setPadding(dp(10), dp(6), dp(10), dp(6));
-                    row.setBackgroundColor(0xFF0B1713);
+                    row.setBackgroundColor(0xFF141414);
                     LinearLayout.LayoutParams irlp = new LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                     irlp.topMargin = dp(3);
@@ -3572,7 +3566,7 @@ public class MainActivity extends Activity {
                     row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                     TextView desc = new TextView(this);
                     desc.setText(ide[2]);
-                    desc.setTextColor(0xFF6E7681);
+                    desc.setTextColor(0xFF9BA6B4);
                     desc.setTextSize(11);
                     row.addView(desc);
                     ideBox.addView(row);
@@ -3674,19 +3668,19 @@ public class MainActivity extends Activity {
                     card.setOrientation(LinearLayout.HORIZONTAL);
                     card.setGravity(android.view.Gravity.CENTER_VERTICAL);
                     card.setPadding(dp(10), dp(6), dp(10), dp(6));
-                    card.setBackgroundColor(0xFF0B1713);
+                    card.setBackgroundColor(0xFF141414);
                     card.setLayoutParams(new LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
                     final android.widget.CheckBox cb = new android.widget.CheckBox(this);
                     cb.setChecked(has);
                     cb.setText(sk[1] + (has ? "　● 已安装" : "　○ 未安装"));
-                    cb.setTextColor(has ? 0xFF7FFFC1 : 0xFF8B949E);
+                    cb.setTextColor(has ? 0xFFD0D0D0 : 0xFF8B949E);
                     cb.setTextSize(12);
                     cb.setOnCheckedChangeListener((b, checked) -> checks.put(dirName, checked));
                     card.addView(cb, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                     TextView cat = new TextView(this);
                     cat.setText(sk[2]);
-                    cat.setTextColor(0xFF36F29A);
+                    cat.setTextColor(0xFFFFFFFF);
                     cat.setTextSize(11);
                     cat.setPadding(dp(8), 0, 0, 0);
                     card.addView(cat);
@@ -3769,7 +3763,7 @@ public class MainActivity extends Activity {
         tokenInput.setSingleLine(true);
         tokenInput.setTextSize(12);
         tokenInput.setTextColor(0xFFE6EDF3);
-        tokenInput.setHintTextColor(0xFF6E7681);
+        tokenInput.setHintTextColor(0xFF9BA6B4);
         tokenInput.setBackgroundColor(0xFF07110E);
         tokenInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
                 | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -3842,7 +3836,7 @@ public class MainActivity extends Activity {
         });
         // ── 列表操作 ──
         final TextView out = new TextView(this);
-        out.setTextColor(0xFF7FFFC1);
+        out.setTextColor(0xFFD0D0D0);
         out.setTextSize(11);
         out.setTypeface(android.graphics.Typeface.MONOSPACE);
         out.setBackgroundColor(0xFF07110E);
@@ -3950,7 +3944,7 @@ public class MainActivity extends Activity {
             } else {
                 String masked = tok.length() <= 8 ? "***" : tok.substring(0, 4) + "…" + tok.substring(tok.length() - 4);
                 txt = "● 已配置（" + masked + "）· 刷新列表将携带 Token";
-                color = 0xFF3FB950;
+                color = 0xFFFFFFFF;
             }
             runOnUiThread(() -> {
                 tv.setText(txt);
@@ -4003,7 +3997,7 @@ public class MainActivity extends Activity {
         // 注册码（已破解：可选展示，不再要求）
         TextView codeLabel = new TextView(this);
         codeLabel.setText("注册码（已破解，无需填写）");
-        codeLabel.setTextColor(0xFF6E7681);
+        codeLabel.setTextColor(0xFF9BA6B4);
         codeLabel.setTextSize(12);
         box.addView(codeLabel);
         final EditText code = new EditText(this);
@@ -4119,7 +4113,7 @@ public class MainActivity extends Activity {
     private void refreshAITest8AuthStatus(final TextView status) {
         new Thread(() -> {
             String txt = "本机未授权 · 点击「注入永久授权」完成破解";
-            int color = 0xFFF85149;
+            int color = 0xFFFFFFFF;
             try {
                 File f = new File(new File(getFilesDir(), "rootfs/root/.reasonix/aitest8"), "license.json");
                 if (f.exists()) {
@@ -4132,7 +4126,7 @@ public class MainActivity extends Activity {
                         txt = "本机授权：永久 · lifetime（local patch 等效，无到期/吊销）"
                                 + (at > 0 ? " · 注入时间 " + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm",
                                 java.util.Locale.ROOT).format(new java.util.Date(at * 1000)) : "");
-                        color = 0xFF3FB950;
+                        color = 0xFFFFFFFF;
                     } else {
                         txt = "本机未授权（patched 缺失）";
                     }
@@ -4250,7 +4244,7 @@ public class MainActivity extends Activity {
                             + "echo '[sdcard]'; ls /sdcard 2>/dev/null | head -3", 12);
             final String r = out;
             runOnUiThread(() -> {
-                assets.setTextColor(0xFF7FDB8A);
+                assets.setTextColor(0xFFFFFFFF);
                 assets.setText(r);
             });
         }, "purge-assets").start();
@@ -4266,7 +4260,7 @@ public class MainActivity extends Activity {
             final String mode = isChrootMode() ? "chroot（需 root）" : "proot（免 root）";
             final String r = "[运行模式] " + mode + "\n" + guest;
             runOnUiThread(() -> {
-                env.setTextColor(0xFF7FDB8A);
+                env.setTextColor(0xFFFFFFFF);
                 env.setText(r);
             });
         }, "purge-env").start();
@@ -4412,10 +4406,10 @@ public class MainActivity extends Activity {
                         "root/.reasonix"), "purge/skills-index.md");
                 final boolean idxHave = idx.exists();
                 runOnUiThread(() -> {
-                    vulnState.setTextColor(0xFF7FDB8A);
+                    vulnState.setTextColor(0xFFFFFFFF);
                     vulnState.setText("漏洞库：已装 " + vulnHave + "/" + vulnTotal
                             + " 份（内置 7 份，APK 升级自动刷新）");
-                    skillState.setTextColor(0xFF7FDB8A);
+                    skillState.setTextColor(0xFFFFFFFF);
                     skillState.setText("Skill：redteam " + rtHave + "/23 · av-evasion " + avHave
                             + "/2 · decompile " + (decHave ? "✓" : "✗")
                             + " · 索引 " + (idxHave ? "✓" : "✗") + "（reasonix 自动加载）");
@@ -4557,7 +4551,7 @@ public class MainActivity extends Activity {
     /** 深色代码结果区 */
     private TextView createDarkResult() {
         TextView tv = new TextView(this);
-        tv.setTextColor(0xFF7FDB8A);
+        tv.setTextColor(0xFFFFFFFF);
         tv.setTextSize(11);
         tv.setTypeface(android.graphics.Typeface.MONOSPACE);
         tv.setBackgroundColor(0xFF101010);
@@ -4588,7 +4582,7 @@ public class MainActivity extends Activity {
         // 独立状态行（执行后自动刷新）
         TextView statusLine = new TextView(this);
         statusLine.setText("连接状态：" + status);
-        statusLine.setTextColor(status.contains("已连接") ? 0xFF7FDB8A : (status.contains("需配对") ? 0xFFFFD54F : 0xFFCCCCCC));
+        statusLine.setTextColor(status.contains("已连接") ? 0xFFFFFFFF : (status.contains("需配对") ? 0xFFCCCCCC : 0xFFCCCCCC));
         statusLine.setTextSize(13);
         statusLine.setTypeface(null, android.graphics.Typeface.BOLD);
         int pad = dp(16);
@@ -4618,7 +4612,7 @@ public class MainActivity extends Activity {
             String pp = pairPort.getText().toString().trim();
             String pc = pairCode.getText().toString().trim();
             if (pp.isEmpty() || pc.isEmpty()) {
-                resultView.setTextColor(0xFFFF6E6E);
+                resultView.setTextColor(0xFFE0E0E0);
                 resultView.setText("请先在手机上开启「无线调试」，抄下配对端口和 6 位配对码后填写。");
                 return;
             }
@@ -4648,7 +4642,7 @@ public class MainActivity extends Activity {
         szStatus.setPadding(dp(2), dp(2), dp(2), dp(4));
         final boolean szOn = shizukuAvailable();
         szStatus.setText("Shizuku：" + (szOn ? "已授权（adb 权限可用）" : "未授权/未安装"));
-        szStatus.setTextColor(szOn ? 0xFF4CAF50 : 0xFFFFD54F);
+        szStatus.setTextColor(szOn ? 0xFFFFFFFF : 0xFFCCCCCC);
         addV(panel, szStatus, 6);
         addV(panel, createDarkTip(
                 "Shizuku 授权后 adb 命令以其权限执行，关闭本应用仍可用（替代后台保活）。"), 6);
@@ -4656,15 +4650,15 @@ public class MainActivity extends Activity {
                 ? "通过 Shizuku 持久化 adb（启动 adb server）" : "Shizuku 授权（打开授权页）");
         szBtn.setOnClickListener(v -> {
             if (shizukuAvailable()) {
-                resultView.setTextColor(0xFFFFD54F);
+                resultView.setTextColor(0xFFCCCCCC);
                 resultView.setText("通过 Shizuku 启动 adb server（持久化）...\n");
                 new Thread(() -> {
                     String out = execViaShizuku("adb start-server 2>&1; adb devices 2>&1", 30);
                     runOnUiThread(() -> {
-                        resultView.setTextColor(0xFF7FDB8A);
+                        resultView.setTextColor(0xFFFFFFFF);
                         resultView.setText("Shizuku adb server 已启动（Shizuku 保持，持久化）：\n" + out);
                         szStatus.setText("Shizuku：已授权（adb 权限可用）");
-                        szStatus.setTextColor(0xFF4CAF50);
+                        szStatus.setTextColor(0xFFFFFFFF);
                     });
                 }, "shizuku-adb").start();
             } else {
@@ -4880,19 +4874,19 @@ public class MainActivity extends Activity {
     /** 在 guest 内直接执行 adb 命令（经 adb 服务，不依赖 reasonix/AI 会话），结果实时显示 */
     private void runAdbInGuest(String cmd, TextView resultView, TextView statusLine) {
         final String fcmd = cmd;
-        resultView.setTextColor(0xFFFFD54F);
+        resultView.setTextColor(0xFFCCCCCC);
         resultView.setText("执行中...\n" + fcmd.trim());
         new Thread(() -> {
             String out = executeInGuest(fcmd, 150);
             runOnUiThread(() -> {
                 resultView.setTextColor(out.contains("error") || out.contains("超时")
-                        ? 0xFFFF6E6E : 0xFF7FDB8A);
+                        ? 0xFFE0E0E0 : 0xFFFFFFFF);
                 resultView.setText(out);
                 if (statusLine != null) {
                     String st = readAdbStatus();
                     statusLine.setText("连接状态：" + st);
-                    statusLine.setTextColor(st.contains("已连接") ? 0xFF7FDB8A
-                            : (st.contains("需配对") ? 0xFFFFD54F : 0xFFCCCCCC));
+                    statusLine.setTextColor(st.contains("已连接") ? 0xFFFFFFFF
+                            : (st.contains("需配对") ? 0xFFCCCCCC : 0xFFCCCCCC));
                 }
             });
         }, "adb-exec").start();
@@ -6055,7 +6049,7 @@ public class MainActivity extends Activity {
             String url = probeBaseOf(typedUrl);   // 完整端点回退到 base 后探测
             if (url.isEmpty()) {
                 probeStatus.setVisibility(View.VISIBLE);
-                probeStatus.setTextColor(0xFFFF6B6B);
+                probeStatus.setTextColor(0xFFFFFFFF);
                 probeStatus.setText("✗ 请先填写 API URL");
                 return;
             }
@@ -6080,7 +6074,7 @@ public class MainActivity extends Activity {
                     testBtn.setText("测试连通性");
                     probeStatus.setVisibility(View.VISIBLE);
                     boolean pass = r.reachable && r.authOk;
-                    probeStatus.setTextColor(pass ? 0xFF7CD97C : (r.reachable ? 0xFFFFD166 : 0xFFFF6B6B));
+                    probeStatus.setTextColor(pass ? 0xFFFFFFFF : (r.reachable ? 0xFFCCCCCC : 0xFFFFFFFF));
                     probeStatus.setText(formatProbeResult(r));
                     // 探测到模型列表：顺手填入模型下拉（省一次「刷新模型列表」）
                     if (r.models != null && !r.models.isEmpty() && reqId == modelReqSeq) {
@@ -6130,13 +6124,13 @@ public class MainActivity extends Activity {
                         String why = lastModelFetchError;
                         probeStatus.setVisibility(View.VISIBLE);
                         if (why.contains("HTTP 401") || why.contains("HTTP 403")) {
-                            probeStatus.setTextColor(0xFFFF6B6B);
+                            probeStatus.setTextColor(0xFFFFFFFF);
                             probeStatus.setText("✗ 该端点的模型列表需要鉴权：请在上方 API Key 框填写后重试\n" + why);
                         } else if (why.isEmpty()) {
-                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setTextColor(0xFFCCCCCC);
                             probeStatus.setText("△ 未获取到模型列表（端点可能无 /models 接口），可用「模型名（手动输入）」");
                         } else {
-                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setTextColor(0xFFCCCCCC);
                             probeStatus.setText("△ 未获取到模型列表：\n" + why);
                         }
                     }
@@ -6241,7 +6235,7 @@ public class MainActivity extends Activity {
         addV(panel, addBtn, 6);
         // 删除 Provider 独立按钮：移除当前选中的 provider（config.toml 对应块 + .env 变量）
         Button delBtn = createDarkButton("删除当前 Provider…");
-        delBtn.setTextColor(0xFFFF6B6B);  // 红色警示
+        delBtn.setTextColor(0xFFFFFFFF);  // 红色警示
         delBtn.setOnClickListener(v -> {
             int sel = providerSpinner.getSelectedItemPosition();
             if (sel < 0 || sel >= providers.size()) return;
@@ -6379,7 +6373,7 @@ public class MainActivity extends Activity {
                     parseEndpointUrl(typedUrl), null);
             if (baseUrl.isEmpty()) {
                 probeStatus.setVisibility(View.VISIBLE);
-                probeStatus.setTextColor(0xFFFF6B6B);
+                probeStatus.setTextColor(0xFFFFFFFF);
                 probeStatus.setText("✗ 请先填写 base_url");
                 return;
             }
@@ -6399,7 +6393,7 @@ public class MainActivity extends Activity {
                     testBtn.setText("测试连通性");
                     probeStatus.setVisibility(View.VISIBLE);
                     boolean pass = r.reachable && r.authOk;
-                    probeStatus.setTextColor(pass ? 0xFF7CD97C : (r.reachable ? 0xFFFFD166 : 0xFFFF6B6B));
+                    probeStatus.setTextColor(pass ? 0xFFFFFFFF : (r.reachable ? 0xFFCCCCCC : 0xFFFFFFFF));
                     probeStatus.setText(formatProbeResult(r));
                     // 探测到模型列表：填入模型下拉（等效「拉取模型」）
                     if (r.models != null && !r.models.isEmpty() && reqId == modelReqSeq) {
@@ -6421,7 +6415,7 @@ public class MainActivity extends Activity {
                     parseEndpointUrl(typedUrl), null);
             if (baseUrl.isEmpty() || envVar.isEmpty()) {
                 probeStatus.setVisibility(View.VISIBLE);
-                probeStatus.setTextColor(0xFFFFD166);
+                probeStatus.setTextColor(0xFFCCCCCC);
                 probeStatus.setText("△ 请先填写 base_url 与 api_key_env，再拉取模型");
                 return;
             }
@@ -6446,17 +6440,17 @@ public class MainActivity extends Activity {
                         // 失败原因直接展示（旧实现只会说「未能获取模型列表」，401 无从定位）
                         String why = lastModelFetchError;
                         if (why.contains("HTTP 401") || why.contains("HTTP 403")) {
-                            probeStatus.setTextColor(0xFFFF6B6B);
+                            probeStatus.setTextColor(0xFFFFFFFF);
                             probeStatus.setText("✗ 该端点的模型列表需要鉴权：请在上方填写 API Key 后重试\n" + why);
                         } else if (why.isEmpty()) {
-                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setTextColor(0xFFCCCCCC);
                             probeStatus.setText("△ 未能获取模型列表（端点可能无 /models 接口），可保存后用「手动输入模型名」");
                         } else {
-                            probeStatus.setTextColor(0xFFFFD166);
+                            probeStatus.setTextColor(0xFFCCCCCC);
                             probeStatus.setText("△ 未能获取模型列表：\n" + why + "\n可保存后用「手动输入模型名」");
                         }
                     } else {
-                        probeStatus.setTextColor(0xFF7CD97C);
+                        probeStatus.setTextColor(0xFFFFFFFF);
                         probeStatus.setText("✓ 拉取成功，" + finalList.size() + " 个模型可选");
                     }
                 });
@@ -6984,7 +6978,7 @@ public class MainActivity extends Activity {
                     if (s != null) {
                         s.setText("✗ serve 启动" + (spawned ? "超时：请先在环境里安装/更新 reasonix" : "失败：环境未就绪")
                                 + "（日志 /root/.rsxm-serve.log）");
-                        s.setTextColor(0xFFFF6B6B);
+                        s.setTextColor(0xFFFFFFFF);
                     }
                 }
             });
@@ -7067,7 +7061,7 @@ public class MainActivity extends Activity {
                 TextView s = serveStatusView;
                 if (s != null) {
                     s.setText(ok ? "✓ 审批模式已切换：" + cur : "✗ 模式切换失败（引擎未在线？）");
-                    s.setTextColor(ok ? 0xFF7FDB8A : 0xFFFF6B6B);
+                    s.setTextColor(ok ? 0xFFFFFFFF : 0xFFFFFFFF);
                 }
             });
         }, "serve-approve").start();
@@ -7099,7 +7093,7 @@ public class MainActivity extends Activity {
                     + " · 审批 " + (approve.isEmpty() ? "?" : approve)
                     + (goal.isEmpty() || "stopped".equals(goal) ? "" : " · goal:" + goal);
             s.setText(text);
-            s.setTextColor(running ? 0xFF7FDB8A : 0xFF8BE9FD);
+            s.setTextColor(running ? 0xFFFFFFFF : 0xFF8BE9FD);
         } catch (Exception e) {
             s.setText(st.length() > 160 ? st.substring(0, 160) : st);
         }
@@ -7245,7 +7239,7 @@ public class MainActivity extends Activity {
         final String ver = (npmVer != null && !npmVer.isEmpty()) ? "v" + npmVer : null;
         TextView verView = new TextView(this);
         verView.setText("当前版本：" + (ver != null ? ver : "检测中…"));
-        verView.setTextColor(0xFF7FDB8A);
+        verView.setTextColor(0xFFFFFFFF);
         verView.setTextSize(14);
         verView.setTypeface(null, android.graphics.Typeface.BOLD);
         addV(panel, verView, 0);
@@ -9911,16 +9905,16 @@ public class MainActivity extends Activity {
         int roleColor;
         if (r.isUser()) {
             roleText = "用户";
-            roleColor = 0xFF58A6FF;
+            roleColor = 0xFFFFFFFF;
         } else if (r.isAssistant()) {
             roleText = "AI" + (serveModelRef.isEmpty() ? "" : " · " + serveModelRef);
-            roleColor = 0xFF7FDB8A;
+            roleColor = 0xFFFFFFFF;
         } else if (r.isTool()) {
             roleText = "工具";
-            roleColor = r.toolFailed() ? 0xFFFF6B6B : 0xFF8B949E;
+            roleColor = r.toolFailed() ? 0xFFFFFFFF : 0xFF8B949E;
         } else {
             roleText = "系统";
-            roleColor = 0xFFD29922;
+            roleColor = 0xFFCCCCCC;
         }
         roleTag.setText(roleText);
         roleTag.setTextColor(roleColor);
@@ -9930,7 +9924,7 @@ public class MainActivity extends Activity {
         String ts = (r.isUser() && r.createdAt > 0) ? hmsOf(r.createdAt) : nowHms();
         TextView tsView = new TextView(this);
         tsView.setText("  " + ts);
-        tsView.setTextColor(0xFF6E7681);
+        tsView.setTextColor(0xFF9BA6B4);
         tsView.setTextSize(10);
         meta.addView(tsView);
         wrap.addView(meta);
@@ -9957,7 +9951,7 @@ public class MainActivity extends Activity {
 
         if (r.isUser()) {
             wrap.setGravity(android.view.Gravity.END);
-            body.setBackgroundColor(0xFF1F3A5F);
+            body.setBackgroundColor(0xFF1A1A1A);
             int pad = dp(10);
             body.setPadding(pad, pad, pad, pad);
         }
@@ -10066,7 +10060,7 @@ public class MainActivity extends Activity {
         TextView v = findViewById(R.id.menu_view);
         if (v != null) {
             v.setText(nativeViewOn ? "视图切换（当前：对话）" : "视图切换（当前：终端）");
-            v.setTextColor(nativeViewOn ? 0xFF81C784 : 0xFFFFD54F);
+            v.setTextColor(nativeViewOn ? 0xFFFFFFFF : 0xFFCCCCCC);
         }
     }
 
@@ -10133,7 +10127,7 @@ public class MainActivity extends Activity {
             Button b = findViewById(R.id.native_send);
             if (b != null) {
                 b.setText(on ? BTN_STOP : BTN_SEND);
-                b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(on ? 0xFF5A2A2A : 0xFF262626));
+                b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(on ? 0xFF1E1E1E : 0xFF262626));
             }
         });
     }

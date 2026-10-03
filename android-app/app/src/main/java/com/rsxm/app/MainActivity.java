@@ -9306,10 +9306,13 @@ public class MainActivity extends Activity {
                 + "; chmod 600 " + ReasonixServe.TOKEN_FILE_GUEST
                 + "; " + serveStopCommand() + "; "
                 + "cd /root; "
-                + "RX=$(command -v reasonix 2>/dev/null || echo /usr/local/bin/reasonix); "
+                // reasonix / serve 用 printf 拼接，使 sh -c 执行载体 cmdline 不含连续
+                // "reasonix"/"serve" 字面——否则 serveStopCommand 的 pkill -f 'reasonix.*[s]erve'
+                // 会把正在执行本命令的 sh 自身杀掉（命令链中断 → serve 起不来）。
+                + "RXN=$(printf 'rea''sonix'); RX=$(command -v \"$RXN\" 2>/dev/null || echo /usr/local/bin/\"$RXN\"); "
                 // 纯变量展开，不执行外部命令（诊断卡片里能看到实际跑的是哪一份）
                 + "echo \"[rsxm] RX=$RX\"; "
-                + "nohup \"$RX\" serve --addr 127.0.0.1:8787 --auth token "
+                + "nohup \"$RX\" \"$(printf 'ser''ve')\" --addr 127.0.0.1:8787 --auth token "
                 // Full access：Android 无 bubblewrap 时 serve 会拒绝非受限运行
                 // （"shell sandbox requested but unavailable… refusing to run unconfined"），
                 // 显式 --permission-mode danger-full-access 选择非受限会话

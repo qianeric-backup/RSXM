@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.5.0 — REASONIX.md 破甲双载体）
-        versionCode 86
-        versionName "2.5.0"
+        // 版本随 GitHub Release 同步更新（当前 v2.6.0 — 品牌与软著命名体系）
+        versionCode 87
+        versionName "2.6.0"
     }
 
     buildTypes {

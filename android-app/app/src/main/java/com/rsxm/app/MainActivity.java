@@ -228,6 +228,7 @@ public class MainActivity extends Activity {
         findViewById(R.id.menu_update).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showUpdateResonixDialog(); });
         findViewById(R.id.menu_purge).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showPurgeDialog(); });
         findViewById(R.id.menu_aitest8).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAITest8Dialog(); });
+        findViewById(R.id.menu_vuln).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showVulnScanPanel(); });
         findViewById(R.id.menu_project).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showProjectDialog(); });
         findViewById(R.id.menu_sessions).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSessionsDialog(); });
         findViewById(R.id.menu_advanced).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdvancedDialog(); });
@@ -2521,7 +2522,525 @@ public class MainActivity extends Activity {
     /** purge 面板当前内容容器（页签切换/操作刷新用） */
     private LinearLayout purgeContentBox;
 
+    /* ==================== 漏洞扫描（CVE / CNVD 漏洞库 + 端口扫描 Banner 匹配） ====================
+     * 定位：最轻量渗透工具——不依赖 guest 内任何扫描器，纯宿主侧 Java TCP 探测。
+     * 漏洞库：内置种子（assets/security/vuln-seed.json，50 条常见高危，含精准产品指纹 keywords）
+     *        + 增量库 rootfs/root/.reasonix/rsxm-vuln/vuln-db.json（自动拉取 CVE/CNVD 追加）。
+     * 拉取源：CVE = NVD API v2.0（services.nvd.nist.gov，匿名限速 5s/请求，取最近 90 天高危）；
+     *        CNVD = 国家信息安全漏洞共享平台官网列表页（cookie 会话 + HTML 正则，失败降级）。
+     * 匹配：banner 字符串（SSH/HTTP/SMTP 等首行）对库内 keywords 做不区分大小写包含匹配。 */
+    private static final String[] VULN_COMMON_PORTS = {
+            "21", "22", "23", "25", "53", "80", "110", "135", "139", "143",
+            "443", "445", "993", "995", "1433", "1521", "3306", "3389", "5432", "5900",
+            "6379", "7001", "8000", "8080", "8443", "8888", "9000", "9092", "9200", "11211", "27017"};
+
+    private File vulnDbFile() {
+        return new File(new File(new File(getFilesDir(), "rootfs"), "root/.reasonix/rsxm-vuln"), "vuln-db.json");
+    }
+
+    /** 加载漏洞库：内置种子 + 增量库合并（按 id 去重，增量优先） */
+    private org.json.JSONArray loadVulnItems() {
+        org.json.JSONArray arr = new org.json.JSONArray();
+        java.util.Map<String, org.json.JSONObject> byId = new java.util.LinkedHashMap<>();
+        try (InputStream in = getAssets().open("security/vuln-seed.json")) {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            org.json.JSONArray seed = new org.json.JSONArray(bos.toString("UTF-8"));
+            for (int i = 0; i < seed.length(); i++) {
+                org.json.JSONObject o = seed.getJSONObject(i);
+                byId.put(o.optString("id", i + ""), o);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "vuln seed load failed", e);
+        }
+        File f = vulnDbFile();
+        if (f.exists()) {
+            try {
+                org.json.JSONArray inc = new org.json.JSONArray(
+                        new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
+                for (int i = 0; i < inc.length(); i++) {
+                    org.json.JSONObject o = inc.getJSONObject(i);
+                    byId.put(o.optString("id", "inc" + i), o);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "vuln db incremental load failed", e);
+            }
+        }
+        for (org.json.JSONObject o : byId.values()) arr.put(o);
+        return arr;
+    }
+
+    private String readVulnAsset(String asset) {
+        try (InputStream in = getAssets().open(asset)) {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            return bos.toString("UTF-8");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 单端口 TCP 探测：connect + 首行 banner（HTTP 主动发 HEAD，其余读问候） */
+    private String vulnProbe(String host, int port) {
+        try (java.net.Socket s = new java.net.Socket()) {
+            s.connect(new java.net.InetSocketAddress(host, port), 1200);
+            s.setSoTimeout(2000);
+            if (port == 80 || port == 8000 || port == 8080 || port == 8888 || port == 8443
+                    || port == 443 || port == 7001 || port == 9000) {
+                try {
+                    s.getOutputStream().write("HEAD / HTTP/1.0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                    s.getOutputStream().flush();
+                } catch (Exception ignored) {}
+            }
+            java.io.InputStream in = s.getInputStream();
+            byte[] buf = new byte[512];
+            int r = in.read(buf);
+            if (r <= 0) return null;
+            String b = new String(buf, 0, r, StandardCharsets.ISO_8859_1).trim();
+            return b.length() > 160 ? b.substring(0, 160) : b;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** banner 对库匹配：keywords 不区分大小写包含（命中返回条目列表） */
+    private java.util.List<org.json.JSONObject> vulnMatch(org.json.JSONArray db, String banner) {
+        java.util.List<org.json.JSONObject> hits = new java.util.ArrayList<>();
+        if (banner == null || banner.isEmpty()) return hits;
+        String low = banner.toLowerCase();
+        for (int i = 0; i < db.length(); i++) {
+            org.json.JSONObject o = db.optJSONObject(i);
+            if (o == null) continue;
+            org.json.JSONArray kws = o.optJSONArray("keywords");
+            if (kws == null) continue;
+            for (int j = 0; j < kws.length(); j++) {
+                String kw = kws.optString(j, "").toLowerCase();
+                if (!kw.isEmpty() && low.contains(kw)) {
+                    hits.add(o);
+                    break;
+                }
+            }
+        }
+        return hits;
+    }
+
+    /** 漏洞扫描入口：目标 + 端口（默认常用 31 端口），线程池并发探测，结果按端口排序渲染 */
+    private void vulnScan(String host, String portsCsv, TextView log, LinearLayout resultBox) {
+        final java.util.List<Integer> ports = new java.util.ArrayList<>();
+        for (String p : portsCsv.split("[,，\\s]+")) {
+            try {
+                int v = Integer.parseInt(p.trim());
+                if (v > 0 && v < 65536) ports.add(v);
+            } catch (Exception ignored) {}
+        }
+        if (ports.isEmpty()) {
+            log.append("\n✗ 端口列表无效（示例：80,443,8080）");
+            return;
+        }
+        new Thread(() -> {
+            final org.json.JSONArray db = loadVulnItems();
+            final java.util.Map<Integer, String> banners = new java.util.concurrent.ConcurrentHashMap<>();
+            final java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(40);
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(ports.size());
+            for (final int p : ports) {
+                pool.execute(() -> {
+                    try {
+                        String b = vulnProbe(host, p);
+                        if (b != null) banners.put(p, b);
+                    } catch (Exception ignored) {}
+                    latch.countDown();
+                });
+            }
+            try {
+                latch.await(60, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {}
+            pool.shutdownNow();
+            java.util.List<Integer> sorted = new java.util.ArrayList<>(banners.keySet());
+            java.util.Collections.sort(sorted);
+            final java.util.List<Integer> open = sorted;
+            final java.util.Map<Integer, String> bm = banners;
+            runOnUiThread(() -> {
+                resultBox.removeAllViews();
+                if (open.isEmpty()) {
+                    TextView tv = new TextView(MainActivity.this);
+                    tv.setText("未发现开放端口（共探测 " + ports.size() + " 个）");
+                    tv.setTextColor(0xFFAAAAAA);
+                    tv.setTextSize(12);
+                    tv.setPadding(dp(4), dp(6), dp(4), dp(6));
+                    resultBox.addView(tv);
+                    log.append("\n✓ 扫描完成：未发现开放端口");
+                    return;
+                }
+                log.append("\n✓ 扫描完成：" + host + " 开放 " + open.size() + " 个端口");
+                for (int p : open) {
+                    LinearLayout row = new LinearLayout(MainActivity.this);
+                    row.setOrientation(LinearLayout.VERTICAL);
+                    row.setBackgroundColor(0xFF141414);
+                    row.setPadding(dp(10), dp(8), dp(10), dp(8));
+                    LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    rlp.topMargin = dp(4);
+                    TextView head = new TextView(MainActivity.this);
+                    String b = bm.get(p);
+                    head.setText("端口 " + p + (b != null ? "　" + b : "（无 banner）"));
+                    head.setTextColor(0xFFFFFFFF);
+                    head.setTextSize(12);
+                    head.setTypeface(android.graphics.Typeface.MONOSPACE);
+                    row.addView(head);
+                    java.util.List<org.json.JSONObject> hits = vulnMatch(db, b);
+                    if (hits.isEmpty()) {
+                        TextView none = new TextView(MainActivity.this);
+                        none.setText("○ 库内无匹配条目");
+                        none.setTextColor(0xFF888888);
+                        none.setTextSize(11);
+                        row.addView(none);
+                    } else {
+                        for (org.json.JSONObject h : hits) {
+                            TextView tv = new TextView(MainActivity.this);
+                            tv.setText("● " + h.optString("id", "?") + " " + h.optString("name", "")
+                                    + " [" + h.optString("severity", "?") + "]");
+                            tv.setTextColor(0xFFE0E0E0);
+                            tv.setTextSize(11);
+                            row.addView(tv);
+                            TextView d = new TextView(MainActivity.this);
+                            d.setText("　" + h.optString("desc", ""));
+                            d.setTextColor(0xFF9BA6B4);
+                            d.setTextSize(11);
+                            row.addView(d);
+                        }
+                    }
+                    resultBox.addView(row, rlp);
+                }
+            });
+        }, "vuln-scan").start();
+    }
+
+    /** 拉取 CVE（NVD API v2.0，最近 90 天高危）与 CNVD（官网列表页），合并写入增量库 */
+    private void vulnUpdate(TextView log, TextView status) {
+        new Thread(() -> {
+            StringBuilder sb = new StringBuilder();
+            int cve = 0, cnvd = 0;
+            try {
+                cve = fetchNvdHighSeverity(sb);
+            } catch (Exception e) {
+                sb.append("\n✗ CVE 拉取失败：" + e.getClass().getSimpleName());
+            }
+            try {
+                cnvd = fetchCnvdRecent(sb);
+            } catch (Exception e) {
+                sb.append("\n✗ CNVD 拉取失败：" + e.getClass().getSimpleName());
+            }
+            final int fCve = cve, fCnvd = cnvd;
+            final String detail = sb.toString();
+            runOnUiThread(() -> {
+                log.append("\n✓ 漏洞库更新完成：新增 CVE " + fCve + " 条 / CNVD " + fCnvd + " 条");
+                log.append(detail.isEmpty() ? "" : detail);
+                status.setText("库条目：种子 50 + 增量（CVE " + fCve + " / CNVD " + fCnvd + "）");
+            });
+        }, "vuln-update").start();
+    }
+
+    /** NVD API：pubStartDate 最近 90 天，取 baseScore>=7.0 高危条目（匿名限速：两次调用间留 5s） */
+    private int fetchNvdHighSeverity(StringBuilder sb) throws Exception {
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        cal.add(java.util.Calendar.DAY_OF_YEAR, -90);
+        java.text.SimpleDateFormat fmt = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", java.util.Locale.US);
+        String start = fmt.format(cal.getTime());
+        String end = fmt.format(java.util.Calendar.getInstance().getTime());
+        String url = "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=2000&pubStartDate="
+                + java.net.URLEncoder.encode(start, "UTF-8")
+                + "&pubEndDate=" + java.net.URLEncoder.encode(end, "UTF-8");
+        String body = httpGet(url, null);
+        org.json.JSONObject root = new org.json.JSONObject(body);
+        org.json.JSONArray vuls = root.optJSONArray("vulnerabilities");
+        if (vuls == null) return 0;
+        org.json.JSONArray db = loadVulnItems();
+        java.util.Map<String, org.json.JSONObject> byId = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < db.length(); i++) {
+            org.json.JSONObject o = db.getJSONObject(i);
+            byId.put(o.optString("id", "x" + i), o);
+        }
+        int added = 0;
+        for (int i = 0; i < vuls.length(); i++) {
+            try {
+                org.json.JSONObject cve = vuls.getJSONObject(i).getJSONObject("cve");
+                String id = cve.optString("id", "");
+                if (id.isEmpty() || byId.containsKey(id)) continue;
+                double score = 0;
+                org.json.JSONObject metrics = cve.optJSONObject("metrics");
+                if (metrics != null) {
+                    org.json.JSONArray m31 = metrics.optJSONArray("cvssMetricV31");
+                    if (m31 != null && m31.length() > 0) {
+                        score = m31.getJSONObject(0).optJSONObject("cvssData").optDouble("baseScore", 0);
+                    }
+                    if (score == 0) {
+                        org.json.JSONArray m30 = metrics.optJSONArray("cvssMetricV30");
+                        if (m30 != null && m30.length() > 0) {
+                            score = m30.getJSONObject(0).optJSONObject("cvssData").optDouble("baseScore", 0);
+                        }
+                    }
+                }
+                if (score < 7.0) continue;
+                String name = id, desc = "";
+                org.json.JSONArray ds = cve.optJSONArray("descriptions");
+                if (ds != null && ds.length() > 0) {
+                    desc = ds.getJSONObject(0).optString("value", "");
+                    if (desc.length() > 240) desc = desc.substring(0, 240);
+                    name = desc.length() > 48 ? desc.substring(0, 48) : desc;
+                }
+                org.json.JSONObject item = new org.json.JSONObject();
+                item.put("id", id);
+                item.put("name", name);
+                item.put("severity", score >= 9.0 ? "Critical" : "High");
+                item.put("type", "CVE");
+                item.put("source", "nvd");
+                item.put("keywords", new org.json.JSONArray());
+                item.put("desc", desc);
+                byId.put(id, item);
+                added++;
+            } catch (Exception ignored) {}
+        }
+        persistVulnDb(byId);
+        sb.append("\n  NVD：拉取 " + vuls.length() + " 条，新增高危 " + added + " 条");
+        return added;
+    }
+
+    /** CNVD 官网列表页：cookie 会话 + 正则提取编号/标题/等级 */
+    private int fetchCnvdRecent(StringBuilder sb) throws Exception {
+        String cookie = "";
+        String first = httpGet("https://www.cnvd.org.cn/flaw/list?flag=true&max=50", null);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?i)set-cookie:\\s*([^;]+)").matcher(first);
+        if (m.find()) cookie = m.group(1);
+        String body = first;
+        if (!cookie.isEmpty()) {
+            body = httpGet("https://www.cnvd.org.cn/flaw/list?flag=true&max=50", cookie);
+        }
+        org.json.JSONArray db = loadVulnItems();
+        java.util.Map<String, org.json.JSONObject> byId = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < db.length(); i++) {
+            org.json.JSONObject o = db.getJSONObject(i);
+            byId.put(o.optString("id", "x" + i), o);
+        }
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                "href=\"/flaw/show/(CNVD-\\d{4}-\\d{4,})\"[^>]*>([^<]{2,80})<");
+        java.util.regex.Matcher pm = p.matcher(body);
+        int added = 0;
+        while (pm.find() && added < 100) {
+            String id = pm.group(1);
+            if (byId.containsKey(id)) continue;
+            String title = pm.group(2).trim();
+            org.json.JSONObject item = new org.json.JSONObject();
+            item.put("id", id);
+            item.put("name", title);
+            item.put("severity", "High");
+            item.put("type", "CNVD");
+            item.put("source", "cnvd");
+            item.put("keywords", new org.json.JSONArray());
+            item.put("desc", title);
+            byId.put(id, item);
+            added++;
+        }
+        persistVulnDb(byId);
+        sb.append("\n  CNVD：新增 " + added + " 条");
+        return added;
+    }
+
+    private void persistVulnDb(java.util.Map<String, org.json.JSONObject> byId) {
+        try {
+            File f = vulnDbFile();
+            f.getParentFile().mkdirs();
+            org.json.JSONArray arr = new org.json.JSONArray();
+            for (org.json.JSONObject o : byId.values()) arr.put(o);
+            java.nio.file.Files.write(f.toPath(), arr.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            Log.w(TAG, "vuln db persist failed", e);
+        }
+    }
+
+    /** 简易 HTTP GET（HttpURLConnection；返回 body 或抛出） */
+    private String httpGet(String urlStr, String cookie) throws Exception {
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(urlStr).openConnection();
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(15000);
+        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13) RSXM-VulnScan/2.8");
+        c.setRequestProperty("Accept", "application/json, text/html, */*");
+        if (cookie != null && !cookie.isEmpty()) c.setRequestProperty("Cookie", cookie);
+        int code = c.getResponseCode();
+        if (code != 200) throw new java.io.IOException("HTTP " + code);
+        try (InputStream in = c.getInputStream()) {
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            return bos.toString("UTF-8");
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    /** 漏洞扫描全屏面板（黑底白字；扫描区 + 漏洞情报区） */
+    private void showVulnScanPanel() {
+        hidePanel();
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(16));
+        panel.setBackgroundColor(0xFF0D0D0D);
+        // 头：标题 + 返回
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView title = new TextView(this);
+        title.setText("漏洞扫描（CVE / CNVD）");
+        title.setTextColor(0xFFFFFFFF);
+        title.setTextSize(16);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        head.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button close = new Button(this);
+        close.setText("返回");
+        close.setTextColor(0xFFFFFFFF);
+        close.setTextSize(13);
+        close.setAllCaps(false);
+        close.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF262626));
+        close.setOnClickListener(v -> hidePanel());
+        head.addView(close);
+        panel.addView(head);
+        // 目标输入
+        TextView tl = new TextView(this);
+        tl.setText("扫描目标（IP / 域名）");
+        tl.setTextColor(0xFFAAAAAA);
+        tl.setTextSize(12);
+        panel.addView(tl);
+        EditText hostInput = new EditText(this);
+        hostInput.setHint("如 192.168.1.1 或 example.com");
+        hostInput.setHintTextColor(0xFF707070);
+        hostInput.setTextColor(0xFFFFFFFF);
+        hostInput.setTextSize(13);
+        hostInput.setSingleLine(true);
+        hostInput.setBackgroundColor(0xFF1A1A1A);
+        hostInput.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout.LayoutParams hl = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hl.topMargin = dp(4);
+        panel.addView(hostInput, hl);
+        // 端口输入
+        TextView pl = new TextView(this);
+        pl.setText("端口（逗号分隔；留空用常用 31 端口）");
+        pl.setTextColor(0xFFAAAAAA);
+        pl.setTextSize(12);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.topMargin = dp(10);
+        panel.addView(pl, plp);
+        EditText portInput = new EditText(this);
+        portInput.setText(java.util.Arrays.toString(VULN_COMMON_PORTS).replaceAll("[\\[\\] ]", ""));
+        portInput.setHintTextColor(0xFF707070);
+        portInput.setTextColor(0xFFFFFFFF);
+        portInput.setTextSize(13);
+        portInput.setSingleLine(true);
+        portInput.setBackgroundColor(0xFF1A1A1A);
+        portInput.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout.LayoutParams pl2 = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        pl2.topMargin = dp(4);
+        panel.addView(portInput, pl2);
+        // 操作按钮行
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        Button scanBtn = new Button(this);
+        scanBtn.setText("开始扫描");
+        scanBtn.setTextColor(0xFFFFFFFF);
+        scanBtn.setTextSize(13);
+        scanBtn.setAllCaps(false);
+        scanBtn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF262626));
+        btns.addView(scanBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button updBtn = new Button(this);
+        updBtn.setText("更新漏洞库");
+        updBtn.setTextColor(0xFFFFFFFF);
+        updBtn.setTextSize(13);
+        updBtn.setAllCaps(false);
+        updBtn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF262626));
+        LinearLayout.LayoutParams ul = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        ul.leftMargin = dp(6);
+        btns.addView(updBtn, ul);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(10);
+        panel.addView(btns, blp);
+        // 库状态
+        final TextView status = new TextView(this);
+        status.setText("漏洞库：内置种子 50 条 + 增量（扫描匹配 / 情报浏览）");
+        status.setTextColor(0xFF9BA6B4);
+        status.setTextSize(11);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = dp(8);
+        panel.addView(status, slp);
+        // 结果区（滚动）
+        TextView rl = new TextView(this);
+        rl.setText("扫描结果");
+        rl.setTextColor(0xFFAAAAAA);
+        rl.setTextSize(12);
+        LinearLayout.LayoutParams rll = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rll.topMargin = dp(10);
+        panel.addView(rl, rll);
+        LockedScrollView scroll = new LockedScrollView(this);
+        LinearLayout resultBox = new LinearLayout(this);
+        resultBox.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(resultBox, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams scp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        scp.topMargin = dp(4);
+        panel.addView(scroll, scp);
+        // 日志区
+        final TextView log = new TextView(this);
+        log.setTextColor(0xFFD0D0D0);
+        log.setTextSize(11);
+        log.setTypeface(android.graphics.Typeface.MONOSPACE);
+        log.setBackgroundColor(0xFF0B0B0B);
+        log.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(110));
+        llp.topMargin = dp(6);
+        panel.addView(log, llp);
+        log.append("就绪：内置种子 50 条；「更新漏洞库」拉取 NVD(CVE) + CNVD。\n");
+        scanBtn.setOnClickListener(v -> {
+            String host = hostInput.getText().toString().trim();
+            if (host.isEmpty()) {
+                log.append("\n✗ 请先填写扫描目标");
+                return;
+            }
+            String portsCsv = portInput.getText().toString().trim();
+            if (portsCsv.isEmpty()) {
+                StringBuilder sb = new StringBuilder();
+                for (String p : VULN_COMMON_PORTS) sb.append(p).append(',');
+                portsCsv = sb.toString();
+            }
+            scanBtn.setEnabled(false);
+            scanBtn.setText("扫描中…");
+            log.append("\n→ 扫描 " + host + "（" + portsCsv.split("[,，\\s]+").length + " 端口）…");
+            vulnScan(host, portsCsv, log, resultBox);
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                    () -> { scanBtn.setEnabled(true); scanBtn.setText("开始扫描"); }, 70000);
+        });
+        updBtn.setOnClickListener(v -> {
+            updBtn.setEnabled(false);
+            updBtn.setText("更新中…");
+            log.append("\n→ 拉取 NVD(CVE) + CNVD 漏洞库…（NVD 匿名限速，约 5-30 秒）");
+            vulnUpdate(log, status);
+            new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+                    () -> { updBtn.setEnabled(true); updBtn.setText("更新漏洞库"); }, 120000);
+        });
+        showPanel("漏洞扫描", panel, null);
+    }
+
     /* ==================== AI 破甲工具箱（AITEST8 融合，桌面版 v8.1.5 重构） ==================== */
+
     private static final String AITEST8_VER = "8.1.5";
     private static final String AITEST8_CHANNEL = "正式版";
     private static final String AITEST8_CONTACT = "@sifthost";
@@ -7533,7 +8052,10 @@ public class MainActivity extends Activity {
         try {
             // 1) 先解到 app 私有目录（必然可写）：既是复制的源，也让 root 回退路径有源文件可用
             File staged = new File(getFilesDir(), "reasonix.staged");
-            extractAssetXz("usr/bin/reasonix.xz", staged);   // asset 为 xz（轻量化），解压后 49545378 字节
+            // staged 缓存：同一 APK 内已解压过则跳过（xz 解压 49.5MB 约数秒，重复部署/启动提速）
+            if (!(staged.exists() && staged.length() == BUNDLED_REASONIX_BYTES)) {
+                extractAssetXz("usr/bin/reasonix.xz", staged);   // asset 为 xz（轻量化），解压后 49545378 字节
+            }
             staged.setReadable(true, false);      // root 回退时 su 进程需要能读它
             boolean ok = false;
             try {

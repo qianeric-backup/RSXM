@@ -365,7 +365,20 @@
                         android:gravity="center_vertical"
                         android:paddingLeft="16dp"
                         android:text="AI 破甲工具箱"
-                        android:textColor="#36F29A"
+                        android:textColor="#FFFFFF"
+                        android:textSize="15sp"
+                        android:drawablePadding="12dp" />
+
+                    <TextView
+                        android:id="@+id/menu_vuln"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="#141414"
+                        android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="漏洞扫描"
+                        android:textColor="#FFFFFF"
                         android:textSize="15sp"
                         android:drawablePadding="12dp" />
 

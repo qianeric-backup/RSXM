@@ -1,6 +1,6 @@
-# 小乘佛众 AI 渗透测试工具（RSXM）
+# RSXM AI 渗透测试工具
 
-> 开发者昵称「小乘佛众，岁月如歌」；定位：最轻量 AI 渗透（安全测试）工具 APK。 V2.0.0（原 Reasonix Proot App）
+> 定位：最轻量 AI 渗透（安全测试）工具 APK。 V2.0.0（原 Reasonix Proot App）
 
 在 **Android 上通过 proot 运行 Alpine Linux 环境**，打开应用默认进入 **RSXM 原生 GUI 会话界面**（Reasonix AI 编码助手，可切换回 CLI 终端）的 APK 工程。
 
@@ -49,7 +49,9 @@
 - **离线打包**：Alpine rootfs、proot、reasonix、xterm.js 与 DS2API 全部内置，首次启动解压后无需网络（reasonix 调用 API / DS2API 连接 DeepSeek 时才需联网）。
 - **手机存储访问**：guest 内 `/sdcard` 直接映射手机共享存储；首次启动引导"所有文件访问"授权（授权后自动重启环境生效），并可读写宿主 app 私有数据（`/host-data`）与只读系统分区（`/host/system` 等）。
 - **bash 兼容**：Alpine 无 bash，内置 `bash → busybox ash(sh)` 包装，reasonix 的 shell 命令可直接执行；同时关闭 reasonix 的 OS 沙箱（Android 无 bubblewrap）。
-- **品牌与命名体系（v2.7.0，软著适配）**：应用显示名「小乘佛众 AI 渗透」（Manifest label）；软件全称「小乘佛众 AI 渗透测试工具软件」（品牌词取开发者昵称，分类号 30200-0000，版本 V2.7.0）；功能模块规范命名对照（破甲中心→提示词工程与能力增强中心 / dsh purge→AI 代理安全策略配置台 / AITEST8→AI 开发工具集成套件 / ADB-ROOT→设备调试与系统管理 / 共享技能池→技能资产管理中心 / 会话 serve→智能体会话服务）。完整申请材料见 `docs/软著申请材料-小乘佛众AI渗透测试工具.md`，可直接用于中国版权保护中心（上海代办处）登记。
+- **漏洞扫描（v2.8.0）**：侧滑菜单新增「漏洞扫描」面板——纯宿主侧 Java TCP 端口探测（常用 31 端口可自定义，并发 40 线程）+ Banner 抓取 + 本地漏洞库指纹匹配，不依赖终端内扫描器；漏洞库内置 50 条常见高危种子（assets/security/vuln-seed.json，含精准产品指纹），一键自动拉取 CVE（NVD API v2.0 最近 90 天高危）与 CNVD（官网列表页）增量入库（rootfs/root/.reasonix/rsxm-vuln/vuln-db.json，按 id 去重持久化）；NVD 匿名限速 5s/请求，CNVD 失败自动降级不影响 CVE 源。另修复菜单残留品牌绿（XML 未纳入全局颜色统一，现为黑底白字）。
+- **命名体系（v2.8.0，软著适配）**：应用显示名回到 **RSXM**（Manifest label）；软件全称「RSXM AI 渗透测试工具软件」（分类号 30200-0000，版本 V2.8.0）；功能模块规范命名对照（破甲中心→提示词工程与能力增强中心 / dsh purge→AI 代理安全策略配置台 / AITEST8→AI 开发工具集成套件 / ADB-ROOT→设备调试与系统管理 / 共享技能池→技能资产管理中心 / 会话 serve→智能体会话服务 / 漏洞扫描→漏洞扫描与漏洞库）。完整申请材料见 `docs/软著申请材料-RSXM-AI渗透测试工具.md`，可直接用于中国版权保护中心（上海代办处）登记。
+- **最轻量化（v2.7.0）**：reasonix 运行时（49.5MB）与 pty-bridge（1.5MB）改以 xz 压缩内置（`org.tukaani:xz` 纯 Java 流式解压，部署时解压、字节校验不变），安装包 34.1MB → **28.5MB（-16.4%）**；v2.8.0 增加 staged 缓存（同一 APK 内已解压则跳过，重复部署/启动省一次 49.5MB 解压）。
 - **最轻量化（v2.7.0）**：reasonix 运行时（49.5MB）与 pty-bridge（1.5MB）改以 xz 压缩内置（`org.tukaani:xz` 纯 Java 流式解压，部署时解压、字节校验不变），安装包 34.1MB → **28.5MB（-16.4%）**；解压产物逐字节校验通过（49545378 / 1501112 字节与内置版本一致）。
 - **破甲环境（内置）**：应用启动时自动把 infinite-gen-4 v0.4.0-hardened 破甲系统提示词注入 reasonix 的 `~/.reasonix/config.toml`（`[agent] system_prompt` 键，幂等标记 `RSXM_ARMOR_V2`），并同步为全局 skill `rsxm-break-armor`（`~/.reasonix/skills/`）与全局指令（`AGENTS.md` 追加说明）——任何项目/任何会话下 AI 都携带该行为框架（来源 `assets/break-armor-prompt.md`，每次启动自动刷新；**内容锚点自愈**：`escape-clause free kernel` 锚点缺失即强制重注入，防 reasonix 更新重写 config 或旧版浅内容残留导致破甲失效）。**REASONIX.md 双载体（v2.5.0）**：破甲内核同时写入 reasonix 原生 standing instructions 位——全局 `~/.reasonix/REASONIX.md`（User global docs）+ 项目 `/root/REASONIX.md`（serve 以 `cd /root` 启动 → project docs）——内容每轮折入系统提示词前缀（cache-stable），权威高于任何会话内容；独立于 config 文件，reasonix TUI `/config` 编辑或用户覆盖 system_prompt 时 REASONIX.md 仍兜底生效。状态判定升级为「config 标记 OR 任一 REASONIX.md 锚点」，一键部署/还原均双载体同步。
 - **破甲内核（内置插件）**：应用启动时把 `dsh-infinite-gen-4` v0.4.1（`assets/dsh-infinite-gen-4.tar`，贡献 4 个 prompt）部署到 guest 的 `~/.reasonix/plugins/dsh-infinite-gen-4`，并在 `~/.reasonix/plugin-packages.json` 登记为 `enabled` —— 等价于桌面端的「本地目录安装」（目录 + `reasonix-plugin.json` 清单 + 登记项），随 APK 升级自动覆盖刷新（幂等标记 `~/.reasonix/.rsxm-plugin-dsh-infinite-gen-4.ver` = 插件版本@APK 版本）。**chroot 模式 / rootfs 内 `.reasonix` 属主为 root 时 app 写不进去**：解压、登记、标记三步都回退到 `su`（root 不可用时，serve 诊断卡片显示失败原因）。

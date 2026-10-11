@@ -1,0 +1,1560 @@
+RSXM AI 渗透测试工具软件 V2.8.0                     第 1 页
+────────────────────────────────────────────────────────────────
+        try {
+            String su = findSuPath();
+            if (su != null) {
+                Process p = new ProcessBuilder(su, "-c",
+                        // 同上一处：方括号防止 pkill -f 匹配到执行本命令的 shell 自身
+                        "pkill -9 -f '[e]ntry.sh' 2>/dev/null; "
+                                + "pkill -9 -f '[p]ty-bridge' 2>/dev/null; "
+                                + "pkill -9 -f '[p]root.so' 2>/dev/null; "
+                                + "pkill -9 -f '[r]easonix.bin' 2>/dev/null; true")
+                        .redirectErrorStream(true).start();
+                if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroy();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "cleanup orphan guests failed", e);
+        }
+    }
+
+    /** 项目元数据目录权限归一：proot/chroot 运行模式切换后 projects 下项目目录 owner 不一致
+     *  （chroot 创建的为 root 属主 700，proot 下 guest root=app uid 无 CAP_FOWNER 无法 chmod，
+     *   reasonix 创建 sessions 报 permission denied）。环境启动前用真实 root 统一放开读写权限。 */
+    private void normalizeProjectPerms() {
+        try {
+            File rootfs = new File(getFilesDir(), "rootfs");
+            String r = rootfs.getAbsolutePath();
+            String su = findSuPath();
+            if (su != null) {
+                Process p = new ProcessBuilder(su, "-c",
+                        "chmod -R a+rwx " + r + "/root/.reasonix/projects/ 2>/dev/null")
+                        .redirectErrorStream(true).start();
+                if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroy();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "normalize project perms failed", e);
+        }
+    }
+
+    private void startProot(File files, File rootfs) throws IOException {
+        // 防重复启动：环境已在运行时直接跳过（onCreate 已 kill 旧环境，此为双保险；
+        // 后台运行模式复用场景 environmentStarted=true 已挡在启动前）
+        if (sProotProcess != null && sProotProcess.isAlive()) {
+            Log.d(TAG, "proot already running, skip start");
+            return;
+        }
+        // 启动前清理孤儿 guest 进程 + 归一项目元数据权限（真实 root）
+        cleanupOrphanGuests();
+        normalizeProjectPerms();
+        // chroot 模式：root 直接 chroot 进 rootfs（无 ptrace/seccomp 层，进程为 ksu(root) 域，
+        // enforcing 下 JVM/apk 均正常，无需 setenforce 0）。无 root 时回退 proot。
+        if (isChrootMode()) {
+            String su = findSuPath();
+RSXM AI 渗透测试工具软件 V2.8.0                     第 2 页
+────────────────────────────────────────────────────────────────
+            if (su == null) {
+                Log.w(TAG, "chroot requires root, fallback to proot");
+                getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("run_mode", "proot").apply();
+            } else {
+                startChroot(su, rootfs);
+                return;
+            }
+        }
+        // SELinux 只允许 app 执行 APK native libs 目录（apk_data_file）里的 ELF，
+        // 因此 proot、libtalloc、libandroid-shmem、loader 全部打包在 jniLibs，
+        // 经 useLegacyPackaging 解压到 nativeLibraryDir 后从这里直接执行。
+        // rootfs 内的 guest 二进制（busybox/pty-bridge/reasonix）由 proot 的
+        // loader 机制读取装载，不走宿主 execve，天然绕过该限制。
+        String nativeLibDir = getApplicationInfo().nativeLibraryDir;
+        String proot = nativeLibDir + "/proot.so";
+        // 自检：native 库缺失多为安装时解压失败（部分厂商安装器/流式安装不解压 lib）。
+        // 有 root 时自动从 APK 提取并修复（复制 + chcon 回 apk_data_file 域，否则 SELinux 拒绝执行）
+        if (!new File(proot).exists()) {
+            boolean repaired = tryRepairNativeLib(nativeLibDir, getApplicationInfo().sourceDir);
+            if (!repaired) {
+                // 首次失败多为 KernelSU/Magisk 授权弹窗尚未确认（授权前 su 对应用不可见）。
+                // 等待授权：su 可见后立即重试；若 su 一直不可见（无 root 设备）快速退出，
+                // 避免长时间阻塞启动
+                for (int i = 0; i < 6 && !repaired; i++) {
+                    try { Thread.sleep(6000); } catch (InterruptedException e) { break; }
+                    if (findSuPath() == null) break;   // 无 root，退出重试
+                    Log.d(TAG, "su now visible, retry native lib repair");
+                    repaired = tryRepairNativeLib(nativeLibDir, getApplicationInfo().sourceDir);
+                }
+            }
+            if (repaired) {
+                Log.d(TAG, "native lib auto-repaired, continue start");
+                pushOutput("\r\n[native 库缺失，已通过 root 自动修复，正在启动...]\r\n");
+            } else {
+                // 无 root：首次引导覆盖安装；若已引导过一次仍缺失（如 vivo/iQOO 安装器
+                // 不解压 native lib），不再重复弹窗（防无限循环），给出明确处理指引
+                SharedPreferences p = getSharedPreferences("prefs", MODE_PRIVATE);
+                if (!p.getBoolean("reinstall_prompted", false)) {
+                    p.edit().putBoolean("reinstall_prompted", true).apply();
+                    promptReinstallForNativeLib();
+                } else {
+                    pushOutput("\r\n[native 库缺失：已尝试覆盖安装但未生效（该手机安装器可能不解压 native 库）。\r\n"
+                            + "请用电脑 adb install --no-streaming 安装本 APK，或用有 root 的设备自动修复]\r\n");
+                }
+                return;
+            }
+        } else {
+            // 启动正常：清除重装引导标记
+            getSharedPreferences("prefs", MODE_PRIVATE)
+                    .edit().putBoolean("reinstall_prompted", false).apply();
+RSXM AI 渗透测试工具软件 V2.8.0                     第 3 页
+────────────────────────────────────────────────────────────────
+        }
+        List<String> cmd = new ArrayList<>();
+        cmd.add(proot);
+        cmd.add("-0");                                   // 伪装 root（Alpine 文件属主为 root）
+        cmd.add("-r"); cmd.add(rootfs.getAbsolutePath()); // 新根目录
+        cmd.add("-b"); cmd.add("/dev");                  // 绑定宿主设备（PTY 需要 /dev/ptmx）
+        cmd.add("-b"); cmd.add("/proc");
+        cmd.add("-b"); cmd.add("/sys");
+        cmd.add("-b"); cmd.add("/storage/emulated/0:/sdcard"); // 手机共享存储
+        // 沙箱增强：绑定宿主 app 私有数据目录（可读写）与宿主只读系统分区（放宽读访问）
+        cmd.add("-b"); cmd.add("/data/data/" + getPackageName() + ":/host-data");
+        String ownAndroidData = "/storage/emulated/0/Android/data/" + getPackageName();
+        if (new File(ownAndroidData).exists()) {
+            cmd.add("-b"); cmd.add(ownAndroidData + ":/sdcard/Android/data/" + getPackageName());
+        }
+        String[] hostRo = {"/system", "/product", "/apex"};
+        for (String h : hostRo) {
+            if (new File(h).exists()) {
+                cmd.add("-b"); cmd.add(h + ":/host" + h);
+            }
+        }
+        cmd.add("-w"); cmd.add("/root");                 // 初始工作目录
+        cmd.add("/bin/sh"); cmd.add("-c"); cmd.add("/usr/bin/pty-bridge /bin/sh /root/entry.sh");
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(true);
+        // proot 需要 execve 它的 loader；loader 放在 nativeLibraryDir（apk_data_file，
+        // 允许 exec）。PROOT_LOADER 让 proot 直接使用外部 loader（不提取到 TMPDIR，
+        // 提取位置若在 app_data_file 会被 SELinux 拒绝执行）。
+        // PROOT_TMP_DIR 指向可写目录（proot 的宿主侧临时文件），filesDir 可写。
+        pb.environment().put("PROOT_LOADER", nativeLibDir + "/loader.so");
+        pb.environment().put("TMPDIR", nativeLibDir);
+        pb.environment().put("PROOT_TMP_DIR", files.getAbsolutePath());
+        sProotProcess = pb.start();
+        sProcIn = sProotProcess.getOutputStream();
+        startRootPolling();   // 启动 root 命令桥轮询（guest root <cmd> → app su 执行）
+        startEnvReader(sProotProcess);
+    }
+
+    /**
+     * chroot 模式启动：su(root) 直接 chroot 进 rootfs。
+     * 绑定宿主 /dev（ptmx 保留宿主 SELinux 类型）+ 挂 devpts（pty 终端）+ proc/sys，
+     * chroot 运行 pty-bridge → entry.sh，退出后清理挂载。
+     * chroot 进程为 ksu(root) 域：JVM(mprotect RWX)/apk(link) 在 enforcing 下均可，
+     * 保持 SELinux 开启（无需 setenforce 0）。
+     */
+    private void startChroot(String su, File rootfs) throws IOException {
+        String r = rootfs.getAbsolutePath();
+        // 绑定宿主 /dev + devpts + proc + sys + 手机存储 /storage/emulated/0 → /sdcard
+        // （不绑 /sdcard 时 chroot 内 /sdcard 是 rootfs 内的空目录，手机目录创建的文件
+        //   在文件管理器看不到——与 proot 的 -b /storage/emulated/0:/sdcard 对齐）
+RSXM AI 渗透测试工具软件 V2.8.0                     第 4 页
+────────────────────────────────────────────────────────────────
+        String script = "mkdir -p " + r + "/dev/pts " + r + "/proc " + r + "/sys " + r + "/sdcard; "
+                + "mount --bind /dev " + r + "/dev 2>/dev/null; "
+                + "mount -t devpts -o gid=5,mode=620 devpts " + r + "/dev/pts 2>/dev/null; "
+                + "mount --bind /proc " + r + "/proc 2>/dev/null; "
+                + "mount --bind /sys " + r + "/sys 2>/dev/null; "
+                + "mount --bind /storage/emulated/0 " + r + "/sdcard 2>/dev/null; "
+                + "chroot " + r + " /usr/bin/pty-bridge /bin/sh /root/entry.sh; RC=$?; "
+                + "umount " + r + "/dev/pts 2>/dev/null; umount " + r + "/dev 2>/dev/null; "
+                + "umount " + r + "/proc 2>/dev/null; umount " + r + "/sys 2>/dev/null; "
+                + "umount " + r + "/sdcard 2>/dev/null; exit $RC";
+        ProcessBuilder pb = new ProcessBuilder(su, "-c", script);
+        pb.redirectErrorStream(true);
+        pb.environment().put("RSXM_CHROOT", "1");
+        Log.d(TAG, "chroot started via " + su);
+        sProotProcess = pb.start();
+        sProcIn = sProotProcess.getOutputStream();
+        startRootPolling();
+        startEnvReader(sProotProcess);
+    }
+
+    /** 启动环境输出 reader：把进程 stdout 转发到终端（proot/chroot 共用）。
+     *  用 CharsetDecoder 增量解码：按块 new String(buf,0,n,UTF_8) 会把多字节 UTF-8
+     *  字符在块边界截断成 U+FFFD 乱码（中文/emoji 显示混乱的根本原因）。 */
+    /** 增量 UTF-8 解码器（v2.0.25 修复中文乱码的根因）：跨读块保留不完整多字节序列。
+     *  旧实现单参 dec.decode(ByteBuffer) 是「一次性完整解码」便捷方法——每次调用
+     *  会 reset 解码器状态，多字节字符恰在读块边界被切开时仍解析成 U+FFFD
+     *  （此前注释声称已修复，实际修复无效）。 */
+    private static final class Utf8StreamDecoder {
+        private final java.nio.charset.CharsetDecoder dec = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE);
+        private byte[] carry = new byte[0];
+
+        /** 喂入一块新数据；endOfInput=true 时冲刷残留（流结束时调用） */
+        String feed(byte[] buf, int n, boolean endOfInput) {
+            try {
+                byte[] all = new byte[carry.length + n];
+                System.arraycopy(carry, 0, all, 0, carry.length);
+                System.arraycopy(buf, 0, all, carry.length, n);
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(all);
+                StringBuilder out = new StringBuilder();
+                java.nio.CharBuffer cb = java.nio.CharBuffer.allocate(512);
+                while (bb.hasRemaining()) {
+                    java.nio.charset.CoderResult r = dec.decode(bb, cb, endOfInput);
+                    cb.flip();
+                    out.append(cb);
+                    cb.clear();
+                    if (r.isUnderflow()) break;
+                    if (r.isMalformed() || r.isUnmappable()) r.throwException(); // REPLACE 下不会触发
+                }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 5 页
+────────────────────────────────────────────────────────────────
+                int rem = bb.remaining();
+                carry = new byte[rem];
+                System.arraycopy(all, bb.position(), carry, 0, rem);
+                return out.toString();
+            } catch (Exception e) {
+                return "";
+            }
+        }
+    }
+
+    private void startEnvReader(Process p) {
+        // reader 绑定启动时刻的进程（局部捕获），避免重启环境后读到新进程的流
+        Thread reader = new Thread(() -> {
+            try (InputStream in = p.getInputStream()) {
+                Utf8StreamDecoder dec = new Utf8StreamDecoder();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    String chunk = dec.feed(buf, n, false);
+                    if (!chunk.isEmpty()) pushOutput(chunk);
+                }
+                // 冲刷解码器残留（流结束时补出末尾字符）
+                String tail = dec.feed(new byte[0], 0, true);
+                if (!tail.isEmpty()) pushOutput(tail);
+            } catch (IOException e) {
+                Log.w(TAG, "reader ended", e);
+            }
+            // 环境被主动替换/重启（killProotTree → 新进程）时不输出误导性退出消息
+            if (sProotProcess == p) {
+                pushOutput("\r\n[Linux 环境已退出]\r\n");
+            }
+        }, "env-reader");
+        reader.setDaemon(true);
+        reader.start();
+    }
+
+    // ------------------------------------------------------------------
+    // 工具方法
+    // ------------------------------------------------------------------
+
+    private void extractAsset(String assetPath, File dest) throws IOException {
+        dest.getParentFile().mkdirs();
+        try (InputStream in = getAssets().open(assetPath);
+             FileOutputStream out = new FileOutputStream(dest)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 6 页
+────────────────────────────────────────────────────────────────
+    }
+
+    /** 解包 assets 内 .xz 压缩单文件到目标（reasonix/pty-bridge 轻量化存储，部署时流式解压） */
+    private void extractAssetXz(String asset, File dest) throws IOException {
+        dest.getParentFile().mkdirs();
+        try (InputStream in = getAssets().open(asset);
+             org.tukaani.xz.XZInputStream xz = new org.tukaani.xz.XZInputStream(in);
+             FileOutputStream out = new FileOutputStream(dest)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = xz.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        }
+    }
+
+    /** 持续排水读取进程输出直到 EOF，限时 waitSec 秒；超时杀进程。返回全部输出（截断到 16KB）。
+     *  修复模式：waitFor 前必须排空管道，否则输出超过管道缓冲（64KB）时子进程写阻塞卡死。 */
+    private static String drainProcessOutput(Process p, int waitSec) {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        try (InputStream in = p.getInputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                if (bos.size() >= 16 * 1024) break;   // 上限：日志足够，防内存膨胀
+            }
+        } catch (Exception ignored) {}
+        try {
+            if (!p.waitFor(waitSec, TimeUnit.SECONDS)) p.destroy();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            p.destroy();
+        }
+        String s = bos.toString();
+        return s.length() > 16 * 1024 ? s.substring(0, 16 * 1024) : s;
+    }
+
+    /** 执行命令并把输出转发到终端；非零退出码抛异常 */
+    private void runCmd(String... cmd) throws IOException {        Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+        try (InputStream in = p.getInputStream()) {
+            Utf8StreamDecoder dec = new Utf8StreamDecoder();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                String chunk = dec.feed(buf, n, false);
+                if (!chunk.isEmpty()) pushOutput(chunk);
+            }
+            String tail = dec.feed(new byte[0], 0, true);
+            if (!tail.isEmpty()) pushOutput(tail);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 7 页
+────────────────────────────────────────────────────────────────
+        }
+        int code;
+        try {
+            // 限时等待（v2.0.25：根fs 解压等被调命令挂起时不得永久阻塞环境启动线程）
+            if (!p.waitFor(180, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                code = -1;
+            } else {
+                code = p.exitValue();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            p.destroyForcibly();
+            code = -1;
+        }
+        if (code != 0) {
+            throw new IOException("命令失败(exit=" + code + "): " + String.join(" ", cmd));
+        }
+    }
+
+    /** 把文本追加到 xterm.js 终端（任意线程可调）；同时输出到 logcat 便于调试。
+     *  输出转发到当前活动实例 sCurrent：后台 reader 线程在 Activity 重建后
+     *  仍能把环境输出送到新实例的终端；无活动实例时直接丢弃（避免旧实例被
+     *  daemon reader 长期持有无法 GC）。 */
+    /** 后台期间缓存终端输出（WebView JS 后台暂停，直接 evaluateJavascript 会堆积阻塞
+     *  → PTY 缓冲满 → reasonix 写阻塞超时 → 一直 retrying）；前台恢复时一次冲刷。
+     *  上限 4MB：AI 长回复/长输出在后台期间不被截断；超出仍清空兜底防无限增长。 */
+    private static final StringBuilder sPendingOutput = new StringBuilder();
+    private static final int PENDING_OUTPUT_CAP = 4 * 1024 * 1024;   // 4MB 保护
+    private static final int FLUSH_CHUNK = 512 * 1024;               // 冲刷分块，防 WebView 卡顿
+    private static volatile boolean sWebActive = true;
+
+    /** 原生会话视图（对话模式）：打开时接管显示，WebView 隐藏；关闭时还原 */
+    private volatile boolean nativeViewOn = false;
+    // ==================== 原生会话视图（GUI）：内容来自 serve 的 transcript 投影 ====================
+    //
+    // 唯一数据来源是 serve 的「transcript 投影」契约（Transcript v2 / ChatSource，与官方桌面版
+    // 及 TUI 同源——TUI 只是这份投影的一个渲染器，见 reasonix 内嵌文档 TRANSCRIPT_PROJECTION.md）：
+    //   GET  /transcript/follow    SSE 长连接：首帧 snapshot（全量窗口），后续帧 changes（增量）
+    //   GET  /transcript/snapshot  一次性快照（进入视图时拉一次）
+    //   POST /submit  /cancel  /new
+    //
+    // 旧的「PTY 字节流剥离 TUI 装饰」「会话 jsonl 增量解析」「/events + /history 文本拼接」三条通道
+    // 全部删除：前两条拿到的本就是 TUI 渲染后的屏幕内容（边框/光标定位/状态行混入回显，即看到的
+    // “混乱”），第三条只有整段纯文本、分不出消息/工具/思考。transcript record 自带
+    // role / content / toolCalls / execution，结构化渲染即可，终端字节一律不再进 GUI。
+
+    /** transcript 跟随客户端（SSE 长连接 + 断线重连） */
+    private volatile TranscriptClient transcript;
+    /** serve 引擎 / transcript 流是否在线 */
+RSXM AI 渗透测试工具软件 V2.8.0                     第 8 页
+────────────────────────────────────────────────────────────────
+    private volatile boolean serveOnline = false;
+    /** 当前会话模型引用（provider/model），取自 /status，用于 AI 气泡标签 */
+    private volatile String serveModelRef = "";
+
+    /** recordId → 气泡控件（同一 record 流式更新时原地更新，不重复插入） */
+    private final java.util.Map<String, BubbleView> recordViews =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** toolCallId → 调用（name/arguments）：给 role=tool 的记录附上参数 */
+    private final java.util.Map<String, TranscriptRecord.Call> callIndex =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** messageId → 流式正文缓冲（event 增量；对应 record 到达后以 record 为准） */
+    private final java.util.Map<String, StringBuilder> streamBuf =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 已渲染记录的最大 order（用于判断新记录是否追加在末尾） */
+    private long transcriptLastOrder = -1;
+    /** 当前 transcript 会话标识（identity.sessionId）；变化时基线必须重建列表 */
+    private volatile String transcriptSessionId = "";
+    /** 上一帧的运行态（用于在回合结束时对齐一次基线：增量形式变化时兜底保证最终内容正确） */
+    private volatile boolean transcriptRunning = false;
+    /** 最近一次渲染的窗口内容签名（基线重复到达时跳过整表 setText，避免空转卡顿） */
+    private String transcriptWindowSig = "";
+    /** 最近一次内置 reasonix 部署失败原因（null = 成功/未尝试；诊断卡片会显示） */
+    private volatile String reasonixDeployError = null;
+    /** 本地即时回显的 user 气泡（服务端 user record 到达后移除，避免重复） */
+    private volatile BubbleView pendingUserBubble;
+    private volatile String pendingUserText = "";
+
+    /** 生成进行中：发送后按钮切「停止」；turn_done / runtime_state(running=false) 复位 */
+    private volatile boolean genInFlight = false;
+    /** 用户正在触摸翻阅消息列表：置位期间暂停「自动滚到底部」抢占（v2.0.23 修复无法回看） */
+    private volatile boolean userScrolling = false;
+    private long lastUserScrollAt = 0;
+    private static final String BTN_SEND = "发送";
+    private static final String BTN_STOP = "⏹ 停止";
+    /** 高级设置面板内的动态标签控件引用（状态刷新用；面板关闭后为 null） */
+    private TextView advancedBgLabel;
+    private TextView advancedYoloLabel;
+    private TextView advancedSpeedLabel;
+
+    private void pushOutput(String text) {
+        Log.d(TAG, "OUT> " + (text.length() > 200 ? text.substring(0, 200) : text));
+        final MainActivity target = sCurrent;
+        if (target == null) return;
+        // 原生视图的内容全部来自 serve 的 transcript 投影（record 级结构化）：终端字节流
+        // （边框/光标定位/整屏重绘）一律不再进 GUI；要看 TUI 原文切到终端视图即可。
+        if (target.nativeViewOn) return;
+        if (!sWebActive) {
+            synchronized (sPendingOutput) {
+                if (sPendingOutput.length() > PENDING_OUTPUT_CAP) sPendingOutput.setLength(0);
+                sPendingOutput.append(text);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 9 页
+────────────────────────────────────────────────────────────────
+            }
+            return;
+        }
+        target.ui.post(() -> {
+            if (target.webView == null) return;
+            target.webView.evaluateJavascript("window.onTermData(" + jsQuote(text) + ")", null);
+        });
+    }
+
+    // ---------------- serve 接入（启动 / transcript 跟随 / 快照） ----------------
+
+    /** serve 引擎启动/探测进行中（防「重启」并发启动多个实例） */
+    private volatile boolean serveStarting = false;
+
+    // ------------------------------------------------------------------
+    // serve 看门狗：切到其他 app（或被系统回收/冻结）后，服务掉了也能自己回来
+    // ------------------------------------------------------------------
+
+    /** 看门狗探测间隔：环境在跑时每 20 秒确认一次 serve 在线（一次 GET /status，开销极小） */
+    private static final long SERVE_WATCHDOG_MS = 20000;
+    /** 看门狗两次自动重启的最小间隔：serve 自身起不来时不要每 20 秒密集重启 */
+    private static final long SERVE_RESTART_MIN_GAP_MS = 15000;
+    /** 单次自动启动的尝试次数：环境刚重启时 guest 内 .adb-cmd 执行服务可能还没就绪，命令会落空 */
+    private static final int SERVE_START_ATTEMPTS = 2;
+    private boolean watchdogOn = false;
+    private volatile long serveRestartAt = 0;
+    /** 看门狗的连续失败次数（掉线重启仍在掉 → 指数拉长重启间隔，避免刷诊断卡片与反复重启 guest 命令） */
+    private int serveRestartFails = 0;
+
+    private final Runnable serveWatchdogTask = new Runnable() {
+        @Override public void run() {
+            if (!watchdogOn) return;
+            try {
+                probeServeAlive();
+            } catch (Exception e) {
+                Log.w(TAG, "serve watchdog failed", e);
+            }
+            if (watchdogOn) ui.postDelayed(this, SERVE_WATCHDOG_MS);
+        }
+    };
+
+    /** 启动 serve 看门狗（幂等）：环境就绪 / Activity 复用环境时调用 */
+    private void startServeWatchdog() {
+        if (watchdogOn) return;
+        watchdogOn = true;
+        ui.postDelayed(serveWatchdogTask, SERVE_WATCHDOG_MS);
+        Log.d(TAG, "serve watchdog started");
+    }
+
+    private void stopServeWatchdog() {
+RSXM AI 渗透测试工具软件 V2.8.0                     第 10 页
+────────────────────────────────────────────────────────────────
+        watchdogOn = false;
+        ui.removeCallbacks(serveWatchdogTask);
+    }
+
+    /**
+     * serve 健康检查（宿主侧 GET /status，3 秒超时）：不在线就拆掉旧的 transcript 客户端并
+     * 重新拉起引擎 —— 这是"切到其他 app 再回来 serve 还在"的兜底。
+     *
+     * <p>首次启动仍由 {@link #ensureServeStarted()} 负责（带启动重试与诊断卡片）；
+     * 这里只做周期探测 + 掉线重启，并用最小重启间隔防抖动。
+     */
+    private void probeServeAlive() {
+        if (!environmentStarted || !watchdogOn || serveStarting) return;
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            if (client.isUp()) {
+                serveOnline = true;
+                serveRestartFails = 0;      // 恢复正常：退避窗口复位
+                return;
+            }
+            // 连续掉线时把重启间隔指数拉长（15s → 30s → 60s → 120s 封顶）：
+            // serve 自身起不来（如缺 API Key）时不要每 20 秒重启一次、每 20 秒刷一张诊断卡片。
+            long gap = Math.min(SERVE_RESTART_MIN_GAP_MS << Math.min(serveRestartFails, 3), 120_000L);
+            long now = System.currentTimeMillis();
+            if (now - serveRestartAt < gap) return;
+            serveRestartAt = now;
+            serveRestartFails = Math.min(serveRestartFails + 1, 4);
+            Log.w(TAG, "serve watchdog: /status 不可达（连续 " + serveRestartFails
+                    + " 次），自动重启引擎；下次最早 "
+                    + Math.min(SERVE_RESTART_MIN_GAP_MS << Math.min(serveRestartFails, 3), 120_000L) / 1000
+                    + " 秒后");
+            stopTranscriptFollow();     // 旧客户端还在重连，先拆掉；ensureServeStarted 会重新接上
+            ui.post(this::ensureServeStarted);
+        }, "serve-probe").start();
+    }
+
+    /** 确保 serve 引擎在线并接上 transcript 跟随流（环境就绪后调用；幂等） */
+    private void ensureServeStarted() {
+        if (transcript != null && transcript.isRunning()) return;
+        if (serveStarting) return;
+        serveStarting = true;
+        new Thread(() -> {
+            ReasonixServe client = serveClient();
+            String diag = "";
+            boolean up;
+            try {
+                if (!client.isUp()) {
+                    // 先确保 guest 内是内置版本 reasonix（写死参数的前提），再启动
+                    ensureBundledReasonixDeployed(new File(getFilesDir(), "rootfs"));
+                    String token = ReasonixServe.readToken(getFilesDir());
+RSXM AI 渗透测试工具软件 V2.8.0                     第 11 页
+────────────────────────────────────────────────────────────────
+                    if (token.isEmpty()) token = ReasonixServe.generateToken();
+                    // 宿主侧同步写一份 token（chroot 模式 root 属主时此步可能失败，靠 guest 侧兜底）
+                    writeServeToken(token);
+                    // 退避重试：环境刚（重）启动时 guest 内的 .adb-cmd 执行服务往往还没就绪，
+                    // 启动命令会落空 —— 只尝试一次的话就是"打开了但 serve 不在线、只能手动点重启"。
+                    for (int attempt = 0; attempt < SERVE_START_ATTEMPTS && !client.isUp(); attempt++) {
+                        if (attempt > 0) {
+                            try { Thread.sleep(3000L * attempt); } catch (InterruptedException e) { break; }
+                        }
+                        diag = executeInGuest(serveLaunchCommand(token), 15);
+                        for (int i = 0; i < 15 && !client.isUp(); i++) {
+                            try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                        }
+                    }
+                }
+                up = client.isUp();
+                if (up) serveModelRef = parseServeModel(client.status());
+            } catch (Exception e) {
+                up = false;
+                diag = "启动异常：" + e;
+            }
+            serveStarting = false;
+            serveOnline = up;
+            if (up) serveRestartFails = 0;   // 起来了：看门狗的退避窗口复位
+            final boolean fUp = up;
+            final String fDiag = diag;
+            ui.post(() -> {
+                TextView info = findViewById(R.id.native_session_info);
+                if (info != null) {
+                    info.setText(fUp ? "会话：reasonix serve 引擎" : "会话：serve 未在线（点此重启）");
+                    info.setOnClickListener(fUp ? null : v -> restartServeEngine());
+                }
+                if (fUp) {
+                    setNativeStatus("");
+                    startTranscriptFollow();
+                    loadTranscriptSnapshot();
+                } else {
+                    setNativeStatus("serve 未启动：诊断见下方（点顶部「会话」可重启）");
+                    showServeFailureDiagnostics(fDiag);
+                }
+            });
+        }, "serve-ensure").start();
+    }
+
+    /**
+     * 写 serve token 的宿主侧副本。
+     *
+     * <p>权限必须收成 {@code 600}：serve 会拒绝 group/world 可读的 token 文件并直接退出
+     * （实测报错 {@code token file ... must not be group/world accessible (chmod 600)}），
+     * 而 {@code printf > file} / {@code Files.write} 在默认 umask 下是 644。
+RSXM AI 渗透测试工具软件 V2.8.0                     第 12 页
+────────────────────────────────────────────────────────────────
+     * guest 侧启动命令里另有一道 {@code chmod 600} 兜底（proot 下两边是同一个文件）。
+     */
+    private void writeServeToken(String token) {
+        try {
+            java.nio.file.Path tp =
+                    new File(getFilesDir(), "rootfs/root/.rsxm-serve-token").toPath();
+            java.nio.file.Files.write(tp, (token + "\n").getBytes(StandardCharsets.UTF_8));
+            try {
+                java.nio.file.Files.setPosixFilePermissions(tp,
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+            } catch (Exception ignored) {}   // 文件系统不支持 POSIX 权限时忽略（guest 侧还有 chmod）
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * 停止 serve 的 guest 命令：只按 serve 自己写的 pid 文件精准 kill。
+     *
+     * <p>**不要**改回 {@code pkill -f 'reasonix.*[s]erve'}：本方法产出的启动命令里同时含有
+     * {@code command -v reasonix} 与字面 {@code "$RX" serve}，于是 {@code pkill -f} 的
+     * 整条命令行匹配会命中**它自己所在的 sh 进程**（{@code [s]erve} 那个防自匹配技巧只在
+     * 命令行里没有别的 "serve" 文本时才成立），命令会把自己 TERM 掉 —— 表现就是
+     * 「token 写入了、但没有日志、没有端口文件、命令无输出」，v2.2.1 及以前从未启动成功过。
+     */
+    private String serveStopCommand() {
+        return "if [ -s " + ReasonixServe.PID_FILE_GUEST + " ]; then kill \"$(cat "
+                + ReasonixServe.PID_FILE_GUEST + ")\" 2>/dev/null; sleep 0.5; fi; "
+                // 兜底：没有 pid 文件时（旧版、异常退出、进过 TUI 的残留）按可执行文件名清理，
+                // 否则残留进程占着 8787 会让新实例绑定失败。方括号避免匹配到本命令自身。
+                // 必须匹配 reasonix serve 与 reasonix.bin serve（wrapper exec 后 argv 是 .bin）：
+                // 旧模式 '[r]easonix serve' 匹配不到 .bin，残留进程会让 bind: address already in use。
+                + "pkill -f 'reasonix.*[s]erve' 2>/dev/null; "
+                + "rm -f " + ReasonixServe.PORT_FILE_GUEST;
+    }
+
+    /**
+     * guest 内启动 serve 的命令（GUI 自动启动与 Serve 面板「启动」按钮共用同一份）。
+     *
+     * <p>参数**写死**，前提是启动前已由 {@link #ensureBundledReasonixDeployed} 确保 guest 内
+     * 就是内置版本（1.39.3，支持这一整套 flag）。这里**绝不做** version / `serve --help` 之类的探测：
+     * 老版本 reasonix 会把不认识的子命令当成任务提示直接起会话，命令替换会挂住 → 整条命令超时，
+     * 后续的 nohup 与日志重定向全都不执行（实测症状：`(执行超时)` + 无日志 + 无端口文件）。
+     */
+    private String serveLaunchCommand(String token) {
+        return "printf '%s\\n' '" + sq(token) + "' > " + ReasonixServe.TOKEN_FILE_GUEST
+                // serve 拒绝 group/world 可读的 token 文件（默认 umask 下是 644），必须先收紧
+                + "; chmod 600 " + ReasonixServe.TOKEN_FILE_GUEST
+                + "; " + serveStopCommand() + "; "
+                + "cd /root; "
+                // reasonix / serve 用 printf 拼接，使 sh -c 执行载体 cmdline 不含连续
+                // "reasonix"/"serve" 字面——否则 serveStopCommand 的 pkill -f 'reasonix.*[s]erve'
+RSXM AI 渗透测试工具软件 V2.8.0                     第 13 页
+────────────────────────────────────────────────────────────────
+                // 会把正在执行本命令的 sh 自身杀掉（命令链中断 → serve 起不来）。
+                + "RXN=$(printf 'rea''sonix'); RX=$(command -v \"$RXN\" 2>/dev/null || echo /usr/local/bin/\"$RXN\"); "
+                // 纯变量展开，不执行外部命令（诊断卡片里能看到实际跑的是哪一份）
+                + "echo \"[rsxm] RX=$RX\"; "
+                + "nohup \"$RX\" \"$(printf 'ser''ve')\" --addr 127.0.0.1:8787 --auth token "
+                // Full access：Android 无 bubblewrap 时 serve 会拒绝非受限运行
+                // （"shell sandbox requested but unavailable… refusing to run unconfined"），
+                // 显式 --permission-mode danger-full-access 选择非受限会话
+                + "--permission-mode danger-full-access "
+                + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
+                + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
+                + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "
+                // 无浏览器环境：不带 --no-open 时 serve 会尝试打开 Web UI（guest 内无 xdg-open）
+                + "--no-open </dev/null >" + ReasonixServe.LOG_FILE_GUEST
+                + " 2>&1 & echo SERVE_STARTED";
+    }
+
+    /** 点顶部「会话」：强制重启 serve 引擎（停旧实例 → 重新探测/启动 → 重接 transcript） */
+    private void restartServeEngine() {
+        showToast("正在重启 serve 引擎…");
+        stopTranscriptFollow();
+        new Thread(() -> {
+            executeInGuest(serveStopCommand() + "; echo KILLED", 8);
+            ui.post(this::ensureServeStarted);
+        }, "serve-restart").start();
+    }
+
+    /** 读 guest 内 serve 日志尾部（proot 模式 /root 映射到宿主 rootfs/root） */
+    private String readGuestServeLogTail(int maxLines) {
+        File f = new File(new File(new File(getFilesDir(), "rootfs"), "root"), ".rsxm-serve.log");
+        if (!f.exists()) {
+            return "(日志文件不存在：guest 内 " + ReasonixServe.LOG_FILE_GUEST + " 未生成 —— "
+                    + "多半是启动命令没被执行，检查 .adb-cmd 执行服务是否在运行)";
+        }
+        try {
+            String all = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            String[] lines = all.split("\n", -1);
+            int from = Math.max(0, lines.length - maxLines);
+            StringBuilder sb = new StringBuilder();
+            for (int i = from; i < lines.length; i++) {
+                String ln = lines[i];
+                if (ln.length() > 300) ln = ln.substring(0, 300) + "…";
+                sb.append(ln).append('\n');
+            }
+            String s = sb.toString().trim();
+            return s.isEmpty() ? "(日志为空)" : s;
+        } catch (Exception e) {
+            return "(读日志失败：" + e + ")";
+        }
+    }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 14 页
+────────────────────────────────────────────────────────────────
+
+    /** 在会话列表顶部插一张可复制的诊断卡片（标题 + 等宽正文 + 复制按钮） */
+    private void appendDiagnosticCard(String titleText, String body) {
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        Log.w(TAG, titleText + "\n" + body);
+        final String text = titleText + "\n" + body;
+
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.topMargin = dp(6);
+        wrap.setLayoutParams(wlp);
+
+        TextView title = new TextView(this);
+        title.setText(titleText);
+        title.setTextColor(0xFFFFB86C);
+        title.setTextSize(12);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        wrap.addView(title);
+
+        TextView bodyView = new TextView(this);
+        bodyView.setText(body);
+        bodyView.setTextColor(0xFF8B949E);
+        bodyView.setTextSize(11);
+        bodyView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        bodyView.setBackgroundColor(0xFF11161C);
+        bodyView.setPadding(dp(8), dp(6), dp(8), dp(6));
+        wrap.addView(bodyView);
+
+        Button copyBtn = createDarkButton("复制诊断");
+        copyBtn.setTextSize(12);
+        copyBtn.setOnClickListener(v -> {
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                        getSystemService(CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("serve-diag", text));
+                    showToast("诊断信息已复制");
+                }
+            } catch (Exception e) {
+                showToast("复制失败：" + e);
+            }
+        });
+        wrap.addView(copyBtn);
+
+        list.addView(wrap, 0);
+        autoScrollBottom(true);
+    }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 15 页
+────────────────────────────────────────────────────────────────
+
+    /** serve 未在线：把启动命令返回 + 端口/token + 日志尾部渲染成可复制的诊断卡片 */
+    private void showServeFailureDiagnostics(String execOut) {
+        appendDiagnosticCard("⚠ serve 引擎未在线（可复制下方诊断信息反馈）",
+                reasonixDeployInfo()
+                        + (pluginDeployError == null ? "" : "内置插件部署失败：" + pluginDeployError + "\n")
+                        + "启动命令返回：" + (execOut == null || execOut.isEmpty() ? "(无)" : execOut) + "\n"
+                        + "端口文件读值：" + ReasonixServe.readBoundPort(getFilesDir())
+                        + "（-1 = 未写入 " + ReasonixServe.PORT_FILE_GUEST + "）\n"
+                        + "token：" + (ReasonixServe.readToken(getFilesDir()).isEmpty() ? "(空)" : "(已写入)") + "\n"
+                        + "── " + ReasonixServe.LOG_FILE_GUEST + "（尾部）──\n" + readGuestServeLogTail(25));
+    }
+
+    /**
+     * 建立 transcript 跟随流（幂等：重复调用先停旧的；断线由客户端自行重连并重取基线）。
+     * reasonix 1.38/1.39 无 /transcript 契约（实测回退 Web UI HTML）时，客户端自动切
+     * /events 通道：事件帧仅作刷新触发，GUI 走 /history 全量渲染（refreshFromHistory）。
+     */
+    private void startTranscriptFollow() {
+        int port = ReasonixServe.readBoundPort(getFilesDir());
+        if (port <= 0) port = 8787;
+        String token = ReasonixServe.readToken(getFilesDir());
+        TranscriptClient c = new TranscriptClient("http://127.0.0.1:" + port, token,
+                new TranscriptClient.Listener() {
+                    @Override
+                    public void onBaseline(org.json.JSONObject frame) {
+                        serveOnline = true;
+                        if (frame.optBoolean("__fallbackBaseline", false)) {
+                            ui.post(MainActivity.this::refreshFromHistory);
+                        } else {
+                            ui.post(() -> applyTranscriptBaseline(frame));
+                        }
+                    }
+
+                    @Override
+                    public void onDelta(org.json.JSONObject frame) {
+                        if (frame.optBoolean("__fallbackEvent", false)) {
+                            ui.post(MainActivity.this::refreshFromHistory);
+                        } else {
+                            ui.post(() -> applyTranscriptDelta(frame));
+                        }
+                    }
+
+                    @Override
+                    public void onConnection(boolean connected, String detail) {
+                        serveOnline = connected;
+                        ui.post(() -> setNativeStatus(connected ? ""
+                                : ((detail == null || detail.isEmpty()) ? "会话流中断，正在重连…"
+                                : detail + "，正在重连…")));
+                    }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 16 页
+────────────────────────────────────────────────────────────────
+                });
+        transcript = c;
+        c.start();
+    }
+
+    private void stopTranscriptFollow() {
+        TranscriptClient c = transcript;
+        transcript = null;
+        if (c != null) c.stop();
+    }
+
+    /** 从 /status JSON 宽松取模型引用（键名在不同版本可能不同） */
+    private String parseServeModel(String statusJson) {
+        if (statusJson == null || statusJson.isEmpty()) return "";
+        String[] keys = {"model", "modelRef", "model_ref", "defaultModel", "default_model", "label"};
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(statusJson);
+            for (String k : keys) {
+                String v = o.optString(k, "");
+                if (!v.isEmpty()) return v;
+            }
+            org.json.JSONObject rt = o.optJSONObject("runtimeState");
+            if (rt != null) {
+                for (String k : keys) {
+                    String v = rt.optString(k, "");
+                    if (!v.isEmpty()) return v;
+                }
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
+    /** 同步拉一次 /transcript/snapshot 渲染（进入视图 / 新会话后调用；窗口比 follow 首帧更大）。
+     *  快照不可用（无 /transcript 契约）时回退 /history 渲染（/events 通道由跟随流负责刷新）。 */
+    private void loadTranscriptSnapshot() {
+        new Thread(() -> {
+            int port = ReasonixServe.readBoundPort(getFilesDir());
+            if (port <= 0) port = 8787;
+            TranscriptClient c = new TranscriptClient("http://127.0.0.1:" + port,
+                    ReasonixServe.readToken(getFilesDir()), null);
+            final org.json.JSONObject snap = c.fetchSnapshot(8000);
+            if (snap == null) {
+                refreshFromHistory();   // 无 /transcript 契约（v1.38/1.39 实测）→ /history 渲染
+                return;
+            }
+            org.json.JSONObject frame = new org.json.JSONObject();
+            try {
+                frame.put("protocolVersion", snap.optInt("protocolVersion", 2));
+                frame.put("snapshot", snap);
+            } catch (Exception ignored) {}
+RSXM AI 渗透测试工具软件 V2.8.0                     第 17 页
+────────────────────────────────────────────────────────────────
+            ui.post(() -> applyTranscriptBaseline(frame));
+        }, "transcript-snapshot").start();
+    }
+
+    /** /events 回退通道：拉 /history 全量渲染（整表重建，简单可靠；事件帧仅作刷新触发）。
+     *  /history 返回 [{role, content}...]（含 system；渲染时过滤）。 */
+    private void refreshFromHistory() {
+        new Thread(() -> {
+            try {
+                ReasonixServe client = serveClient();
+                if (client == null) return;
+                String body = client.history();
+                if (body == null) return;
+                final org.json.JSONArray arr = new org.json.JSONArray(body);
+                ui.post(() -> renderHistoryMessages(arr));
+            } catch (Exception e) {
+                Log.w(TAG, "refreshFromHistory failed", e);
+            }
+        }, "serve-history").start();
+    }
+
+    /** /history 消息数组 → 气泡列表（user 右对齐蓝底 / assistant 左对齐；过滤 system 默认说明） */
+    private void renderHistoryMessages(org.json.JSONArray arr) {
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        int n = arr.length();
+        if (n == 0) return;
+        // 整表重建（fallback 通道无 record 索引；历史较短，重建成本可忽略）
+        list.removeAllViews();
+        resetTranscriptView();
+        for (int i = 0; i < n; i++) {
+            org.json.JSONObject m = arr.optJSONObject(i);
+            if (m == null) continue;
+            String role = m.optString("role", "");
+            String content = m.optString("content", "");
+            if (content.isEmpty()) continue;
+            if ("system".equals(role)) continue;    // 系统提示词不展示
+            TranscriptRecord r = new TranscriptRecord();
+            r.role = role;
+            r.content = content;
+            r.id = "h" + i;
+            BubbleView bv = createBubble(r);
+            list.addView(bv.wrap);
+        }
+        setBubbleCount(list.getChildCount());
+        updateSessionInfoCount(list.getChildCount());
+        autoScrollBottom(true);
+        setGenInFlight(false);
+        setNativeStatus("");
+    }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 18 页
+────────────────────────────────────────────────────────────────
+
+    // ---------------- transcript 投影 → 气泡 ----------------
+
+    /** 清空会话视图与全部索引（新会话 / 重绘前调用） */
+    private void resetTranscriptView() {
+        recordViews.clear();
+        callIndex.clear();
+        streamBuf.clear();
+        transcriptLastOrder = -1;
+        transcriptSessionId = "";
+        transcriptWindowSig = "";
+        pendingUserBubble = null;
+        pendingUserText = "";
+    }
+
+    /**
+     * 基线帧（含 snapshot 窗口）：会话未变时按 record id 合并（follow 首帧的窗口比
+     * /transcript/snapshot 小，直接重建会把已加载的更早历史截短），会话变化时整表重建。
+     */
+    private void applyTranscriptBaseline(org.json.JSONObject frame) {
+        org.json.JSONObject snap = frame.optJSONObject("snapshot");
+        if (snap == null) snap = frame;
+        java.util.List<TranscriptRecord> recs =
+                TranscriptRecord.parseArray(snap.optJSONArray("records"));
+        java.util.Collections.sort(recs, (a, b) -> Long.compare(a.order, b.order));
+
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        org.json.JSONObject identity = snap.optJSONObject("identity");
+        String sid = (identity == null) ? "" : identity.optString("sessionId", "");
+        boolean sameSession = !sid.isEmpty() && sid.equals(transcriptSessionId);
+        if (!sameSession) {
+            list.removeAllViews();
+            resetTranscriptView();
+            transcriptSessionId = sid;
+        }
+        // 内容未变的重复基线（follow 收尾重连 / 空闲轮询）直接跳过，避免整表 setText
+        StringBuilder sig = new StringBuilder();
+        for (TranscriptRecord r : recs) {
+            sig.append(r.order).append(':').append(r.role).append(':')
+                    .append(r.content == null ? 0 : r.content.hashCode()).append(':')
+                    .append(r.execState).append(':').append(r.calls.size()).append(';');
+        }
+        String sigStr = sig.toString();
+        if (sameSession && sigStr.equals(transcriptWindowSig)) {
+            applyTranscriptRuntime(snap.optJSONObject("runtime"));
+            return;
+        }
+        transcriptWindowSig = sigStr;
+
+RSXM AI 渗透测试工具软件 V2.8.0                     第 19 页
+────────────────────────────────────────────────────────────────
+        // 合并窗口时，比当前最早记录还早的记录要依次前插（保持 order 升序）
+        int prependCursor = 0;
+        for (TranscriptRecord r : recs) {
+            boolean earlier = r.order >= 0 && transcriptLastOrder >= 0
+                    && r.order < transcriptLastOrder && !recordViews.containsKey(r.key());
+            upsertRecordView(list, r, earlier ? prependCursor++ : -1);
+        }
+        setBubbleCount(list.getChildCount());
+        updateSessionInfoCount(list.getChildCount());
+        if (sameSession) {
+            autoScrollBottom(false);
+        } else {
+            autoScrollBottom(true);
+        }
+        applyTranscriptRuntime(snap.optJSONObject("runtime"));
+    }
+
+    /** 增量帧：changes[]（缺省时帧自身）里的 records / event / runtime */
+    private void applyTranscriptDelta(org.json.JSONObject frame) {
+        if (frame.optBoolean("resetRequired", false)) {
+            loadTranscriptSnapshot();       // 服务端要求重同步：重新取基线
+            return;
+        }
+        org.json.JSONArray changes = frame.optJSONArray("changes");
+        if (changes != null && changes.length() > 0) {
+            for (int i = 0; i < changes.length(); i++) {
+                org.json.JSONObject ch = changes.optJSONObject(i);
+                if (ch != null) applyTranscriptChange(ch);
+            }
+        } else {
+            applyTranscriptChange(frame);
+        }
+    }
+
+    /** 单个增量（delta）：先落记录，再处理事件与运行态 */
+    private void applyTranscriptChange(org.json.JSONObject ch) {
+        if (ch.optBoolean("resetRequired", false)) {
+            loadTranscriptSnapshot();
+            return;
+        }
+        LinearLayout list = findViewById(R.id.native_output);
+        org.json.JSONArray recs = ch.optJSONArray("records");
+        if (list != null && recs != null && recs.length() > 0) {
+            java.util.List<TranscriptRecord> parsed = TranscriptRecord.parseArray(recs);
+            java.util.Collections.sort(parsed, (a, b) -> Long.compare(a.order, b.order));
+            for (TranscriptRecord r : parsed) upsertRecordView(list, r);
+            setBubbleCount(list.getChildCount());
+            autoScrollBottom(false);
+        }
+        org.json.JSONObject ev = ch.optJSONObject("event");
+RSXM AI 渗透测试工具软件 V2.8.0                     第 20 页
+────────────────────────────────────────────────────────────────
+        if (ev != null) applyTranscriptEvent(ev);
+        org.json.JSONObject rt = ch.optJSONObject("runtime");
+        if (rt != null) applyTranscriptRuntime(rt);
+    }
+
+    /** 事件：驱动状态行/按钮；若服务端在事件里带增量文本则走流式正文 */
+    private void applyTranscriptEvent(org.json.JSONObject ev) {
+        String kind = ev.optString("kind", "");
+        if ("turn_started".equals(kind) || "turn_phase".equals(kind)) {
+            setNativeStatus("思考中…");
+        } else if ("turn_done".equals(kind) || "message/complete".equals(kind)
+                || "message/interrupted".equals(kind)) {
+            setGenInFlight(false);
+            setNativeStatus("");
+            loadTranscriptSnapshot();   // 回合结束对齐一次基线（增量缺失也能拿到最终内容）
+            return;
+        } else if ("tool_dispatch".equals(kind) || "tool_progress".equals(kind)) {
+            setNativeStatus("执行中…");
+        }
+        // 只在「明确的流式事件」上取增量文本：其余事件的字段含义不同，误取会重复入流
+        boolean textish = kind.isEmpty() || "text".equals(kind) || "reasoning".equals(kind)
+                || "stream_attempt".equals(kind) || "message".equals(kind);
+        if (!textish) return;
+        String messageId = ev.optString("messageId", "");
+        String text = firstString(ev, "text", "delta");
+        if (text.isEmpty()) {
+            org.json.JSONObject sa = ev.optJSONObject("streamAttempt");
+            if (sa != null) {
+                if (messageId.isEmpty()) messageId = sa.optString("messageId", "");
+                text = firstString(sa, "text", "delta");
+            }
+        }
+        if (!text.isEmpty()) appendStreamDelta(messageId, text);
+    }
+
+    /** 流式正文增量：先累加到缓冲；对应 record 落定后由 record 内容覆盖 */
+    private void appendStreamDelta(String messageId, String delta) {
+        String key = messageId.isEmpty() ? "__stream" : ("m:" + messageId);
+        StringBuilder buf = streamBuf.get(key);
+        if (buf == null) {
+            buf = new StringBuilder();
+            streamBuf.put(key, buf);
+        }
+        buf.append(delta);
+
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        BubbleView bv = recordViews.get(key);
+        if (bv == null) {
+            bv = createBubble(streamRecord(key));
+RSXM AI 渗透测试工具软件 V2.8.0                     第 21 页
+────────────────────────────────────────────────────────────────
+            recordViews.put(key, bv);
+            list.addView(bv.wrap);
+            setBubbleCount(list.getChildCount());
+        }
+        bv.body.setText(buf.toString());
+        autoScrollBottom(false);
+    }
+
+    /** 临时流式气泡的占位 record（正式 record 到达后原地替换） */
+    private TranscriptRecord streamRecord(String key) {
+        TranscriptRecord r = new TranscriptRecord();
+        r.id = key;
+        r.role = "assistant";
+        r.messageId = key.startsWith("m:") ? key.substring(2) : "";
+        return r;
+    }
+
+    /** 运行态（runtime）：running/activity 驱动状态行与按钮 */
+    private void applyTranscriptRuntime(org.json.JSONObject rt) {
+        if (rt == null || !rt.has("running")) return;
+        boolean running = rt.optBoolean("running", false);
+        if (running) {
+            String act = rt.optString("activity", "");
+            setNativeStatus("working".equals(act) ? "执行中…" : "思考中…");
+        } else {
+            setGenInFlight(false);
+            setNativeStatus("");
+            if (transcriptRunning) loadTranscriptSnapshot();   // 回合刚结束：对齐一次基线
+        }
+        transcriptRunning = running;
+    }
+
+    private void upsertRecordView(LinearLayout list, TranscriptRecord r) {
+        upsertRecordView(list, r, -1);
+    }
+
+    /**
+     * 记录 → 视图：同 id 原地更新；新 id 追加（insertIndex &gt;= 0 时插到该位置，
+     * 供"补插更早历史"使用，避免前插导致顺序反转）。
+     */
+    private void upsertRecordView(LinearLayout list, TranscriptRecord r, int insertIndex) {
+        if (r.isAssistant()) indexCalls(r);
+        String key = r.key();
+        BubbleView bv = recordViews.get(key);
+        if (bv == null) {
+            if (!r.messageId.isEmpty()) streamBuf.remove("m:" + r.messageId);
+            bv = createBubble(r);
+            recordViews.put(key, bv);
+            if (insertIndex >= 0 && insertIndex <= list.getChildCount()) {
+                list.addView(bv.wrap, insertIndex);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 22 页
+────────────────────────────────────────────────────────────────
+            } else {
+                list.addView(bv.wrap);
+            }
+            setBubbleCount(list.getChildCount());
+        }
+        updateBubble(bv, r, this.callIndex);
+        if (r.order > transcriptLastOrder) transcriptLastOrder = r.order;
+
+        // 服务端回显的 user record 到达后，移除本地即时回显的临时气泡（避免重复两条）
+        if (r.isUser()) {
+            BubbleView pend = pendingUserBubble;
+            if (pend != null && (pendingUserText.isEmpty() || pendingUserText.equals(r.content)
+                    || r.content.startsWith(pendingUserText) || pendingUserText.startsWith(r.content))) {
+                list.removeView(pend.wrap);
+                pendingUserBubble = null;
+                pendingUserText = "";
+                setBubbleCount(list.getChildCount());
+            }
+        }
+    }
+
+    /** toolCallId → 调用参数（tool 记录自身不带参数，需从 assistant 记录关联） */
+    private void indexCalls(TranscriptRecord r) {
+        for (TranscriptRecord.Call c : r.calls) {
+            if (!c.id.isEmpty()) callIndex.put(c.id, c);
+        }
+    }
+
+    /** 把 record 内容写进气泡（同一 record 流式更新时同样走这里，原地覆盖） */
+    private void updateBubble(BubbleView bv, TranscriptRecord r,
+                              java.util.Map<String, TranscriptRecord.Call> calls) {
+        if (r.isUser()) {
+            bv.body.setText(r.content);
+            return;
+        }
+        if (r.isNotice()) {
+            bv.body.setText(r.content);
+            return;
+        }
+        if (r.isAssistant()) {
+            StringBuilder sb = new StringBuilder(r.content == null ? "" : r.content);
+            for (TranscriptRecord.Call c : r.calls) {
+                if (sb.length() > 0) sb.append("\n");
+                sb.append("▸ ").append(c.resolvedName.isEmpty() ? c.name : c.resolvedName);
+                String a = summarizeToolArgs(c.arguments);
+                if (!a.isEmpty()) sb.append("  ").append(a);
+            }
+            bv.body.setText(sb.toString());
+            return;
+        }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 23 页
+────────────────────────────────────────────────────────────────
+        if (r.isTool()) {
+            TranscriptRecord.Call call = r.toolCallId.isEmpty() ? null : calls.get(r.toolCallId);
+            String name = !r.toolName.isEmpty() ? r.toolName
+                    : (call == null ? "" : (call.resolvedName.isEmpty() ? call.name : call.resolvedName));
+            StringBuilder sb = new StringBuilder();
+            sb.append("▸ ").append(name.isEmpty() ? "tool" : name);
+            if (call != null) {
+                String a = summarizeToolArgs(call.arguments);
+                if (!a.isEmpty()) sb.append("  ").append(a);
+            }
+            if (!r.execState.isEmpty() && !"completed".equals(r.execState)) {
+                sb.append("  [").append(r.execState).append("]");
+            }
+            String out = r.content == null ? "" : r.content;
+            if (out.length() > 4000) out = out.substring(0, 4000) + "\n…（输出已截断）";
+            if (!out.isEmpty()) sb.append("\n").append(out);
+            if (!r.error.isEmpty()) sb.append("\n[错误] ").append(r.error);
+            bv.body.setText(sb.toString());
+        }
+    }
+
+    /** 宽松按键取第一个非空字符串 */
+    private static String firstString(org.json.JSONObject o, String... keys) {
+        for (String k : keys) {
+            String v = o.optString(k, "");
+            if (v != null && !v.isEmpty()) return v;
+        }
+        return "";
+    }
+
+    /** 工具参数摘要：`{"command":"ls -1"}` → `ls -1`（其余 JSON 原样截断） */
+    private static String summarizeToolArgs(String args) {
+        if (args == null || args.isEmpty()) return "";
+        try {
+            org.json.JSONObject o = new org.json.JSONObject(args);
+            for (String k : new String[]{"command", "cmd", "path", "file_path", "pattern", "query", "url", "prompt"}) {
+                String v = o.optString(k, "");
+                if (!v.isEmpty()) return v;
+            }
+        } catch (Exception ignored) {}
+        return args.length() > 200 ? args.substring(0, 200) + "…" : args;
+    }
+
+    /** 会话信息行：serve 在线时显示当前渲染的记录数（让"有没有数据"一眼可见） */
+    private void updateSessionInfoCount(int n) {
+        TextView info = findViewById(R.id.native_session_info);
+        if (info != null && serveOnline) {
+            info.setText("会话：serve 引擎 · " + n + " 条");
+        }
+    }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 24 页
+────────────────────────────────────────────────────────────────
+
+    private void setBubbleCount(int n) {
+        TextView cnt = findViewById(R.id.native_msg_count);
+        if (cnt != null) cnt.setText(n + " 条");
+    }
+
+    /** GUI 状态行（复用 native_live 控件显示 serve 连接/生成状态；空串隐藏） */
+    private void setNativeStatus(String text) {
+        TextView v = findViewById(R.id.native_live);
+        if (v == null) return;
+        if (text == null || text.isEmpty()) {
+            v.setVisibility(View.GONE);
+            v.setText("");
+        } else {
+            v.setVisibility(View.VISIBLE);
+            v.setText(text);
+        }
+    }
+
+    private static String nowHms() {
+        return new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT)
+                .format(new java.util.Date());
+    }
+
+    /** 气泡控件组：元信息 + 正文两块可分别更新（同一 record 流式更新时原地覆盖） */
+    private static class BubbleView {
+        LinearLayout wrap;
+        TextView meta;
+        TextView body;
+    }
+
+    /** 创建一条 record 气泡（user 右对齐蓝底 / assistant 左对齐 / tool 灰色等宽 / notice 系统小字） */
+    private BubbleView createBubble(TranscriptRecord r) {
+        BubbleView bv = new BubbleView();
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.topMargin = dp(6);
+        wrap.setLayoutParams(wlp);
+
+        // 顶行：角色标签 + 时间
+        LinearLayout meta = new LinearLayout(this);
+        meta.setOrientation(LinearLayout.HORIZONTAL);
+        meta.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView roleTag = new TextView(this);
+        String roleText;
+        int roleColor;
+        if (r.isUser()) {
+            roleText = "用户";
+RSXM AI 渗透测试工具软件 V2.8.0                     第 25 页
+────────────────────────────────────────────────────────────────
+            roleColor = 0xFFFFFFFF;
+        } else if (r.isAssistant()) {
+            roleText = "AI" + (serveModelRef.isEmpty() ? "" : " · " + serveModelRef);
+            roleColor = 0xFFFFFFFF;
+        } else if (r.isTool()) {
+            roleText = "工具";
+            roleColor = r.toolFailed() ? 0xFFFFFFFF : 0xFF8B949E;
+        } else {
+            roleText = "系统";
+            roleColor = 0xFFCCCCCC;
+        }
+        roleTag.setText(roleText);
+        roleTag.setTextColor(roleColor);
+        roleTag.setTextSize(11);
+        roleTag.setTypeface(null, android.graphics.Typeface.BOLD);
+        meta.addView(roleTag);
+        String ts = (r.isUser() && r.createdAt > 0) ? hmsOf(r.createdAt) : nowHms();
+        TextView tsView = new TextView(this);
+        tsView.setText("  " + ts);
+        tsView.setTextColor(0xFF9BA6B4);
+        tsView.setTextSize(10);
+        meta.addView(tsView);
+        wrap.addView(meta);
+        bv.meta = roleTag;
+
+        // 正文（tool 气泡灰色等宽；notice 系统小字）
+        // 不再 setTextIsSelectable：可编辑 TextView 会抢焦点/吞 IME，导致输入框无法输入
+        TextView body = new TextView(this);
+        body.setText("");
+        body.setTextColor(r.isTool() ? 0xFF8B949E : r.isNotice() ? 0xFF8B949E : 0xFFE6EDF3);
+        body.setTextSize(r.isNotice() ? 11 : 13);
+        body.setLineSpacing(0, 1.25f);
+        body.setFocusable(false);
+        body.setLongClickable(false);
+        body.setClickable(false);
+        if (r.isTool()) {
+            body.setTypeface(android.graphics.Typeface.MONOSPACE);
+            body.setBackgroundColor(0xFF11161C);
+            body.setPadding(dp(8), dp(6), dp(8), dp(6));
+        }
+        wrap.addView(body);
+        bv.body = body;
+        bv.wrap = wrap;
+
+        if (r.isUser()) {
+            wrap.setGravity(android.view.Gravity.END);
+            body.setBackgroundColor(0xFF1A1A1A);
+            int pad = dp(10);
+            body.setPadding(pad, pad, pad, pad);
+        }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 26 页
+────────────────────────────────────────────────────────────────
+        return bv;
+    }
+
+    /** 毫秒时间戳 → HH:mm:ss */
+    private static String hmsOf(long millis) {
+        return new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT)
+                .format(new java.util.Date(millis));
+    }
+
+    /**
+     * 统一自动滚底入口（v2.0.23）：用户触摸翻阅期间（userScrolling）不抢占滚动位置；
+     * 只有松手超过 4s（或 force）时才跟随新内容滚到底。
+     * force=true（用户主动发送/切视图/键盘弹出）时无视 userScrolling 直接滚底。
+     */
+    private void autoScrollBottom(boolean force) {
+        ScrollView sv = findViewById(R.id.native_scroll);
+        if (sv == null) return;
+        boolean recentTouch = userScrolling && (System.currentTimeMillis() - lastUserScrollAt) < 4000;
+        if (recentTouch && !force) return;   // 用户正在回看：不打断
+        if (!recentTouch) userScrolling = false;
+        sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+    }
+
+    /** 消息列表触摸监听：按下/移动置位 userScrolling（安装于 enterNativeView） */
+    private void installScrollTouchGuard() {
+        ScrollView sv = findViewById(R.id.native_scroll);
+        if (sv == null) return;
+        sv.setOnTouchListener((v, ev) -> {
+            switch (ev.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                case android.view.MotionEvent.ACTION_MOVE:
+                    userScrolling = true;
+                    lastUserScrollAt = System.currentTimeMillis();
+                    break;
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    lastUserScrollAt = System.currentTimeMillis();
+                    // 不立即清 userScrolling：4s 缓冲内新内容不抢占，之后恢复自动跟随
+                    break;
+            }
+            return false;   // 不消费事件：ScrollView 正常滚动
+        });
+    }
+
+    /** 切换终端视图 / 原生会话视图（与侧滑栏「视图切换」同语义：当前是对话则回终端） */
+    private void toggleNativeView() {
+        if (nativeViewOn) {
+            exitNativeView();
+        } else {
+            enterNativeView();
+RSXM AI 渗透测试工具软件 V2.8.0                     第 27 页
+────────────────────────────────────────────────────────────────
+        }
+    }
+
+    private void enterNativeView() {
+        nativeViewOn = true;
+        getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "native").apply();
+        updateMenuViewLabel();
+        installScrollTouchGuard();
+        // GUI 视图输入修复：强制 adjustResize（覆盖 showPanel 遗留的 ADJUST_PAN），
+        // 确保软键盘弹出时输入框随窗口上移不被遮挡，消息列表同步压缩滚动。
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        findViewById(R.id.native_chat).setVisibility(View.VISIBLE);
+        findViewById(R.id.webview).setVisibility(View.GONE);
+        // 内容来自 serve 的 transcript 投影：确保引擎在线 + 接上跟随流 + 取一次基线快照
+        ensureServeStarted();
+        loadTranscriptSnapshot();
+        // 输入框焦点与键盘展开：requestFocus + 显示软键盘；聚焦/输入时自动滚动列表到底
+        final EditText input = findViewById(R.id.native_input);
+        if (input != null) {
+            input.setOnFocusChangeListener((v, hasFocus) -> {
+                if (hasFocus) autoScrollBottom(true);   // 用户输入中，强制
+            });
+            input.postDelayed(() -> {
+                input.requestFocus();
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                }
+            }, 300);
+        }
+    }
+
+    private void exitNativeView() {
+        nativeViewOn = false;
+        getSharedPreferences("prefs", MODE_PRIVATE).edit().putString("view_mode", "terminal").apply();
+        updateMenuViewLabel();
+        findViewById(R.id.native_chat).setVisibility(View.GONE);
+        findViewById(R.id.webview).setVisibility(View.VISIBLE);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        // 收起软键盘（输入框可能正聚焦），避免切回终端后键盘残留
+        android.view.inputmethod.InputMethodManager imm =
+                (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(
+                findViewById(android.R.id.content).getWindowToken(), 0);
+        write("\u000c");
+        try { webView.requestFocus(); } catch (Exception ignored) {}
+        // 事件流保持连接：切回对话时内容连续，不必重连/重放
+    }
+
+RSXM AI 渗透测试工具软件 V2.8.0                     第 28 页
+────────────────────────────────────────────────────────────────
+    /** 侧滑栏「视图切换」项标签：随当前视图（终端/对话）刷新 */
+    private void updateMenuViewLabel() {
+        TextView v = findViewById(R.id.menu_view);
+        if (v != null) {
+            v.setText(nativeViewOn ? "视图切换（当前：对话）" : "视图切换（当前：终端）");
+            v.setTextColor(nativeViewOn ? 0xFFFFFFFF : 0xFFCCCCCC);
+        }
+    }
+
+    /** 原生会话视图发送：POST /submit；user 气泡即时回显（服务端 transcript 的 user record 到达后替换） */
+    private void sendNativeInput() {
+        EditText et = findViewById(R.id.native_input);
+        if (et == null) return;
+        // 停止分支必须在 txt.isEmpty() 之前：生成中输入框必然为空
+        if (genInFlight) {
+            stopNativeGeneration();
+            return;
+        }
+        final String txt = et.getText().toString().trim();
+        if (txt.isEmpty()) return;
+        et.setText("");
+        et.requestFocus();   // 保持焦点：多轮对话无需每次点输入框
+        setGenInFlight(true);
+        setNativeStatus("思考中…");
+        new Thread(() -> {
+            boolean ok = serveClient().submit(txt);
+            ui.post(() -> {
+                if (ok) {
+                    appendUserBubble(txt);
+                } else {
+                    setGenInFlight(false);
+                    setNativeStatus("发送失败：serve 未在线（见顶部诊断卡片，可点「会话」重启 serve）");
+                }
+            });
+        }, "serve-submit").start();
+    }
+
+    /** 本地即时回显一条 user 消息（不等服务端记录；服务端 record 到达后自动移除本条） */
+    private void appendUserBubble(String text) {
+        LinearLayout list = findViewById(R.id.native_output);
+        if (list == null) return;
+        TranscriptRecord r = new TranscriptRecord();
+        r.role = "user";
+        r.content = text;
+        r.createdAt = System.currentTimeMillis();
+        BubbleView bv = createBubble(r);
+        updateBubble(bv, r, this.callIndex);
+        pendingUserBubble = bv;
+        pendingUserText = text;
+        list.addView(bv.wrap);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 29 页
+────────────────────────────────────────────────────────────────
+        setBubbleCount(list.getChildCount());
+        autoScrollBottom(true);   // 自己发送的消息，强制滚底
+    }
+
+    /** 中断当前回合（POST /cancel） */
+    private void stopNativeGeneration() {
+        new Thread(() -> {
+            serveClient().cancel();
+            ui.post(() -> {
+                setGenInFlight(false);
+                setNativeStatus("");
+            });
+        }, "serve-cancel").start();
+    }
+
+    /** 生成中状态切换：主界面按钮在「发送/停止」间互切（结束由 turn_done/runtime_state 驱动） */
+    private void setGenInFlight(boolean on) {
+        genInFlight = on;
+        ui.post(() -> {
+            Button b = findViewById(R.id.native_send);
+            if (b != null) {
+                b.setText(on ? BTN_STOP : BTN_SEND);
+                b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(on ? 0xFF1E1E1E : 0xFF262626));
+            }
+        });
+    }
+
+    /** 前台恢复：把后台期间缓存的终端输出分块冲刷到 WebView（避免大字符串单次注入卡顿） */
+    private void flushPendingOutput() {
+        sWebActive = true;
+        final String batch;
+        synchronized (sPendingOutput) {
+            if (sPendingOutput.length() == 0) return;
+            batch = sPendingOutput.toString();
+            sPendingOutput.setLength(0);
+        }
+        final WebView wv = webView;
+        if (wv == null) return;
+        final Handler h = new Handler(Looper.getMainLooper());
+        final int chunkCount = (batch.length() + FLUSH_CHUNK - 1) / FLUSH_CHUNK;
+        for (int i = 0; i < batch.length(); i += FLUSH_CHUNK) {
+            final String part = batch.substring(i, Math.min(batch.length(), i + FLUSH_CHUNK));
+            final long delay = (i / FLUSH_CHUNK) * 80L;
+            h.postDelayed(() -> {
+                // lambda 执行期才检查（v2.0.25 修复：onDestroy 置空 webView 后滞留分块
+                // 回调触发主线程 NPE 崩溃；捕获执行期引用，失效即丢弃）
+                if (wv == null) return;
+                try {
+                    wv.evaluateJavascript("window.onTermData(" + jsQuote(part) + ")", null);
+                } catch (Exception ignored) {}
+RSXM AI 渗透测试工具软件 V2.8.0                     第 30 页
+────────────────────────────────────────────────────────────────
+            }, delay);
+        }
+    }
+
+    /** 生成安全的 JS 字符串字面量 */
+    private static String jsQuote(String s) {
+        StringBuilder sb = new StringBuilder(s.length() + 16);
+        sb.append('\'');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\': sb.append("\\\\"); break;
+                case '\'': sb.append("\\'"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        sb.append('\'');
+        return sb.toString();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (sCurrent == this) sCurrent = null;
+        stopRootPolling();
+        stopTranscriptFollow();   // 停 transcript 跟随流
+        stopServeWatchdog();      // 看门狗随 Activity 停；重新打开时 onCreate/onResume 会续上
+        // 后台运行模式：环境与 Activity 生命周期解耦，退出 Activity 不杀 proot
+        // （由前台服务保活继续后台运行，重新打开时 onCreate 复用环境与终端 I/O）；
+        // 关闭模式时照旧清理。
+        boolean bgMode = bgModeOn();
+        if (!bgMode && sProotProcess != null) {
+            sProotProcess.destroy();     // pty-bridge 收到 SIGTERM 后会 kill 整个 guest 进程组
+            sProotProcess = null;
+            sProcIn = null;
+        }
+        if (webView != null) {
+            webView.destroy();
+            webView = null;
+        }
+    }
+}

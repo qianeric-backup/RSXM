@@ -1,0 +1,1560 @@
+RSXM AI 渗透测试工具软件 V2.8.0                     第 1 页
+────────────────────────────────────────────────────────────────
+package com.rsxm.app;
+
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
+import android.provider.OpenableColumns;
+import android.content.SharedPreferences;
+import android.net.Uri;
+import android.os.Build;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.view.WindowManager;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
+import android.os.Bundle;
+import android.os.Environment;
+import android.provider.Settings;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.InputType;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.widget.CheckBox;
+import android.widget.SeekBar;
+import android.util.Base64;
+import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.PopupWindow;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+RSXM AI 渗透测试工具软件 V2.8.0                     第 2 页
+────────────────────────────────────────────────────────────────
+import java.io.FileInputStream;
+import java.io.OutputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.zip.GZIPInputStream;
+
+import androidx.core.view.GravityCompat;
+import androidx.drawerlayout.widget.DrawerLayout;
+
+import rikka.shizuku.Shizuku;
+
+/**
+ * Reasonix Proot —— 在 Android 上通过 proot 运行 Alpine Linux 环境，
+ * 启动后自动进入 reasonix AI 编码助手（TUI）。
+ *
+ * 架构：
+ *   WebView (xterm.js 终端)  <->  Java 管道  <->  pty-bridge（静态 musl，提供 PTY）
+ *                                                          └─ proot -> Alpine -> entry.sh -> reasonix
+ */
+public class MainActivity extends Activity {
+
+    private static final String TAG = "ReasonixProot";
+    private static final int REQ_UPDATE_RESONIX = 200;
+    private static final int REQ_SKILL_IMPORT = 201;
+    private static final int REQ_CREATE_ENV_TEMPLATE = 202;
+    private static final int REQ_IMPORT_ENV_TEMPLATE = 203;
+    /** 官方更新源：@reasonix/cli-linux-arm64（npm 平台二进制包，npmmirror 国内镜像） */
+    private static final String REASONIX_DEFAULT_URL =
+            "https://registry.npmmirror.com/@reasonix/cli-linux-arm64/-/cli-linux-arm64-1.31.4.tgz";
+    /**
+     * 上下滑动调速档位：1~10（prefs 键 scroll_speed，默认 5）。
+     * 档位越小滑动越慢：SCROLL_STEP = 档位换算的每页滑动像素数
+     *  档位 1 → 500px/页（最慢，精细浏览）
+     *  档位 5 → 100px/页（默认，翻看历史）
+     *  档位 10 → 10px/页（最快，接近原版 8px/页）
+     */
+    public static final int SPEED_MIN = 1;
+    public static final int SPEED_MAX = 10;
+RSXM AI 渗透测试工具软件 V2.8.0                     第 3 页
+────────────────────────────────────────────────────────────────
+    public static final int SPEED_DEFAULT = 5;
+
+    private WebView webView;
+    // proot 进程与输入流静态持有：后台运行模式下与 Activity 生命周期解耦，
+    // Activity 重建（系统回收/返回后重开）时无需重启环境，终端 I/O 可无缝续接。
+    private static volatile Process sProotProcess;
+    private static volatile OutputStream sProcIn;
+    /** 当前活动实例：后台 reader 线程输出经它转发到活动终端（重建后指向新实例） */
+    private static volatile MainActivity sCurrent;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private volatile boolean environmentStarted = false;
+    /** WebView 页面加载完成标记（onPageFinished 置位，超时未完成则重载页面） */
+    private volatile boolean pageLoaded = false;
+    /** 悬浮快捷键工具栏显示状态（JS 侧 keys-toolbar，侧滑菜单「快捷键」切换用） */
+    private volatile boolean keysToolbarVisible = false;
+    /** 复用环境标记：后台模式开启时 Activity 重建复用运行中的 proot 环境 */
+    private volatile boolean reuseEnv = false;
+    /** 开发环境安装中标记（static，v2.0.25：安装任务是进程级的 nohup 脚本+15 分钟轮询线程，
+     *  跨 Activity 存活；实例字段在后台模式 Activity 重建后归零 → 可重复发起安装，
+     *  第二次 rm 标记文件会让旧任务完成码归属错乱、新旧 apk 并发锁冲突） */
+    private static volatile boolean sDevEnvInstalling = false;
+    /** 正在安装的环境名称（null 表示无任务；面板重开时据此恢复禁用/提示状态） */
+    private static volatile String sDevEnvInstallingName = null;
+    /** 面板代际（v2.0.25 B4 修复）：安装线程经 runOnUiThread 更新发起时捕获的旧面板
+     *  View——面板重开后新面板进度永远不刷新。每次 showDevEnvDialog ++；安装线程
+     *  回调发现代际不符则只写终端输出，不再触碰旧控件。 */
+    private int panelGen = 0;
+    /** apk 日志进度模式：(x/N) Installing ... */
+    private static final Pattern APK_PROGRESS = Pattern.compile("\\((\\d+)/(\\d+)\\)");
+    private DrawerLayout drawerLayout;
+
+    @SuppressLint("SetJavaScriptEnabled")
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        // 启动加速：无 Activity 过渡动画
+        overridePendingTransition(0, 0);
+        sCurrent = this;
+        // 重新打开（Activity 重建）时清理上次残留的 proot/pty-bridge/reasonix 进程，
+        // 避免双环境并存的 PTY 竞争导致 reasonix CLI 排版错乱。
+        // 例外：后台运行模式下旧环境仍在运行 → 直接复用（进程/流静态持有，与 Activity
+        // 解耦，终端 I/O 无缝续接），不清理不重启，避免 AI 会话在后台中断。
+        boolean bgMode = bgModeOn();
+        if (bgMode && sProotProcess != null && sProotProcess.isAlive()) {
+            environmentStarted = true;
+            reuseEnv = true;      // 复用环境：新 WebView 空白，需强制 reasonix 重绘 TUI
+            startRootPolling();   // 复用环境：恢复 root 命令桥轮询（onDestroy 已停）
+            startServeWatchdog(); // 复用环境：看门狗继续守着 serve（切到其他 app 期间掉了也能自愈）
+            Log.d(TAG, "background mode: reusing running proot environment");
+        } else {
+RSXM AI 渗透测试工具软件 V2.8.0                     第 4 页
+────────────────────────────────────────────────────────────────
+            killProotTree();
+        }
+
+        setContentView(R.layout.activity_main);
+
+        drawerLayout = findViewById(R.id.drawer_layout);
+        webView = findViewById(R.id.webview);
+        // 二次开启黑屏修复：硬件渲染在部分设备出现 userfaultfd 卡死（logcat:
+        // "userfaultfd: MOVE ioctl seems unsupported: Connection timed out"）导致
+        // onPageFinished 不触发、xterm 不渲染 → 终端黑屏；改软件渲染绕过。
+        webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        WebSettings ws = webView.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setAllowFileAccess(true);
+        ws.setDomStorageEnabled(true);
+        ws.setCacheMode(WebSettings.LOAD_NO_CACHE);
+
+        // JS -> Java 桥（键盘输入）
+        webView.addJavascriptInterface(this, "Android");
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                Log.d(TAG, "onPageFinished: " + url);
+                pageLoaded = true;
+                // 页面(重)加载完成后注入当前滑动调速档位（WebView 重载后 JS 变量重置）
+                applyScrollSpeed(getSharedPreferences("prefs", MODE_PRIVATE)
+                        .getInt("scroll_speed", SPEED_DEFAULT));
+                // 聚焦 WebView 触发 xterm 渲染，避免启动后需点击才显示 CLI 界面
+                try { view.requestFocus(); } catch (Exception ignored) {}
+                if (reuseEnv) {
+                    // 复用环境（后台模式开启 + Activity 重建）：新 WebView 终端空白，
+                    // reasonix 不感知新终端，强制重绘完整 TUI（微调列数触发 SIGWINCH 再恢复）
+                    reuseEnv = false;
+                    view.postDelayed(() -> {
+                        try {
+                            view.evaluateJavascript(
+                                    "if(window.Android&&Android.resize){Android.resize(term.rows,Math.max(1,term.cols-1));"
+                                            + "setTimeout(function(){Android.resize(term.rows,term.cols);},200);}", null);
+                        } catch (Exception ignored) {}
+                    }, 600);
+                }
+                if (!environmentStarted) {
+                    environmentStarted = true;
+                    new Thread(MainActivity.this::startEnvironment).start();
+                }
+            }
+        });
+        webView.loadUrl("file:///android_asset/web/index.html");
+
+        // onPageFinished 超时重载：userfaultfd 渲染卡死时页面可能一直不完成，4s 后重载恢复
+RSXM AI 渗透测试工具软件 V2.8.0                     第 5 页
+────────────────────────────────────────────────────────────────
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (!pageLoaded && webView != null) {
+                Log.w(TAG, "onPageFinished 超时，重载 index.html");
+                try { webView.reload(); } catch (Exception ignored) {}
+            }
+        }, 4000);
+
+        // 兜底启动：环境启动不依赖 WebView 渲染。二次开启时 WebView 可能因渲染线程
+        // 卡住（logcat: userfaultfd: MOVE ioctl seems unsupported: Connection timed out）
+        // 导致 onPageFinished 不触发 → 环境永不启动 → 终端黑屏。
+        // onPageFinished 正常触发会先启动环境（environmentStarted 置位），此处 4s 后跳过。
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (!environmentStarted) {
+                environmentStarted = true;
+                Log.w(TAG, "onPageFinished 未触发（WebView 渲染异常），兜底启动环境");
+                new Thread(MainActivity.this::startEnvironment).start();
+            }
+        }, 4000);
+
+        // 标题栏已移除：侧滑菜单入口改由快捷栏「菜单」提供（btn_menu 已从布局删除，防旧布局兼容保留空判断）
+        findViewById(R.id.qb_menu).setOnClickListener(v ->
+                drawerLayout.openDrawer(GravityCompat.START, false));
+        // 侧滑菜单：一级高频入口；视图切换/高级设置 亦在一级
+        findViewById(R.id.menu_adb).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdbDialog(); });
+        findViewById(R.id.menu_apikey).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showApiKeyConfigDialog(); });
+        findViewById(R.id.menu_github).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showGitHubDialog(); });
+        findViewById(R.id.menu_ds2api).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showDs2ApiDialog(); });
+        findViewById(R.id.menu_update).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showUpdateResonixDialog(); });
+        findViewById(R.id.menu_purge).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showPurgeDialog(); });
+        findViewById(R.id.menu_aitest8).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAITest8Dialog(); });
+        findViewById(R.id.menu_vuln).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showVulnScanPanel(); });
+        findViewById(R.id.menu_project).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showProjectDialog(); });
+        findViewById(R.id.menu_sessions).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showSessionsDialog(); });
+        findViewById(R.id.menu_advanced).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdvancedDialog(); });
+        findViewById(R.id.menu_view).setOnClickListener(v -> {
+            drawerLayout.closeDrawer(GravityCompat.START, false);
+            if (nativeViewOn) exitNativeView(); else enterNativeView();
+            updateMenuViewLabel();
+        });
+        // 升级安装后 rootfs 可能没有 YOLO 标记：以偏好为准补写（默认开启）
+        syncYoloMark(getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true));
+
+        // 顶边栏：仅「菜单」入口（其余功能在侧滑栏/高级设置）
+        findViewById(R.id.qb_menu).setOnClickListener(v ->
+                drawerLayout.openDrawer(GravityCompat.START, false));
+        updateMenuViewLabel();
+
+        // 原生会话视图：发送按钮 + 输入框回车发送
+        findViewById(R.id.native_send).setOnClickListener(v -> sendNativeInput());
+        EditText nativeInput = findViewById(R.id.native_input);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 6 页
+────────────────────────────────────────────────────────────────
+        if (nativeInput != null) {
+            nativeInput.setOnEditorActionListener((v, actionId, event) -> {
+                if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+                        || (event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER)) {
+                    sendNativeInput();
+                    return true;
+                }
+                return false;
+            });
+        }
+        // 原生视图头部操作：新会话（走 serve POST /new，重新取 transcript 基线）
+        findViewById(R.id.native_new).setOnClickListener(v -> {
+            try {
+                LinearLayout list = findViewById(R.id.native_output);
+                if (list != null) list.removeAllViews();
+                resetTranscriptView();
+                setBubbleCount(0);
+                setGenInFlight(false);
+                setNativeStatus("");
+                pushOutput("\r\n[已请求 serve 开始新会话]\r\n");
+                new Thread(() -> {
+                    serveClient().newSession();
+                    ui.post(this::loadTranscriptSnapshot);
+                }, "serve-new").start();
+            } catch (Exception e) {
+                Log.e(TAG, "native new session failed", e);
+            }
+        });
+        // 回终端（原生视图 → xterm 终端）
+        findViewById(R.id.native_gototerm).setOnClickListener(v -> exitNativeView());
+
+        // 全屏功能面板：返回按钮关闭（系统返回键同样生效）
+        findViewById(R.id.panel_back).setOnClickListener(v -> hidePanel());
+
+        // 软键盘监听：原生视图输入时自动滚底
+        setupKeyboardListener();
+
+        // 测试/调试入口：am start -e force_reinstall true 模拟无 root 设备的自动修复流程
+        if (getIntent().getBooleanExtra("force_reinstall", false)) {
+            new Handler(Looper.getMainLooper()).postDelayed(this::promptReinstallForNativeLib, 3000);
+        }
+
+        requestStoragePermission();
+
+        // 后台运行模式恢复：**默认开启**（保活服务让进程不会退化成 cached 进程，
+        // 切到其他 app / Activity 被回收重开后环境与 serve 都继续运行）；
+        // 只有用户显式关闭过才不拉起。
+        if (bgModeOn()) {
+            // Android 13+ 的通知权限只自动请求一次：没权限时前台服务照常运行，
+            // 只是常驻通知不可见（用户容易误以为没在保活）→ 首次自动开启时请求一次。
+RSXM AI 渗透测试工具软件 V2.8.0                     第 7 页
+────────────────────────────────────────────────────────────────
+            boolean askNotif = Build.VERSION.SDK_INT >= 33
+                    && !getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("notif_asked", false);
+            if (askNotif) {
+                getSharedPreferences("prefs", MODE_PRIVATE).edit()
+                        .putBoolean("notif_asked", true).apply();
+            }
+            startBackgroundService(askNotif);
+        }
+
+        // 视图恢复：无历史偏好 → 默认进入原生 GUI 会话视图（V2.0 起 GUI 为默认界面）；
+        // 有偏好 → 按上次选择恢复。延迟到环境就绪后进入，避免与启动流程抢焦点。
+        if (!getSharedPreferences("prefs", MODE_PRIVATE).contains("view_mode")
+                || "native".equals(getSharedPreferences("prefs", MODE_PRIVATE).getString("view_mode", "native"))) {
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                if (!nativeViewOn && environmentStarted) {
+                    enterNativeView();
+                }
+            }, 1200);
+        }
+    }
+
+    /** 供工具类（McpManager 等）root 桥兜底访问当前活动实例 */
+    static MainActivity current() {
+        return sCurrent;
+    }
+
+    /* ==================== Root 权限（KernelSU/Magisk） ==================== */
+
+    /** root 命令桥：guest 写 /root/.root-cmd → 此轮询执行 su → 结果写 /root/.root-out */
+    private final Handler rootPoller = new Handler(Looper.getMainLooper());
+    private final Runnable rootPollTask = new Runnable() {
+        @Override
+        public void run() {
+            processRootCommandQueue();
+            rootPoller.postDelayed(this, 1500);
+        }
+    };
+
+    private void startRootPolling() {
+        Log.d(TAG, "root polling started");
+        rootPoller.removeCallbacks(rootPollTask);
+        probeRootAndMark();   // 预检 root 并写 .root-ok（guest adb wrapper 据此直连 root 桥）
+        rootPoller.postDelayed(rootPollTask, 1500);
+    }
+
+    private void stopRootPolling() {
+        rootPoller.removeCallbacks(rootPollTask);
+    }
+
+    /** 处理 guest 的 root 命令队列（一次一个，串行；结果写回 .root-out 带 __DONE__ 标记） */
+RSXM AI 渗透测试工具软件 V2.8.0                     第 8 页
+────────────────────────────────────────────────────────────────
+    private final java.util.concurrent.atomic.AtomicBoolean rootBridgeBusy =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private void processRootCommandQueue() {
+        // 串行保证：上一条命令还在执行时新命令留在 .root-cmd 等下一轮，
+        // 避免两条命令并发执行把 .root-out（含 __DONE__ 标记）写花
+        if (!rootBridgeBusy.compareAndSet(false, true)) return;
+        boolean dispatched = false;
+        try {
+            File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+            File cmdFile = new File(rootDir, ".root-cmd");
+            File outFile = new File(rootDir, ".root-out");
+            if (!cmdFile.exists()) return;   // finally 复位
+            String cmd = new String(java.nio.file.Files.readAllBytes(cmdFile.toPath()),
+                    StandardCharsets.UTF_8).trim();
+            cmdFile.delete();
+            if (cmd.isEmpty()) return;       // finally 复位
+            Log.d(TAG, "root bridge cmd: " + cmd);
+            new Thread(() -> {
+                String r = execRootCommand(cmd, 25);
+                try {
+                    java.nio.file.Files.write(outFile.toPath(),
+                            ((r == null ? "(root 执行失败，请检查授权)" : r) + "\n__DONE__")
+                                    .getBytes(StandardCharsets.UTF_8));
+                } catch (Exception e) {
+                    Log.w(TAG, "root out write failed", e);
+                } finally {
+                    rootBridgeBusy.set(false);   // 命令线程结束才允许下一条
+                }
+            }, "root-bridge").start();
+            dispatched = true;   // 已派发：busy 由命令线程释放
+        } catch (Exception e) {
+            Log.w(TAG, "root queue failed", e);
+        } finally {
+            if (!dispatched) rootBridgeBusy.set(false);   // 未派发路径（无命令/异常）必须复位
+        }
+    }
+
+    /** Root 权限对话框：检测状态 + 授权引导 + 测试 */
+    private void showRootDialog() {
+        String su = findSuPath();
+        TextView status = new TextView(this);
+        status.setTextSize(14);
+        status.setTypeface(null, android.graphics.Typeface.BOLD);
+        TextView tip = createDarkTip(
+                "reasonix 内可执行 root <命令> 获取手机 root 权限（如 root id、root 'pm list packages'）。\n"
+                        + "首次执行会弹出 root 授权请求（KernelSU/Magisk），请允许。\n"
+                        + "⚠ root 可完全控制系统，请勿执行未知命令。");
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 9 页
+────────────────────────────────────────────────────────────────
+        panel.setPadding(dp(16), dp(8), dp(16), dp(12));
+        addV(panel, status, 0);
+        addV(panel, tip, 8);
+        Button testBtn = createDarkButton("测试 root（执行 id）");
+        addV(panel, testBtn, 10);
+        TextView result = createDarkResult();
+        result.setText("（测试结果将显示在这里）");
+        addV(panel, result, 8);
+
+        // 运行模式切换：proot（默认）/ chroot（root 直入，SELinux 保持 enforcing 下 JVM 亦可用）
+        final boolean chrootNow = isChrootMode();
+        panel.addView(createDarkSectionTitle("运行模式"));
+        TextView modeTip = createDarkTip(
+                "运行模式：" + (chrootNow ? "chroot（root 直入）" : "proot（默认）") + "\n"
+                        + "chroot 使用 root 直接 chroot 进环境（需 root 授权），SELinux 保持 enforcing 时\n"
+                        + "JVM/安卓开发环境亦正常（proot 模式 enforcing 下不可用）；切换会重启 reasonix 环境。");
+        modeTip.setTextColor(chrootNow ? 0xFFFFFFFF : 0xFFAAAAAA);
+        modeTip.setPadding(0, dp(2), 0, dp(4));
+        addV(panel, modeTip, 6);
+        Button modeBtn = createDarkButton(chrootNow ? "切换回 proot 模式" : "切换为 chroot 模式（实验）");
+        modeBtn.setOnClickListener(v -> {
+            getSharedPreferences("prefs", MODE_PRIVATE).edit()
+                    .putString("run_mode", chrootNow ? "proot" : "chroot").apply();
+            result.setText(chrootNow ? "已切换为 proot 模式，正在重启环境..." : "已切换为 chroot 模式，正在重启环境...");
+            hidePanel();
+            restartEnvironment();
+        });
+        // chroot 需要 root 授权：先置灰，root-check 检测通过后恢复；无 root 保持禁用并提示
+        modeBtn.setEnabled(false);
+        modeBtn.setTextColor(0xFF6A6A6A);
+        modeBtn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF1E1E1E));
+        addV(panel, modeBtn, 8);
+        // 全屏面板展示（取代系统弹窗，避免遮挡控件）
+        showPanel("ROOT", panel, null);
+        // 检测状态（后台线程）
+        new Thread(() -> {
+            final String st;
+            if (su == null) {
+                st = "未检测到 root（未安装 KernelSU/Magisk）";
+            } else {
+                String r = execRootCommand("id", 5);
+                st = (r != null && r.contains("uid=0"))
+                        ? "已授权（" + su + "）：" + r.split("\n")[0]
+                        : "检测到 " + su + "，但执行失败（请在弹窗授权后重试）";
+            }
+            runOnUiThread(() -> {
+                status.setText(st);
+                status.setTextColor(st.contains("已授权") ? 0xFFFFFFFF : (st.contains("未检测") ? 0xFF888888 : 0xFFCCCCCC));
+                // chroot 按钮：root 可用才恢复（chroot 需 su 授权）
+                if (st.contains("已授权")) {
+RSXM AI 渗透测试工具软件 V2.8.0                     第 10 页
+────────────────────────────────────────────────────────────────
+                    modeBtn.setEnabled(true);
+                    modeBtn.setTextColor(0xFFFFFFFF);
+                    modeBtn.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xFF262626));
+                } else {
+                    modeTip.setText(modeTip.getText() + "\n⚠ chroot 需要 root 授权，当前未检测到可用 root，切换按钮不可用。");
+                    modeTip.setTextColor(0xFFFFFFFF);
+                }
+            });
+        }, "root-check").start();
+        testBtn.setOnClickListener(v -> {
+            result.setText("执行中...\nroot id");
+            new Thread(() -> {
+                String r = execRootCommand("id", 8);
+                runOnUiThread(() -> {
+                    result.setTextColor(r != null && r.contains("uid=0") ? 0xFFFFFFFF : 0xFFE0E0E0);
+                    result.setText(r == null ? "(无输出或超时——请检查授权)" : r.trim());
+                });
+            }, "root-test").start();
+        });
+    }
+
+    /** 探测 su 路径（含 KernelSU/Magisk；找不到则回退 PATH 中的 su）。
+     *  结果缓存（v2.0.25）：旧实现每次 execRootCommand 都重新探测，PATH 回退分支
+     *  还要起一次 `su -c id`（最多等 3s），拖慢每条 root 命令。 */
+    private static volatile String sSuPathCache;
+
+    private String findSuPath() {
+        String cached = sSuPathCache;
+        if (cached != null) {
+            // 绝对路径缓存失效重探；"su"（PATH 回退）视为稳定
+            if ("su".equals(cached) || new File(cached).exists()) return cached;
+            sSuPathCache = null;
+        }
+        String[] paths = {
+                "/system/bin/su", "/system/xbin/su", "/sbin/su", "/vendor/bin/su",
+                "/system/bin/.ext/.su", "/system/usr/we-need-root/su-backup",
+                "/debug_ramdisk/su",              // KernelSU
+                "/data/adb/ksu/bin/su",           // KernelSU
+                "/data/adb/magisk/busybox/su"     // Magisk
+        };
+        for (String p : paths) {
+            boolean ex = new File(p).exists();
+            Log.d(TAG, "root probe: " + p + " exists=" + ex);
+            if (ex) {
+                sSuPathCache = p;
+                return p;
+            }
+        }
+        // 回退：直接使用 "su"（走 PATH，KernelSU/Magisk 通常已加入 PATH）
+        try {
+RSXM AI 渗透测试工具软件 V2.8.0                     第 11 页
+────────────────────────────────────────────────────────────────
+            Process p = new ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start();
+            if (p.waitFor(3, TimeUnit.SECONDS)) {
+                byte[] buf = new byte[256];
+                int n = p.getInputStream().read(buf);
+                String s = n > 0 ? new String(buf, 0, n, StandardCharsets.UTF_8) : "";
+                p.destroy();
+                if (s.contains("uid=0")) {
+                    Log.d(TAG, "root probe: PATH su works: " + s.trim());
+                    sSuPathCache = "su";
+                    return "su";
+                }
+            } else {
+                p.destroy();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "root probe: PATH su failed", e);
+        }
+        return null;
+    }
+
+    /** 预检 root 并写 /root/.root-ok 标记（guest 侧 adb wrapper 据此直连 root 命令桥，无需无线调试） */
+    private void probeRootAndMark() {
+        new Thread(() -> {
+            String su = findSuPath();
+            boolean ok = su != null;
+            if (ok) {
+                String r = execRootCommand("id", 5);
+                ok = r != null && r.contains("uid=0");
+            }
+            try {
+                File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+                File okFile = new File(rootDir, ".root-ok");
+                if (ok) {
+                    java.nio.file.Files.write(okFile.toPath(), "ok\n".getBytes(StandardCharsets.UTF_8));
+                    Log.d(TAG, "root precheck OK, wrote .root-ok");
+                } else {
+                    okFile.delete();
+                    Log.d(TAG, "root precheck unavailable, removed .root-ok");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "root mark failed", e);
+            }
+        }, "root-precheck").start();
+    }
+
+    /** 执行 root 命令（su -c），返回 stdout+stderr（失败返回 null）；包内可见供 McpManager root 桥兜底。
+     *  约定错误文本（供 McpManager.isExecFailure 识别）：“(超时…” / “(root 执行失败…” */
+    String execRootCommand(String cmd, int timeoutSec) {
+        String su = findSuPath();
+        if (su == null) return null;
+RSXM AI 渗透测试工具软件 V2.8.0                     第 12 页
+────────────────────────────────────────────────────────────────
+        Process p = null;
+        try {
+            p = new ProcessBuilder(su, "-c", cmd)
+                    .redirectErrorStream(true).start();
+            // 看门狗：超时杀进程（排水循环会一直读到 EOF，需要外部强超时兜底）
+            final boolean[] timedOut = {false};
+            final Process fp = p;
+            Thread watchdog = new Thread(() -> {
+                try {
+                    Thread.sleep(timeoutSec * 1000L);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (fp.isAlive()) {
+                    timedOut[0] = true;   // v2.0.25：超时带标记返回（旧实现返回无标记的部分输出，
+                    fp.destroyForcibly(); // McpManager.isExecFailure 会把截断输出当合法内容）
+                }
+            }, "root-exec-watchdog");
+            watchdog.setDaemon(true);
+            watchdog.start();
+            // 持续排水直到 EOF（v2.0.25 修复：旧实现 waitFor 后才读且只读一次 8KB——
+            // 输出超过管道缓冲（64KB）时命令写阻塞 → 误判「(超时)」；长输出被截断）
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            try (InputStream in = p.getInputStream()) {
+                while ((n = in.read(buf)) > 0) {
+                    bos.write(buf, 0, n);
+                    if (bos.size() >= 512 * 1024) {   // 上限保护：异常超长输出截断
+                        p.destroy();
+                        break;
+                    }
+                }
+            }
+            p.waitFor(3, TimeUnit.SECONDS);
+            watchdog.interrupt();
+            String out = bos.toString("UTF-8");
+            if (timedOut[0]) {
+                return "(超时) " + out;   // 带约定错误前缀：部分输出可读但调用方可识别为失败
+            }
+            if (out.isEmpty() && !p.isAlive() && p.exitValue() != 0) {
+                return "(root 执行失败 exit=" + p.exitValue() + ")";
+            }
+            return out;
+        } catch (Exception e) {
+            Log.w(TAG, "root exec failed: " + e);
+            if (p != null) p.destroy();
+            return null;
+        }
+    }
+RSXM AI 渗透测试工具软件 V2.8.0                     第 13 页
+────────────────────────────────────────────────────────────────
+
+    /* ==================== 侧滑菜单功能 ==================== */
+
+    // ------------------------------------------------------------------
+    // 全屏功能面板（取代系统 AlertDialog 弹窗，页面式切换避免遮挡控件）
+    // ------------------------------------------------------------------
+    private Runnable panelOnClose;   // 面板关闭回调（hidePanel 时触发一次）
+
+    /** 显示全屏功能面板：标题 + 内容视图；onClose 在面板关闭时回调（可空） */
+    private void showPanel(String title, View content, Runnable onClose) {
+        ((TextView) findViewById(R.id.panel_title)).setText(title);
+        LinearLayout holder = findViewById(R.id.panel_content);
+        holder.removeAllViews();
+        holder.addView(content, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        panelOnClose = onClose;
+        // 面板内键盘弹出不压缩布局/不自动滚动（adjustPan：窗口整体平移保持输入框可见，
+        // 面板外层 ScrollView 不会因键盘把内容超高而自动滑动）；退出面板恢复终端 adjustResize。
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN);
+        findViewById(R.id.panel_overlay).setVisibility(View.VISIBLE);
+    }
+
+    /** 关闭全屏功能面板 */
+    private void hidePanel() {
+        if (findViewById(R.id.panel_overlay).getVisibility() != View.VISIBLE) return;
+        findViewById(R.id.panel_overlay).setVisibility(View.GONE);
+        ((ViewGroup) findViewById(R.id.panel_content)).removeAllViews();
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        Runnable cb = panelOnClose;
+        panelOnClose = null;
+        if (cb != null) cb.run();
+    }
+
+    /** 返回键三级逻辑：全屏面板 → 原生会话视图 → 退出应用 */
+    @Override
+    public void onBackPressed() {
+        // 1) 功能面板打开：关面板
+        if (findViewById(R.id.panel_overlay).getVisibility() == View.VISIBLE) {
+            hidePanel();
+            return;
+        }
+        // 2) 原生会话视图：切回终端（不退出应用）
+        if (nativeViewOn) {
+            // 若软键盘弹出，第一次返回先收键盘（再按才切回终端），符合手机习惯
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            View cur = getCurrentFocus();
+            if (imm != null && cur != null && imm.isActive(cur)) {
+                imm.hideSoftInputFromWindow(cur.getWindowToken(), 0);
+                return;
+RSXM AI 渗透测试工具软件 V2.8.0                     第 14 页
+────────────────────────────────────────────────────────────────
+            }
+            exitNativeView();
+            return;
+        }
+        super.onBackPressed();
+    }
+
+    /**
+     * 软键盘全局监听：键盘弹出/收起时同步交互逻辑——
+     *  - 原生会话视图：键盘弹出自动滚到底部（输入时能看见最新消息），收起无操作；
+     *  - 终端视图：键盘弹出会压缩终端高度（adjustResize），reasonix 按新行数重绘，无需干预。
+     */
+    private void setupKeyboardListener() {
+        View root = findViewById(android.R.id.content);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            android.graphics.Rect r = new android.graphics.Rect();
+            root.getWindowVisibleDisplayFrame(r);
+            int heightDiff = root.getRootView().getHeight() - (r.bottom - r.top);
+            if (heightDiff > dp(120)) {
+                // 键盘弹出
+                if (nativeViewOn) {
+                    autoScrollBottom(true);   // 键盘弹出=用户正在输入，强制滚底
+                }
+            }
+        });
+    }
+
+    // 后台运行/YOLO/滑动速度 的开关与档位现在都放在「高级设置」二级面板内动态构建，
+    // 状态标签由 showAdvancedDialog 内部控件维护（储存 recent 引用以便刷新）。
+
+    /** 高级设置面板重建后回写开关/档位状态（无面板时无害） */
+    private void updateBgModeLabel() {
+        TextView tv = advancedBgLabel;
+        if (tv != null) {
+            boolean on = bgModeOn();
+            tv.setText(on ? "后台运行：开" : "后台运行：关");
+            tv.setTextColor(on ? 0xFFFFFFFF : 0xFFFFFFFF);
+        }
+    }
+
+    /** YOLO 免审批模式标签：开启时 reasonix 完全跳过工具审批（--permission-mode danger-full-access） */
+    private void updateYoloModeLabel() {
+        TextView tv = advancedYoloLabel;
+        if (tv != null) {
+            boolean on = getSharedPreferences("prefs", MODE_PRIVATE).getBoolean("yolo_mode", true);
+            tv.setText(on ? "YOLO 免审批：开" : "YOLO 免审批：关");
+            tv.setTextColor(on ? 0xFFFFFFFF : 0xFFFFFFFF);
+        }
+    }
+
+RSXM AI 渗透测试工具软件 V2.8.0                     第 15 页
+────────────────────────────────────────────────────────────────
+    // ---- 上下滑动调速 ----
+
+    /**
+     * 档位(1~10) → 每页滑动像素数：SCROLL_STEP = 1000 / 档位。
+     * 档位 1 → 500px/页（最慢，精细浏览）；档位 5 → 100px/页（默认）；
+     * 档位 10 → 10px/页（最快，接近原固定 8px/页的翻动速度）。
+     */
+    private static int scrollStepForSpeed(int speed) {
+        if (speed < SPEED_MIN) speed = SPEED_MIN;
+        if (speed > SPEED_MAX) speed = SPEED_MAX;
+        return 1000 / speed;
+    }
+
+    /** 把当前档位换算的 SCROLL_STEP 注入 xterm.js（JS 函数 setScrollStep 已暴露） */
+    private void applyScrollSpeed(int speed) {
+        int step = scrollStepForSpeed(speed);
+        if (webView == null) return;
+        ui.post(() -> {
+            try {
+                webView.evaluateJavascript("window.setScrollStep(" + step + ")", null);
+            } catch (Exception ignored) {}
+        });
+    }
+
+    /** 更新高级设置面板里的档位显示文本 */
+    private void updateSpeedLabel(int speed) {
+        if (advancedSpeedLabel != null) {
+            advancedSpeedLabel.setText("当前：" + speed + " 档（滑动"
+                    + (speed >= 7 ? "较快" : speed <= 3 ? "较慢" : "适中") + "）");
+        }
+    }
+
+    /** 同步 YOLO 开关到 rootfs 标记（/root/.rsxm-yolo），reasonix wrapper 每次启动时读取决定审批模式 */
+    private void syncYoloMark(boolean on) {
+        try {
+            File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+            File mark = new File(rootDir, ".rsxm-yolo");
+            if (on) {
+                if (!mark.exists()) mark.createNewFile();
+            } else {
+                mark.delete();
+            }
+            Log.d(TAG, "yolo mark " + (on ? "created" : "removed"));
+        } catch (Exception e) {
+            Log.w(TAG, "sync yolo mark failed", e);
+        }
+    }
+
+    /**
+     * 后台运行（保活）模式开关 —— 默认开启（{@link BackgroundService#BG_MODE_DEFAULT}）。
+RSXM AI 渗透测试工具软件 V2.8.0                     第 16 页
+────────────────────────────────────────────────────────────────
+     *
+     * <p>统一入口：偏好 `background_mode` 的默认值只在
+     * {@link BackgroundService#BG_MODE_DEFAULT} 里定义一次，避免各处默认值不一致出现
+     * "服务在跑但判定为关"这类分裂状态。
+     */
+    private boolean bgModeOn() {
+        return getSharedPreferences("prefs", MODE_PRIVATE)
+                .getBoolean("background_mode", BackgroundService.BG_MODE_DEFAULT);
+    }
+
+    /**
+     * 启动后台保活前台服务（后台运行模式）。
+     * requestNotifPerm=true（用户手动开启时）：顺带请求通知权限（Android 13+），
+     * 保证常驻通知可见；onCreate 自动恢复时传 false，避免打扰。
+     */
+    private void startBackgroundService(boolean requestNotifPerm) {
+        try {
+            startForegroundService(new Intent(this, BackgroundService.class));
+            Log.d(TAG, "background keep-alive service started");
+        } catch (Exception e) {
+            Log.w(TAG, "start background service failed", e);
+        }
+        if (requestNotifPerm && Build.VERSION.SDK_INT >= 33) {
+            try {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 201);
+            } catch (Exception e) {
+                Log.w(TAG, "request notification permission failed", e);
+            }
+        }
+    }
+
+    /** 停止后台保活前台服务（后台运行模式关闭） */
+    private void stopBackgroundService() {
+        try {
+            stopService(new Intent(this, BackgroundService.class));
+            Log.d(TAG, "background keep-alive service stopped");
+        } catch (Exception e) {
+            Log.w(TAG, "stop background service failed", e);
+        }
+    }
+
+    /* ==================== 侧滑菜单功能 ==================== */
+
+    /** dp 转 px */
+    private int dp(float v) {
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    /** 安装 SKILL：skill 是 reasonix 的 AI 技能包（SKILL.md 规范格式），
+     *  写入当前项目（reasonix 工作区）的 .reasonix/skills/<name>/SKILL.md，
+RSXM AI 渗透测试工具软件 V2.8.0                     第 17 页
+────────────────────────────────────────────────────────────────
+     *  reasonix 按工作区加载：<workspace>/.reasonix/skills/（默认项目 /root）,
+     *  安装后 reasonix 内 /skills reload 或重启环境即可显示 */
+    private void showSkillInstallDialog() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(12));
+        panel.addView(createDarkTip(
+                "SKILL 为 reasonix 技能包（SKILL.md），全局安装（所有项目共用，切换项目不影响）。\n"
+                        + "格式：开头 YAML frontmatter，含 name 和 description。"));
+        // ---- 新增区 ----
+        panel.addView(createDarkSectionTitle("新增 SKILL"));
+        skillNameInput = createDarkEditText("SKILL 名称（如 mytool，仅字母数字._-）",
+                InputType.TYPE_CLASS_TEXT);
+        addV(panel, skillNameInput, 6);
+        skillContentInput = new EditText(this);
+        skillContentInput.setHint("SKILL.md 内容（粘贴/导入，含 frontmatter）");
+        skillContentInput.setTextColor(0xFFE0E0E0);
+        skillContentInput.setHintTextColor(0xFF707070);
+        skillContentInput.setTextSize(13);
+        skillContentInput.setGravity(android.view.Gravity.TOP);
+        skillContentInput.setSingleLine(false);
+        skillContentInput.setMaxLines(Integer.MAX_VALUE);
+        skillContentInput.setVerticalScrollBarEnabled(true);
+        skillContentInput.setMovementMethod(new android.text.method.ScrollingMovementMethod());
+        skillContentInput.setBackgroundColor(0xFF1A1A1A);
+        skillContentInput.setPadding(dp(10), dp(10), dp(10), dp(10));
+        // 固定高度 + 内部滚动（二级滑动）：导入/粘贴大内容时内容区自己滚，不撑动整个功能页
+        LinearLayout.LayoutParams contentLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(110));
+        contentLp.topMargin = dp(6);
+        panel.addView(skillContentInput, contentLp);
+        Button importBtn = createDarkButton("从手机文件导入 SKILL.md");
+        importBtn.setOnClickListener(v -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("text/*");
+            try {
+                startActivityForResult(i, REQ_SKILL_IMPORT);
+            } catch (Exception e) {
+                pushOutput("\r\n[无法打开文件选择器: " + e.getMessage() + "]\r\n");
+            }
+        });
+        addV(panel, importBtn, 8);
+        Button installBtn = createDarkButton("安装 SKILL");
+        installBtn.setOnClickListener(v -> {
+            String name = skillNameInput.getText().toString().trim();
+            String content = skillContentInput.getText().toString();
+            if (name.isEmpty() || content.isEmpty()) {
+                pushOutput("\r\n[请填写 SKILL 名称和内容]\r\n");
+                return;
+RSXM AI 渗透测试工具软件 V2.8.0                     第 18 页
+────────────────────────────────────────────────────────────────
+            }
+            if (!name.matches("[A-Za-z0-9_.-]+")) {
+                pushOutput("\r\n[SKILL 名称仅允许字母、数字、_ . -]\r\n");
+                return;
+            }
+            installSkill(name, content);
+            // 列表刷新由 installSkill 完成回调触发（不再固定延时，避免与安装命令并发抢占 .adb-cmd/.adb-out）
+        });
+        addV(panel, installBtn, 8);
+        // ---- 查找区 ----
+        panel.addView(createDarkSectionTitle("查找"));
+        final EditText searchInput = createDarkEditText("输入名称关键字过滤",
+                InputType.TYPE_CLASS_TEXT);
+        addV(panel, searchInput, 6);
+        // ---- 已装列表区（固定高度 + 二级滑动，列表变长不会导致整个功能页滚动）----
+        panel.addView(createDarkSectionTitle("已安装 SKILL"));
+        final ScrollView listScroll = new ScrollView(this);
+        final LinearLayout listBox = new LinearLayout(this);
+        listBox.setOrientation(LinearLayout.VERTICAL);
+        listScroll.addView(listBox);
+        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(240));
+        listLp.topMargin = dp(6);
+        panel.addView(listScroll, listLp);
+        addV(panel, createDarkTip("勾选 = 启用；取消勾选 = 禁用（reasonix 隐藏）。"), 8);
+        // 刷新/查找联动
+        skillRefreshRunnable = () -> loadSkillList(listBox, searchInput.getText().toString().trim());
+        searchInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) { skillRefreshRunnable.run(); }
+            @Override public void afterTextChanged(Editable s) {}
+        });
+        skillRefreshRunnable.run();   // 初始加载列表
+        showPanel("SKILL", panel, null);
+    }
+
+    /** SKILL 列表刷新任务（安装/删除/开关后调用；面板持有当前 listBox/filter） */
+    private Runnable skillRefreshRunnable;
+
+    /** SKILL 面板输入框引用（文件导入回调填充用；面板每次重建时重新赋值） */
+    private EditText skillNameInput, skillContentInput;
+
+    /** 全局 SKILL 根目录（Reasonix home: ~/.reasonix/skills）的宿主侧路径。
+     *  SKILL 全局通用：所有项目共用（reasonix 每个项目都会加载 <Reasonix home>/skills/），
+     *  切换项目不影响；固定路径在 rootfs 内，不依赖 guest 内 /sdcard 绑定。 */
+    private File globalSkillsDir() {
+        return new File(new File(new File(getFilesDir(), "rootfs"), "root"), ".reasonix/skills");
+    }
+
+    /** 解析 guest 读出的 disabled_skills 行（形如 disabled_skills = ["a", "b"]） */
+RSXM AI 渗透测试工具软件 V2.8.0                     第 19 页
+────────────────────────────────────────────────────────────────
+    private void parseDisabled(String cfg, java.util.Set<String> disabled) {
+        if (cfg == null) return;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\[([^\\]]*)\\]").matcher(cfg);
+        if (m.find()) {
+            for (String x : m.group(1).split(",")) {
+                String n = x.trim().replace("\"", "").replace("'", "");
+                if (!n.isEmpty()) disabled.add(n);
+            }
+        }
+    }
+
+    /** 异步加载已装 SKILL 列表与启用状态，渲染到容器（支持名称过滤） */
+    private void loadSkillList(LinearLayout container, String filter) {
+        container.removeAllViews();
+        container.addView(createDarkTip("加载列表中..."));
+        new Thread(() -> {
+            try {
+                final List<String> names = new ArrayList<>();
+                final java.util.Set<String> disabled = new java.util.HashSet<>();
+                // 全局 skills 目录（~/.reasonix/skills）：宿主侧列目录，与安装/删除一致，不依赖 guest /sdcard 绑定
+                File[] dirs = globalSkillsDir().listFiles();
+                if (dirs != null) {
+                    for (File d : dirs) {
+                        String n = d.getName();
+                        if (d.isDirectory() && !n.startsWith(".")) names.add(n);
+                    }
+                }
+                // disabled 状态：config.toml 在 /root/.reasonix/（Reasonix home），仍经 guest 读
+                parseDisabled(executeInGuest(
+                        "grep -A8 '\\[skills\\]' $HOME/.reasonix/config.toml 2>/dev/null | grep disabled_skills", 10),
+                        disabled);
+                runOnUiThread(() -> renderSkillList(container, names, disabled, filter));
+            } catch (Exception e) {
+                Log.e(TAG, "load skills failed", e);
+                runOnUiThread(() -> {
+                    container.removeAllViews();
+                    container.addView(createDarkTip("（加载失败：" + e.getMessage() + "）"));
+                });
+            }
+        }, "skill-load").start();
+    }
+
+    /** 渲染 SKILL 列表（每行：名称 + 启用勾选 + 删除） */
+    private void renderSkillList(LinearLayout container, List<String> names,
+                                 java.util.Set<String> disabled, String filter) {
+        container.removeAllViews();
+        boolean has = false;
+        for (final String name : names) {
+            if (filter != null && !filter.isEmpty() && !name.contains(filter)) continue;
+            has = true;
+RSXM AI 渗透测试工具软件 V2.8.0                     第 20 页
+────────────────────────────────────────────────────────────────
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(6), 0, dp(6));
+            TextView tv = new TextView(this);
+            tv.setText(name);
+            tv.setTextColor(0xFFE0E0E0);
+            tv.setTextSize(14);
+            tv.setTypeface(null, android.graphics.Typeface.BOLD);
+            row.addView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            CheckBox cb = new CheckBox(this);
+            cb.setChecked(!disabled.contains(name));
+            cb.setText("启用");
+            cb.setTextColor(0xFFAAAAAA);
+            cb.setOnCheckedChangeListener((b, checked) -> setSkillEnabled(name, checked));
+            row.addView(cb);
+            Button del = createDarkButton("删除");
+            del.setOnClickListener(v -> {
+                uninstallSkill(name);   // 列表刷新由 uninstallSkill 完成回调触发
+            });
+            row.addView(del);
+            container.addView(row);
+        }
+        if (!has) container.addView(createDarkTip("（无匹配的已安装 SKILL）"));
+    }
+
+    /** 启用/禁用 SKILL：修改 guest 内 $HOME/.reasonix/config.toml 的 [skills] disabled_skills */
+    private void setSkillEnabled(String name, boolean enable) {
+        new Thread(() -> {
+            try {
+                String script = "import os, sys\n"
+                        + "p = '/root/.reasonix/config.toml'\n"
+                        + "name = sys.argv[1]\n"
+                        + "disable = sys.argv[2] == '1'\n"
+                        + "content = open(p).read() if os.path.exists(p) else ''\n"
+                        + "lines = content.split('\\n')\n"
+                        + "out = []\n"
+                        + "found = False\n"
+                        + "for l in lines:\n"
+                        + "    if 'disabled_skills' in l and '[' in l:\n"
+                        + "        found = True\n"
+                        + "        arr = l[l.index('[')+1:l.rindex(']')]\n"
+                        + "        names = [x.strip().strip('\\\"\\'').strip() for x in arr.split(',') if x.strip()]\n"
+                        + "        if disable and name not in names: names.append(name)\n"
+                        + "        if (not disable) and name in names: names.remove(name)\n"
+                        + "        l = 'disabled_skills = [' + ', '.join('\\\"%s\\\"' % n for n in names) + ']'\n"
+                        + "    out.append(l)\n"
+                        + "if not found:\n"
+                        + "    if '[skills]' in content:\n"
+                        + "        idx = next(i for i,l in enumerate(out) if l.strip() == '[skills]')\n"
+RSXM AI 渗透测试工具软件 V2.8.0                     第 21 页
+────────────────────────────────────────────────────────────────
+                        + "        j = idx + 1\n"
+                        + "        while j < len(out) and not out[j].strip().startswith('['): j += 1\n"
+                        + "        out.insert(j, 'disabled_skills = [' + ('\\\"%s\\\"' % name) + ']' if disable else 'disabled_skills = []')\n"
+                        + "    else:\n"
+                        + "        out += ['', '[skills]', 'disabled_skills = [' + ('\\\"%s\\\"' % name) + ']' if disable else 'disabled_skills = []']\n"
+                        + "open(p, 'w').write('\\n'.join(out))\n"
+                        + "print('OK ' + name + (' disabled' if disable else ' enabled'))\n";
+                String b64 = Base64.encodeToString(script.getBytes("UTF-8"), Base64.NO_WRAP);
+                String out = executeInGuest("echo " + b64 + " | base64 -d > /tmp/skill_toggle.py; "
+                        + "python3 /tmp/skill_toggle.py " + name + " " + (enable ? "0" : "1"), 10);
+                runOnUiThread(() -> pushOutput("\r\n[SKILL " + name + (enable ? " 已启用" : " 已禁用") + "]"
+                        + (out == null ? "" : "\n" + out) + "\r\n"));
+            } catch (Exception e) {
+                Log.e(TAG, "set skill enabled failed", e);
+                runOnUiThread(() -> pushOutput("\r\n[切换 SKILL 启用状态失败: " + e.getMessage() + "]\r\n"));
+            }
+        }, "skill-toggle").start();
+    }
+
+    /** 卸载 SKILL：删除全局 SKILL 目录 ~/.reasonix/skills/<name>（所有项目共用，切换项目不影响） */
+    private void uninstallSkill(String name) {
+        new Thread(() -> {
+            try {
+                String out;
+                File dir = new File(globalSkillsDir(), name);
+                boolean ok = deleteRecursive(dir);
+                StringBuilder sb = new StringBuilder(ok ? "UNINSTALLED_OK" : "(宿主删除失败)");
+                File[] left = globalSkillsDir().listFiles();
+                if (left != null) {
+                    for (File f : left) {
+                        if (f.isDirectory() && !f.getName().startsWith(".")) sb.append('\n').append(f.getName());
+                    }
+                }
+                out = sb.toString();
+                String msg = "\r\n[卸载 SKILL: " + name + "]\r\n"
+                        + ((out != null && out.contains("UNINSTALLED_OK"))
+                            ? "已删除。剩余 SKILL：\n" + out.replace("UNINSTALLED_OK", "").trim()
+                            : (out == null ? "(无响应)" : out)) + "\r\n";
+                runOnUiThread(() -> pushOutput(msg));
+                runOnUiThread(() -> { if (skillRefreshRunnable != null) skillRefreshRunnable.run(); });
+            } catch (Exception e) {
+                Log.e(TAG, "uninstall skill failed", e);
+                runOnUiThread(() -> pushOutput("\r\n[卸载 SKILL 失败: " + e.getMessage() + "]\r\n"));
+            }
+        }, "skill-uninstall").start();
+    }
+
+    /** 回退路径：经 guest 服务循环写入全局 SKILL（base64 避免转义/引号问题） */
+    private String guestInstallSkill(String name, String content) {
+        String b64 = android.util.Base64.encodeToString(
+RSXM AI 渗透测试工具软件 V2.8.0                     第 22 页
+────────────────────────────────────────────────────────────────
+                content.getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+        String cmd = "SK=\"/root/.reasonix/skills\"; "
+                + "mkdir -p \"$SK/" + name + "\""
+                + " && echo " + b64 + " | base64 -d > \"$SK/" + name + "/SKILL.md\""
+                + " && chmod 644 \"$SK/" + name + "/SKILL.md\""
+                + " && echo INSTALLED_OK && ls -la \"$SK/" + name + "/SKILL.md\"";
+        return executeInGuest(cmd, 12);
+    }
+
+    /** 安装 SKILL：写入全局 SKILL 目录 ~/.reasonix/skills/<name>/SKILL.md（Reasonix home skills，
+     *  所有项目共用，切换项目不影响；reasonix 内 /skills reload 或重启后显示）。
+     *  宿主侧写入 rootfs（稳定，不依赖 guest /sdcard 绑定）；宿主写入失败回退 guest 命令。 */
+    private void installSkill(String name, String content) {
+        new Thread(() -> {
+            try {
+                String out;
+                File dir = new File(globalSkillsDir(), name);
+                try {
+                    if (dir.mkdirs() || dir.isDirectory()) {
+                        java.nio.file.Files.write(new File(dir, "SKILL.md").toPath(),
+                                content.getBytes(StandardCharsets.UTF_8));
+                        out = "INSTALLED_OK\n" + new File(dir, "SKILL.md").getAbsolutePath();
+                    } else {
+                        out = guestInstallSkill(name, content);   // 宿主创建失败回退
+                    }
+                } catch (Exception e2) {
+                    Log.w(TAG, "host skill write failed, fallback guest", e2);
+                    out = guestInstallSkill(name, content);
+                }
+                String msg = "\r\n[安装 SKILL: " + name + "]\r\n"
+                        + (out == null ? "(无响应)" : out)
+                        + "\r\n[完成。SKILL 为全局安装（所有项目共用），reasonix 内 /skills reload 或重启应用环境后显示]\r\n";
+                runOnUiThread(() -> pushOutput(msg));
+                runOnUiThread(() -> { if (skillRefreshRunnable != null) skillRefreshRunnable.run(); });
+            } catch (Exception e) {
+                Log.e(TAG, "install skill failed", e);
+                runOnUiThread(() -> pushOutput("\r\n[安装 SKILL 失败: " + e.getMessage() + "]\r\n"));
+            }
+        }, "skill-install").start();
+    }
+
+    /** 解析 SKILL.md frontmatter 中的 name（开头 --- 到下一个 --- 之间的 name: 行），无则返回 null */
+    private String parseSkillName(String content) {
+        if (content == null) return null;
+        String c = content.trim();
+        if (!c.startsWith("---")) return null;
+        int end = c.indexOf("\n---", 3);
+        if (end < 0) return null;
+        String fm = c.substring(3, end);
+        for (String l : fm.split("\n")) {
+RSXM AI 渗透测试工具软件 V2.8.0                     第 23 页
+────────────────────────────────────────────────────────────────
+            String t = l.trim();
+            if (t.startsWith("name:")) {
+                String n = t.substring(5).trim().replace("\"", "").replace("'", "").trim();
+                if (!n.isEmpty()) return n;
+            }
+        }
+        return null;
+    }
+
+    /** 从手机文件导入 SKILL.md（SAF 免存储权限）：读取内容 → 解析 frontmatter name →
+     *  填入表单（名称+内容）由用户确认，安装仍由「安装 SKILL」按钮触发 */
+    private void importSkillFromUri(Uri uri) {
+        new Thread(() -> {
+            try {
+                String content;
+                try (InputStream is = getContentResolver().openInputStream(uri)) {
+                    if (is == null) {
+                        runOnUiThread(() -> pushOutput("\r\n[导入失败: 无法读取所选文件]\r\n"));
+                        return;
+                    }
+                    BufferedReader r = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = r.readLine()) != null) sb.append(line).append('\n');
+                    content = sb.toString();
+                }
+                if (content == null || content.trim().isEmpty()) {
+                    runOnUiThread(() -> pushOutput("\r\n[导入失败: 文件为空]\r\n"));
+                    return;
+                }
+                final String name = parseSkillName(content);
+                final String finalContent = content;
+                runOnUiThread(() -> {
+                    // v2.0.25：SAF 选择期间面板可能已关/重建——面板已关时字段引用指向脱离
+                    // View，填进去用户看不到还提示"已导入"。面板未开则放弃填充。
+                    if (findViewById(R.id.panel_overlay).getVisibility() != View.VISIBLE) {
+                        pushOutput("\r\n[SKILL 已取消（面板已关闭），重新打开面板再导入]\r\n");
+                        return;
+                    }
+                    if (skillNameInput != null) skillNameInput.setText(name == null ? "" : name);
+                    if (skillContentInput != null) skillContentInput.setText(finalContent);
+                    pushOutput("\r\n[已导入" + (name != null ? " " + name : "") + "，检查后点「安装 SKILL」完成安装]\r\n");
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "import skill failed", e);
+                runOnUiThread(() -> pushOutput("\r\n[导入 SKILL 文件失败: " + e.getMessage() + "]\r\n"));
+            }
+        }, "skill-import").start();
+    }
+
+RSXM AI 渗透测试工具软件 V2.8.0                     第 24 页
+────────────────────────────────────────────────────────────────
+    /* ==================== 项目位置 ==================== */
+
+    /** 项目：reasonix 工作目录（会话/记忆按项目隔离），可建在内部或手机目录（/sdcard），切换后重启生效 */
+    private void showProjectDialog() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(12));
+        panel.addView(createDarkTip(
+                "项目为 reasonix 工作目录（会话/记忆按项目隔离）。\n"
+                        + "「进入」切换（重启生效）；「删除」移除。可建内部或手机目录（文件管理器可见）。"));
+        final TextView curView = new TextView(this);
+        curView.setTextColor(0xFFFFFFFF);
+        curView.setTextSize(14);
+        curView.setTypeface(null, android.graphics.Typeface.BOLD);
+        curView.setPadding(dp(2), dp(8), dp(2), dp(4));
+        addV(panel, curView, 6);
+        // 项目列表（内置 + 手机分组渲染，每行 名称/进入/删除；固定高度 + 二级滑动）
+        panel.addView(createDarkSectionTitle("项目列表"));
+        final ScrollView listScroll = new ScrollView(this);
+        final LinearLayout listBox = new LinearLayout(this);
+        listBox.setOrientation(LinearLayout.VERTICAL);
+        listScroll.addView(listBox);
+        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(290));
+        listLp.topMargin = dp(6);
+        panel.addView(listScroll, listLp);
+        // 新增区
+        panel.addView(createDarkSectionTitle("新建项目"));
+        final EditText newInput = createDarkEditText("新项目名称（如 myapp，字母数字._-）",
+                InputType.TYPE_CLASS_TEXT);
+        addV(panel, newInput, 6);
+        Button newSdcardBtn = createDarkButton("在手机目录创建并进入");
+        newSdcardBtn.setOnClickListener(v -> {
+            String name = newInput.getText().toString().trim();
+            if (checkProjectName(name)) createProject(name, true, curView, listBox);
+        });
+        addV(panel, newSdcardBtn, 8);
+        Button newInnerBtn = createDarkButton("在内部创建并进入");
+        newInnerBtn.setOnClickListener(v -> {
+            String name = newInput.getText().toString().trim();
+            if (checkProjectName(name)) createProject(name, false, curView, listBox);
+        });
+        addV(panel, newInnerBtn, 8);
+        Button defaultBtn = createDarkButton("恢复默认（/root）");
+        defaultBtn.setOnClickListener(v -> {
+            try {
+                File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+                new File(rootDir, ".rsxm-project").delete();
+                pushOutput("\r\n[已恢复默认项目 /root，重启后生效]\r\n");
+                loadProjectList(curView, listBox);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 25 页
+────────────────────────────────────────────────────────────────
+            } catch (Exception e) {
+                Log.e(TAG, "reset project failed", e);
+            }
+        });
+        addV(panel, defaultBtn, 8);
+        Button refreshBtn = createDarkButton("刷新项目列表");
+        refreshBtn.setOnClickListener(v -> loadProjectList(curView, listBox));
+        addV(panel, refreshBtn, 8);
+        loadProjectList(curView, listBox);
+        showPanel("项目", panel, null);
+    }
+
+    /** 会话面板：列出 ~/.reasonix/projects/<项目>/sessions/ 下的历史会话（聊天记录），
+     *  按项目分组显示（时间 + 预览）。点击「继续」写 /root/.rsxm-resume 标记并重启环境，
+     *  entry.sh wrapper 用 `--resume <jsonl路径>` 恢复该会话；「删除」移入 sessions/.trash 回收站；
+     *  「新建会话」清除恢复标记后重启，进入全新会话。 */
+    private void showSessionsDialog() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(12));
+        panel.addView(createDarkTip(
+                "reasonix 会话（聊天记录）按项目保存在 ~/.reasonix/projects/<项目>/sessions/，"
+                        + "退出 reasonix 即自动保存；serve/GUI 会话同样落盘（文件 <时间戳>-<模型>.jsonl，"
+                        + "标题取首条消息）。\n"
+                        + "「继续」恢复该会话聊天（重启环境生效）；「删除」移入回收站；「新建会话」开始全新对话。"));
+        panel.addView(createDarkSectionTitle("历史会话"));
+        final ScrollView listScroll = new ScrollView(this);
+        final LinearLayout listBox = new LinearLayout(this);
+        listBox.setOrientation(LinearLayout.VERTICAL);
+        listScroll.addView(listBox);
+        LinearLayout.LayoutParams listLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(300));
+        listLp.topMargin = dp(6);
+        panel.addView(listScroll, listLp);
+        Button newBtn = createDarkButton("新建会话（清除恢复标记，重启进入全新会话）");
+        newBtn.setOnClickListener(v -> {
+            try {
+                File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+                new File(rootDir, ".rsxm-resume").delete();
+                pushOutput("\r\n[已清除会话恢复标记，重启后开始全新会话]\r\n");
+                restartEnvironment();
+            } catch (Exception e) {
+                Log.e(TAG, "new session failed", e);
+            }
+        });
+        addV(panel, newBtn, 8);
+        Button refreshBtn = createDarkButton("刷新会话列表");
+        refreshBtn.setOnClickListener(v -> loadSessions(listBox));
+        addV(panel, refreshBtn, 8);
+        loadSessions(listBox);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 26 页
+────────────────────────────────────────────────────────────────
+        showPanel("会话", panel, null);
+    }
+
+    /** 宿主侧遍历 rootfs 的 ~/.reasonix/projects 下各项目 sessions 目录中的 .jsonl 会话文件
+     *  （排除回收站、恢复分支、隐藏文件），按项目分组渲染：每行「时间 + 预览」+ 继续/删除按钮。 */
+    private void loadSessions(LinearLayout container) {
+        container.removeAllViews();
+        container.addView(createDarkTip("加载中..."));
+        new Thread(() -> {
+            try {
+                File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+                File projectsDir = new File(new File(rootDir, ".reasonix"), "projects");
+                final java.util.List<String[]> groups = new java.util.ArrayList<>(); // {项目标签, jsonl绝对路径, 时间, 预览}
+                if (projectsDir.isDirectory()) {
+                    File[] pds = projectsDir.listFiles(File::isDirectory);
+                    if (pds != null) {
+                        java.util.Arrays.sort(pds, java.util.Comparator.comparing(File::getName));
+                        for (File pd : pds) {
+                            File sessions = new File(pd, "sessions");
+                            // 只认会话主文件 *.jsonl（v1.39 新格式 <时间戳>-<模型>.jsonl，serve/GUI 会话
+                            // 同样落盘；旧格式 <id>.jsonl 兼容）：排除 events/turns/conflicts 事件流
+                            // （不含 role/content/model，且 lastModified 更新，一旦被选中就会挤掉
+                            // 真正的会话文件——GUI 无气泡、无模型名）
+                            File[] files = sessions.listFiles((d, n) ->
+                                    n.endsWith(".jsonl") && !n.startsWith(".")
+                                            && !n.endsWith(".events.jsonl") && !n.endsWith(".conflicts.jsonl")
+                                            && !n.endsWith(".turns.jsonl")
+                                            && !n.endsWith(".recovery.json") && !n.endsWith(".recovery")
+                                            && !n.contains(".lease."));
+                            if (files == null || files.length == 0) continue;
+                            java.util.Arrays.sort(files, java.util.Comparator.comparingLong(File::lastModified).reversed());
+                            String label = projectLabel(pd.getName());
+                            for (File f : files) {
+                                groups.add(new String[]{label, f.getAbsolutePath(),
+                                        fmtSessionTime(f.lastModified()), sessionPreview(f)});
+                            }
+                        }
+                    }
+                }
+                runOnUiThread(() -> {
+                    container.removeAllViews();
+                    if (groups.isEmpty()) {
+                        container.addView(createDarkTip("（暂无历史会话，reasonix 会话会自动保存到这里）"));
+                        return;
+                    }
+                    String lastProj = null;
+                    for (String[] g : groups) {
+                        if (!g[0].equals(lastProj)) {
+                            lastProj = g[0];
+                            TextView t = new TextView(this);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 27 页
+────────────────────────────────────────────────────────────────
+                            t.setText("项目 " + g[0]);
+                            t.setTextColor(0xFFFFFFFF);
+                            t.setTextSize(13);
+                            t.setTypeface(null, android.graphics.Typeface.BOLD);
+                            t.setPadding(0, dp(10), 0, dp(2));
+                            container.addView(t);
+                        }
+                        container.addView(sessionRow(g, container));
+                    }
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "load sessions failed", e);
+                runOnUiThread(() -> {
+                    container.removeAllViews();
+                    container.addView(createDarkTip("（加载失败：" + e.getMessage() + "）"));
+                });
+            }
+        }, "session-load").start();
+    }
+
+    /** 会话行：时间 + 预览 + 「继续」「删除」 */
+    private View sessionRow(String[] g, LinearLayout container) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setBackgroundColor(0xFF141414);
+        row.setPadding(dp(10), dp(6), dp(10), dp(6));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rp.bottomMargin = dp(4);
+        row.setLayoutParams(rp);
+        TextView info = new TextView(this);
+        info.setText(g[2] + "\n" + g[3]);
+        info.setTextColor(0xFFE0E0E0);
+        info.setTextSize(13);
+        info.setLineSpacing(0, 1.1f);
+        row.addView(info);
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        Button cont = createDarkButton("继续");
+        cont.setOnClickListener(v -> {
+            try {
+                File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+                // guest 内路径：rootDir（宿主 rootfs/root）对应 guest /root
+                String abs = new File(g[1]).getAbsolutePath();
+                String rel = abs.substring(rootDir.getAbsolutePath().length());
+                String guestPath = "/root" + rel;
+                java.nio.file.Files.write(new File(rootDir, ".rsxm-resume").toPath(),
+                        guestPath.getBytes(StandardCharsets.UTF_8));
+                pushOutput("\r\n[恢复会话: " + g[0] + " " + g[2] + "]\r\n");
+                restartEnvironment();
+RSXM AI 渗透测试工具软件 V2.8.0                     第 28 页
+────────────────────────────────────────────────────────────────
+            } catch (Exception e) {
+                Log.e(TAG, "resume session failed", e);
+                pushOutput("\r\n[恢复失败: " + e.getMessage() + "]\r\n");
+            }
+        });
+        Button del = createDarkButton("删除");
+        del.setOnClickListener(v -> {
+            final File f = new File(g[1]);
+            // 后台线程执行：chroot 模式会话为 root 属主 600，renameTo 必失败且 root 桥 su 可能耗时数秒，不能阻塞 UI
+            new Thread(() -> {
+                try {
+                    File trash = new File(f.getParentFile(), ".trash");
+                    trash.mkdirs();
+                    boolean ok = f.renameTo(new File(trash, f.getName()));
+                    if (!ok) {
+                        // v2.0.25 修复：trash 同名文件时 busybox mv 会静默覆盖，回收站旧会话丢失——
+                        // 用 mv -n 禁覆盖 + 冲突时目标名追加时间戳
+                        String tgt = sq(trash.getAbsolutePath() + "/" + f.getName());
+                        String o = execRootCommand("mkdir -p '" + sq(trash.getAbsolutePath())
+                                + "' && mv -n '" + sq(f.getAbsolutePath()) + "' '" + tgt + "' 2>&1"
+                                + " && (! test -e '" + sq(f.getAbsolutePath()) + "' && echo TRASH_MOVED_OK)", 10);
+                        ok = o != null && o.contains("TRASH_MOVED_OK");
+                        if (!ok) {
+                            // 同名冲突兜底：目标改名（加时间戳）再移
+                            o = execRootCommand("mv '" + sq(f.getAbsolutePath()) + "' '"
+                                    + sq(trash.getAbsolutePath() + "/" + f.getName() + "."
+                                    + System.currentTimeMillis()) + "' 2>&1 && echo TRASH_MOVED_OK", 10);
+                            ok = o != null && o.contains("TRASH_MOVED_OK");
+                        }
+                    }
+                    final boolean r = ok;
+                    runOnUiThread(() -> {
+                        pushOutput("\r\n[会话" + (r ? "已移入回收站" : "删除失败") + ": " + g[2] + "]\r\n");
+                        loadSessions(container);
+                    });
+                } catch (Exception e) {
+                    Log.e(TAG, "delete session failed", e);
+                }
+            }, "session-del").start();
+        });
+        btns.addView(cont);
+        btns.addView(del);
+        row.addView(btns);
+        return row;
+    }
+
+    /** 项目 key 目录名 → 可读项目路径（reasonix key = 路径转义：\\→-、冒号去掉、字母小写；
+     *  仅解码已知前缀，其余原样显示） */
+    private static String projectLabel(String key) {
+        String k = key.toLowerCase(java.util.Locale.US);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 29 页
+────────────────────────────────────────────────────────────────
+        if (k.startsWith("-sdcard-reasonixprojects-"))
+            return "/sdcard/ReasonixProjects/" + key.substring("-sdcard-ReasonixProjects-".length());
+        if (k.startsWith("-root-"))
+            return "/root/" + key.substring("-root-".length());
+        if (k.equals("-root")) return "/root";
+        return key;
+    }
+
+    /** 会话时间：文件最后修改时间 → "MM-dd HH:mm" */
+    private static String fmtSessionTime(long t) {
+        return java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm")
+                .format(java.time.Instant.ofEpochMilli(t).atZone(java.time.ZoneId.systemDefault()));
+    }
+
+    /** shell 单引号转义（root 桥命令拼接防注入/防路径含引号破坏命令） */
+    private static String sq(String s) {
+        return s.replace("'", "'\\''");
+    }
+
+    /** 会话预览：jsonl 第一条 user 消息文本（截断 50 字符）。
+     *  chroot 模式下会话为 root 属主 600，宿主直读失败时经 root 桥 chmod 后重读。 */
+    private String sessionPreview(File f) {
+        byte[] head = readSessionHead(f);
+        if (head == null) return "(读取失败，无 root 权限)";
+        String text = new String(head, StandardCharsets.UTF_8);
+        for (String line : text.split("\n")) {
+            line = line.trim();
+            if (!line.startsWith("{")) continue;
+            try {
+                org.json.JSONObject o = new org.json.JSONObject(line);
+                if ("user".equals(o.optString("role"))) {
+                    Object c = o.opt("content");
+                    String s = (c instanceof String) ? (String) c : String.valueOf(c);
+                    s = s.replaceAll("\\s+", " ").trim();
+                    if (s.length() > 50) s = s.substring(0, 50) + "…";
+                    return s.isEmpty() ? "(空)" : s;
+                }
+            } catch (Exception ignore) { }
+        }
+        return "(无文本内容)";
+    }
+
+    /** 读会话文件头部（前 64KB）；宿主直读失败（chroot 模式 root 属主 600）→ root 桥 chmod 后重读 */
+    private byte[] readSessionHead(File f) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try (java.io.FileInputStream in = new java.io.FileInputStream(f)) {
+                byte[] buf = new byte[65536];
+                int n = in.read(buf);
+                byte[] out = new byte[Math.max(n, 0)];
+                if (n > 0) System.arraycopy(buf, 0, out, 0, n);
+RSXM AI 渗透测试工具软件 V2.8.0                     第 30 页
+────────────────────────────────────────────────────────────────
+                return out;
+            } catch (Exception e) {
+                if (attempt == 0) {
+                    execRootCommand("chmod a+r '" + sq(f.getAbsolutePath()) + "' 2>/dev/null", 8);
+                } else {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 加载项目列表（内置 /root 与手机 /sdcard/ReasonixProjects），渲染到容器 */
+    private void loadProjectList(TextView curView, LinearLayout container) {
+        container.removeAllViews();
+        container.addView(createDarkTip("加载中..."));
+        new Thread(() -> {
+            try {
+                File rootDir = new File(new File(getFilesDir(), "rootfs"), "root");
+                String cur = "默认（/root）";
+                File mark = new File(rootDir, ".rsxm-project");
+                if (mark.exists()) {
+                    String s = new String(java.nio.file.Files.readAllBytes(mark.toPath()),
+                            StandardCharsets.UTF_8).trim();
+                    if (!s.isEmpty()) cur = s;
+                }
+                // 内置项目 = /root/ 下用户创建的目录（~/.reasonix/projects/ 是 reasonix 自动生成的
+                // 项目元数据/会话目录，手机项目也会触发，不再混入列表）
+                String out = executeInGuest(
+                        "echo [内部]:; ls -d /root/*/ 2>/dev/null | sed 's|/root/||; s|/$||';", 10);
+                final List<String> inner = new ArrayList<>();
+                final List<String> sdcard = new ArrayList<>();
+                if (out != null) {
+                    boolean inInner = false;
+                    for (String l : out.split("\n")) {
+                        String t = l.trim();
+                        if (t.equals("[内部]:")) { inInner = true; continue; }
+                        if (inInner && !t.isEmpty() && !t.contains("error")) inner.add(t);
+                    }
+                }
+                // 手机目录：宿主侧直接读真存储（chroot 内写 /sdcard 会被 mount namespace 隔离，
+                // 宿主文件管理器不可见；宿主 File API 读写才是文件管理器可见的目录）
+                File sdcardProj = new File("/storage/emulated/0/ReasonixProjects");
+                if (sdcardProj.isDirectory()) {
+                    String[] list = sdcardProj.list();
+                    if (list != null) {
+                        for (String n : list) {
+                            if (!n.startsWith(".")) sdcard.add(n);
+                        }
+                    }

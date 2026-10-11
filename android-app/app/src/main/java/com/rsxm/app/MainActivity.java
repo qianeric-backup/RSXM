@@ -7533,7 +7533,7 @@ public class MainActivity extends Activity {
         try {
             // 1) 先解到 app 私有目录（必然可写）：既是复制的源，也让 root 回退路径有源文件可用
             File staged = new File(getFilesDir(), "reasonix.staged");
-            extractAsset("usr/bin/reasonix", staged);
+            extractAssetXz("usr/bin/reasonix.xz", staged);   // asset 为 xz（轻量化），解压后 49545378 字节
             staged.setReadable(true, false);      // root 回退时 su 进程需要能读它
             boolean ok = false;
             try {
@@ -7567,19 +7567,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 内置 reasonix 的字节数（assets 流式读一次后缓存；用于判断 guest 内是否为内置版本） */
-    private long bundledReasonixBytes = -1;
+    /** 内置 reasonix 解压后字节数（必须与 assets/usr/bin/reasonix.xz 的解压产物一致；
+     *  asset 以 xz 存储，流式统计得到的是压缩字节数，无法用于 guest 版本判定） */
+    private static final long BUNDLED_REASONIX_BYTES = 49545378L;
 
     private long bundledReasonixSize() {
-        if (bundledReasonixBytes > 0) return bundledReasonixBytes;
-        try (InputStream in = getAssets().open("usr/bin/reasonix")) {
-            long n = 0;
-            byte[] buf = new byte[65536];
-            int r;
-            while ((r = in.read(buf)) > 0) n += r;
-            bundledReasonixBytes = n;
-        } catch (Exception ignored) {}
-        return bundledReasonixBytes;
+        return BUNDLED_REASONIX_BYTES;
     }
 
     /**
@@ -8555,7 +8548,7 @@ public class MainActivity extends Activity {
         File bridge = new File(rootfs, "usr/bin/pty-bridge");
         bridge.getParentFile().mkdirs();
         bridge.delete();
-        extractAsset("usr/bin/pty-bridge", bridge);
+        extractAssetXz("usr/bin/pty-bridge.xz", bridge);   // asset 为 xz（轻量化）
         bridge.setExecutable(true, false);
         // entry.sh
         File entry = new File(rootfs, "root/entry.sh");
@@ -8735,7 +8728,7 @@ public class MainActivity extends Activity {
         ensureBundledPluginDeployed(rootfs);   // 内置插件（破甲内核）：首次安装即就位（带版本标记，后续启动不重解压）
         File bridge = new File(rootfs, "usr/bin/pty-bridge");
         bridge.delete();   // 防残留 exec 导致 ETXTBSY（unlink 正在执行的 inode 合法）
-        extractAsset("usr/bin/pty-bridge", bridge);
+        extractAssetXz("usr/bin/pty-bridge.xz", bridge);   // asset 为 xz（轻量化）
         bridge.setExecutable(true, false);
 
         // 4. 启动脚本
@@ -9049,6 +9042,20 @@ public class MainActivity extends Activity {
             byte[] buf = new byte[65536];
             int n;
             while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        }
+    }
+
+    /** 解包 assets 内 .xz 压缩单文件到目标（reasonix/pty-bridge 轻量化存储，部署时流式解压） */
+    private void extractAssetXz(String asset, File dest) throws IOException {
+        dest.getParentFile().mkdirs();
+        try (InputStream in = getAssets().open(asset);
+             org.tukaani.xz.XZInputStream xz = new org.tukaani.xz.XZInputStream(in);
+             FileOutputStream out = new FileOutputStream(dest)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = xz.read(buf)) > 0) {
                 out.write(buf, 0, n);
             }
         }

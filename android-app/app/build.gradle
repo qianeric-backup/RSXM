@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.6.0 — 品牌与软著命名体系）
-        versionCode 87
-        versionName "2.6.0"
+        // 版本随 GitHub Release 同步更新（当前 v2.7.0 — 小乘佛众品牌 + 最轻量化 xz）
+        versionCode 88
+        versionName "2.7.0"
     }
 
     buildTypes {
@@ -44,6 +44,8 @@ android {
 dependencies {
     // DrawerLayout（侧滑菜单）
     implementation 'androidx.drawerlayout:drawerlayout:1.2.0'
+    // XZ：assets 内 reasonix/pty-bridge 以 .xz 存储（安装包轻量化，部署时流式解压）
+    implementation 'org.tukaani:xz:1.9'
     // Shizuku：以 Shizuku 的 adb/root 权限执行命令，持久化 adb（app 关闭后仍可用，替代保活）。
     // 用 12.x（provider 独立模块随 APK 打包，未装 Shizuku 的设备不崩溃）
     implementation 'dev.rikka.shizuku:api:12.1.0'

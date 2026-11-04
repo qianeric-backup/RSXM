@@ -1,6 +1,6 @@
-# ⚔️ dsh purge（DeepSeek Harness 网络安全红队评测插件）· RSXM 融合版 v1.1.35
+# ⚔️ dsh purge（DeepSeek Harness 网络安全红队评测插件）· RSXM 融合版 v1.2.1
 
-本面板由上游 [YuJunZhiXue/dsh-purge](https://github.com/YuJunZhiXue/dsh-purge) v1.1.35（MIT）的宿主侧栏 UI（清洗 / 演练台 双页）融合进 RSXM 原生界面而来。
+本面板由上游 [YuJunZhiXue/dsh-purge](https://github.com/YuJunZhiXue/dsh-purge) v1.2.1（MIT）的宿主侧栏 UI（清洗 / 演练台 双页）融合进 RSXM 原生界面而来。
 
 ## 在本应用中的映射
 

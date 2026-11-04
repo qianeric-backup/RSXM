@@ -88,7 +88,7 @@ public class MainActivity extends Activity {
     private static final int REQ_IMPORT_ENV_TEMPLATE = 203;
     /** 官方更新源：@reasonix/cli-linux-arm64（npm 平台二进制包，npmmirror 国内镜像） */
     private static final String REASONIX_DEFAULT_URL =
-            "https://registry.npmmirror.com/@reasonix/cli-linux-arm64/-/cli-linux-arm64-1.31.4.tgz";
+            "https://registry.npmmirror.com/@reasonix/cli-linux-arm64/-/cli-linux-arm64-2.57.0.tgz";
     /**
      * 上下滑动调速档位：1~10（prefs 键 scroll_speed，默认 5）。
      * 档位越小滑动越慢：SCROLL_STEP = 档位换算的每页滑动像素数
@@ -2494,10 +2494,10 @@ public class MainActivity extends Activity {
         }, "gh-user").start();
     }
 
-    /* ==================== dsh purge（宿主清洗台 + 演练台，融合 dsh-purge v1.1.35 侧栏 UI） ==================== */
+    /* ==================== dsh purge（宿主清洗台 + 演练台，融合 dsh-purge v1.2.1 侧栏 UI） ==================== */
 
     /** purge 面板版本与偏好键 */
-    private static final String PURGE_VER = "v1.1.35";
+    private static final String PURGE_VER = "v1.2.1";
     private static final String PURGE_DRILL_OK = "purge_drill_ok";       // 演练台已授权
 
     /** 清洗页补丁定义：RSXM 宿主策略补丁（映射 dsh-purge「清洗 → 补丁」）。
@@ -8029,7 +8029,7 @@ public class MainActivity extends Activity {
     }
 
     /** 内置 reasonix 版本（必须与 assets/usr/bin/reasonix 一致；UI 显示与部署记录都用它） */
-    private static final String BUNDLED_REASONIX_VERSION = "1.39.3";
+    private static final String BUNDLED_REASONIX_VERSION = "2.57.0";
 
     /** 当前 APK 的 versionName（作为"内置资源已部署"的标记值） */
     private String appVersionName() {
@@ -8091,7 +8091,7 @@ public class MainActivity extends Activity {
 
     /** 内置 reasonix 解压后字节数（必须与 assets/usr/bin/reasonix.xz 的解压产物一致；
      *  asset 以 xz 存储，流式统计得到的是压缩字节数，无法用于 guest 版本判定） */
-    private static final long BUNDLED_REASONIX_BYTES = 49545378L;
+    private static final long BUNDLED_REASONIX_BYTES = 50069666L;
 
     private long bundledReasonixSize() {
         return BUNDLED_REASONIX_BYTES;

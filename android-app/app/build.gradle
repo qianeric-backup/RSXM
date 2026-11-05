@@ -10,9 +10,9 @@ android {
         applicationId "com.rsxm.app"
         minSdk 26
         targetSdk 34
-        // 版本随 GitHub Release 同步更新（当前 v2.9.0 — 组件版本全面更新（reasonix 2.57.0 / dsh-purge 1.2.1））
-        versionCode 90
-        versionName "2.9.0"
+        // 版本随 GitHub Release 同步更新（当前 v2.9.1 — reasonix 2.57.0 适配修复（serve --permission-mode 移除））
+        versionCode 91
+        versionName "2.9.1"
     }
 
     buildTypes {

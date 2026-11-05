@@ -7571,7 +7571,7 @@ public class MainActivity extends Activity {
                     TextView s = serveStatusView;
                     if (s != null) {
                         s.setText("✗ serve 启动" + (spawned ? "超时：请先在环境里安装/更新 reasonix" : "失败：环境未就绪")
-                                + "（日志 /root/.rsxm-serve.log）");
+                                + "（日志 /root/.rsxm-serve.log；可执行 reasonix session list --json / reasonix doctor 排查）");
                         s.setTextColor(0xFFFFFFFF);
                     }
                 }
@@ -9922,10 +9922,10 @@ public class MainActivity extends Activity {
                 // 纯变量展开，不执行外部命令（诊断卡片里能看到实际跑的是哪一份）
                 + "echo \"[rsxm] RX=$RX\"; "
                 + "nohup \"$RX\" \"$(printf 'ser''ve')\" --addr 127.0.0.1:8787 --auth token "
-                // Full access：Android 无 bubblewrap 时 serve 会拒绝非受限运行
-                // （"shell sandbox requested but unavailable… refusing to run unconfined"），
-                // 显式 --permission-mode danger-full-access 选择非受限会话
-                + "--permission-mode danger-full-access "
+                // reasonix 2.57.0 已移除 --permission-mode flag（实测 serve 报
+                // "flag provided but not defined: -permission-mode" 直接退出）；
+                // 无该 flag 时 serve 在无 bubblewrap 环境（Android/proot）正常启动并响应，
+                // 故不再传（旧注释：显式 --permission-mode danger-full-access 选非受限会话）
                 + "--token-file " + ReasonixServe.TOKEN_FILE_GUEST + " "
                 + "--port-file " + ReasonixServe.PORT_FILE_GUEST + " "
                 + "--pid-file " + ReasonixServe.PID_FILE_GUEST + " "

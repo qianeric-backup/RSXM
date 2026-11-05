@@ -395,6 +395,30 @@
                         android:textSize="15sp" />
 
                     <TextView
+                        android:id="@+id/menu_root"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="#141414"
+                        android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="ROOT 调试"
+                        android:textColor="#FFFFFF"
+                        android:textSize="15sp" />
+
+                    <TextView
+                        android:id="@+id/menu_serve"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="#141414"
+                        android:layout_marginTop="1dp"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="16dp"
+                        android:text="Serve 模式"
+                        android:textColor="#FFFFFF"
+                        android:textSize="15sp" />
+
+                    <TextView
                         android:id="@+id/menu_advanced"
                         android:layout_width="match_parent"
                         android:layout_height="48dp"

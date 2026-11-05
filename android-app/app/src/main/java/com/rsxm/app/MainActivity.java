@@ -218,10 +218,11 @@ public class MainActivity extends Activity {
         }, 4000);
 
         // 标题栏已移除：侧滑菜单入口改由快捷栏「菜单」提供（btn_menu 已从布局删除，防旧布局兼容保留空判断）
-        findViewById(R.id.qb_menu).setOnClickListener(v ->
-                drawerLayout.openDrawer(GravityCompat.START, false));
+        // 注：qb_menu 绑定统一在下方「顶边栏」注释处完成，此处不重复绑定（旧实现重复 setOnClickListener，后者覆盖前者）
         // 侧滑菜单：一级高频入口；视图切换/高级设置 亦在一级
         findViewById(R.id.menu_adb).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showAdbDialog(); });
+        findViewById(R.id.menu_root).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showRootDialog(); });
+        findViewById(R.id.menu_serve).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showServeDialog(); });
         findViewById(R.id.menu_apikey).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showApiKeyConfigDialog(); });
         findViewById(R.id.menu_github).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showGitHubDialog(); });
         findViewById(R.id.menu_ds2api).setOnClickListener(v -> { drawerLayout.closeDrawer(GravityCompat.START, false); showDs2ApiDialog(); });
@@ -5025,16 +5026,16 @@ public class MainActivity extends Activity {
         panel.setPadding(dp(16), dp(8), dp(16), dp(16));
         addV(panel, createDarkTip("以下为二级功能入口：点击进入对应设置页（返回箭头关闭本面板）。"), 0);
 
-        // ROOT
+        // 系统
         addV(panel, createDarkSectionTitle("系统"), 10);
-        addV(panel, createDarkMenuRow("ROOT", "手机 root 权限（KernelSU/Magisk）授权与测试", null, () -> showRootDialog()), 4);
         addV(panel, createDarkMenuRow("开发环境", "安装 Python/Node 等 apk 开发工具包", null, () -> showDevEnvDialog()), 4);
 
         // AI 能力
         addV(panel, createDarkSectionTitle("AI 能力"), 12);
         addV(panel, createDarkMenuRow("SKILL", "安装/管理 reasonix 技能", null, () -> showSkillInstallDialog()), 4);
         addV(panel, createDarkMenuRow("MCP 服务器", "管理当前项目 .mcp.json", null, () -> showMcpDialog()), 4);
-        addV(panel, createDarkMenuRow("Serve 模式（无头对话）", "结构化对话/历史回显/回溯/审批，不依赖终端 TUI", null, () -> showServeDialog()), 4);
+        // 注：ROOT 调试 / Serve 模式已提升至侧滑菜单一级入口（menu_root / menu_serve），
+        // 本面板不再重复放置，保持「每个功能单一路由」。
 
         // 运行模式
         addV(panel, createDarkSectionTitle("运行模式"), 12);
@@ -7410,8 +7411,9 @@ public class MainActivity extends Activity {
         panel.setPadding(dp(16), dp(8), dp(16), dp(12));
 
         panel.addView(createDarkTip("Serve 模式：reasonix serve 无头 HTTP 引擎（JSON 接口，无 TUI 依赖）。\n"
-                + "GUI 会话数据自动适配契约：优先 transcript 投影；reasonix 1.38/1.39 无此契约时"
-                + "自动回退 /events + /history（本版内置 1.39.3 即回退模式）。checkpoint 回溯/审批切换可用。"));
+                + "GUI 会话数据适配 2.57.0 实测契约：/transcript 系列端点已移除，自动走 /events + /history"
+                + "通道；POST /submit {\"input\"} 受理、/new {}/cancel {} 开新会话/停止、/status 轮询 running、"
+                + "checkpoint 回溯/审批切换可用。无 API Key 时 /submit 返回 409（agent 不可运行）。"));
 
         final TextView status = createDarkResult();
         status.setMaxLines(3);
